@@ -84,7 +84,7 @@
         typeof CURRENT_WORKSPACE_ID === 'string' ? CURRENT_WORKSPACE_ID : 'default'
     );
 
-    const controller = api.create({
+    const runtime = {
         getElement: id => doc.getElementById(id),
         setBodyClass: (name, on) => doc.body?.classList?.toggle(name, on),
         activeElement: () => doc.activeElement,
@@ -220,7 +220,10 @@
             root.GridVibeAgentCrews?.createWireLayer?.(options) || null
         ),
         logError: (message, error) => console.error(message, error)
-    });
+    };
+    const controller = api.create(runtime);
+    /* Same list, decorations and lane layer; the dialog owns its poll. */
+    root.createAgentDashboardList = options => api.create({ ...runtime, ...options });
 
     root.wireAgentDashboardSidebar = () => controller.wire();
     root.toggleAgentDashboardSidebar = event => {
@@ -350,6 +353,7 @@
                 <span class="dash-agent-who">${esc(render.agentName(pane))}</span>
                 <span class="dash-agent-line">${esc(render.line(pane))}</span>
                 <span class="dash-agent-crew"></span>
+                <span class="dash-agent-selection"></span>
                 <span class="dash-agent-flags"></span>
                 <span class="dash-agent-progress">${render.progress(pane)}</span>
             </button>
@@ -536,13 +540,24 @@
             onLayoutChanged = () => {},
             inputTarget = () => '',
             createWireLayer = () => null,
-            logError = () => {}
+            logError = () => {},
+            ids = {},
+            onCrewToggle = null,
+            crewSelected = () => false,
+            notice: externalNotice = null,
+            refresh: externalRefresh = null,
+            targetOwnsNotice = false
         } = runtime || {};
+
+        const shellId = ids.shell || SHELL_ID;
+        const bodyId = ids.body || BODY_ID;
 
         let timer = null;
         let requestId = 0;
         let inFlight = null;
         let painted = '';
+        let structure = '';
+        let rowsWired = false;
         let wired = false;
         let scale = SIDEBAR_SCALE_MIN;
         let side = SIDEBAR_SIDE_LEFT;
@@ -562,14 +577,15 @@
            by the slot element, so a rebuilt row starts from its markup. */
         const writtenSlots = new WeakMap();
 
-        function shell() { return getElement(SHELL_ID); }
-        function body() { return getElement(BODY_ID); }
+        function shell() { return getElement(shellId); }
+        function body() { return getElement(bodyId); }
 
         function isOpen() {
             return Boolean(shell()?.classList?.contains('visible'));
         }
 
         function setNotice(message, tone = 'error', source = 'action') {
+            if (externalNotice) return externalNotice(message, source, tone);
             if (source === 'read') readNotice = message || '';
             else {
                 actionNotice = message || '';
@@ -680,13 +696,11 @@
             return crew;
         }
 
-        /* `drawn` is what the row's markup put in the slot; once written, the
-           slot holds the last write instead. */
-        function writeSlot(slot, html, drawn) {
+        /* Compare against the drawn slot once, then remember each reading. */
+        function writeSlot(slot, html) {
             if (!slot) return;
-            const current = writtenSlots.has(slot) ? writtenSlots.get(slot) : drawn;
-            if (current === html) return;
-            slot.innerHTML = html;
+            const current = writtenSlots.has(slot) ? writtenSlots.get(slot) : slot.innerHTML;
+            if (current !== html) slot.innerHTML = html;
             writtenSlots.set(slot, html);
         }
 
@@ -698,22 +712,28 @@
             body()?.querySelectorAll?.(AGENT_ROW_SELECTOR).forEach(row => {
                 const pane = crewContext.panes?.get(row.dataset?.sessionId || '');
                 if (!pane) return;
-                writeSlot(row.querySelector?.(CREW_SLOT_SELECTOR), render.crewChip(pane, crews) || '', '');
+                writeSlot(row.querySelector?.(CREW_SLOT_SELECTOR), render.crewChip(pane, crews) || '');
                 /* The waiting mark: the markup was drawn from the reading
                    without `waiting` (`withoutWaiting`), so a pane entering or
                    leaving a wait rewrites its dot and its bar, not its row. */
-                const drawn = { ...pane, waiting: '' };
                 writeSlot(
                     row.querySelector?.(READING_SLOT_SELECTOR),
-                    render.activity(pane),
-                    render.activity(drawn)
+                    render.activity(pane)
                 );
                 writeSlot(
                     row.querySelector?.(PROGRESS_SLOT_SELECTOR),
-                    render.progress(pane),
-                    render.progress(drawn)
+                    render.progress(pane)
                 );
-                const hover = render.hover(pane, crewContext);
+                const root = crewOf(row.dataset?.sessionId || '');
+                const selected = Boolean(root) && crewSelected(root);
+                const hint = onCrewToggle && root
+                    ? (selected ? 'Crew shown. Right-click to hide this crew'
+                        : 'Right-click to show this crew') + ' (ContextMenu or Shift+F10)'
+                    : '';
+                row.classList?.toggle('is-crew-selected', selected);
+                const selection = row.querySelector?.('.dash-agent-selection');
+                if (selection && selection.textContent !== hint) selection.textContent = hint;
+                const hover = [render.hover(pane, crewContext), hint].filter(Boolean).join('\n');
                 if (row.title !== hover) row.title = hover;
             });
         }
@@ -806,7 +826,40 @@
             if (!snapshot) return false;
             const totals = getElement(TOTALS_ID);
             if (totals) totals.textContent = render.totals(snapshot);
-            paint(bodyHtml(withoutWaiting(snapshot), render, getCloseActions()));
+            paintSnapshot(snapshot);
+            return true;
+        }
+
+        function paintSnapshot(snapshot) {
+            const nextStructure = JSON.stringify((snapshot?.workspaces || []).map(workspace => ({
+                ...workspace,
+                groups: workspace.groups.map(group => ({
+                    ...group,
+                    panes: group.panes.map(pane => {
+                        const { activity, title, directory, status, waiting,
+                            agent_mcp, agent_mcp_override, agent_auto_mode, ...identity } = pane;
+                        return identity;
+                    })
+                }))
+            })));
+            if (nextStructure !== structure) {
+                paint(bodyHtml(withoutWaiting(snapshot), render, getCloseActions()));
+                structure = nextStructure;
+            }
+            const panes = new Map();
+            (snapshot?.workspaces || []).forEach(workspace => workspace.groups.forEach(group =>
+                group.panes.forEach(pane => panes.set(String(pane.session_id || ''), pane))));
+            body()?.querySelectorAll?.(AGENT_ROW_SELECTOR).forEach(row => {
+                const pane = panes.get(row.dataset?.sessionId || '');
+                if (!pane) return;
+                const line = row.querySelector?.('.dash-agent-line');
+                const text = render.line(pane);
+                if (line) {
+                    const previous = writtenSlots.has(line) ? writtenSlots.get(line) : line.textContent;
+                    if (previous !== text) line.textContent = text;
+                    writtenSlots.set(line, text);
+                }
+            });
             /* After every reading, repainted or not: an unchanged tree keeps
                its rows, but the pane that was the target may not be any more. */
             markInputTarget();
@@ -961,7 +1014,8 @@
                     name: dataset.sessionName || '',
                     label: dataset.workspaceLabel || '',
                     groupCount: Number(dataset.groupCount) || 0
-                }, element, { notice: setNotice, refresh });
+                }, element, { notice: (message, tone) => setNotice(message, tone),
+                    refresh: externalRefresh || refresh });
             }
             let landed = false;
             try {
@@ -972,15 +1026,17 @@
                 }));
             } catch (error) {
                 logError('[GridVibe Dashboard] sidebar row failed:', error);
+                setNotice('Could not open that workspace.');
+                return false;
             }
-            setNotice(landed ? '' : 'Could not open that workspace.');
+            if (!targetOwnsNotice) setNotice(landed ? '' : 'Could not open that workspace.');
             return landed;
         }
 
-        function wire() {
+        function wireRows() {
             const panel = body();
-            if (wired || !shell() || !panel) return false;
-            wired = true;
+            if (rowsWired || !shell() || !panel) return false;
+            rowsWired = true;
             /* Delegated: every row is rebuilt whenever the reading changes, so
                a listener on a row would not outlive the reading that drew it. */
             panel.addEventListener('click', event => {
@@ -1008,6 +1064,34 @@
                 focusRow = '';
                 applyHighlight();
             });
+            if (onCrewToggle) {
+                const toggleCrew = event => {
+                    const root = crewOf(rowIdAt(event.target));
+                    if (!root) return;
+                    event.preventDefault();
+                    onCrewToggle(root);
+                };
+                panel.addEventListener('contextmenu', toggleCrew);
+                panel.addEventListener('keydown', event => {
+                    if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) {
+                        toggleCrew(event);
+                    }
+                });
+                /* Windows can dispatch the ContextMenu default on keyup.
+                   Claim that default too, without toggling a second time. */
+                panel.addEventListener('keyup', event => {
+                    if (event.key === 'ContextMenu' && crewOf(rowIdAt(event.target))) {
+                        event.preventDefault();
+                    }
+                });
+            }
+            return true;
+        }
+
+        function wire() {
+            if (wired || !shell() || !body()) return false;
+            wired = true;
+            wireRows();
             getElement(REFRESH_BTN_ID)?.addEventListener('click', () => refresh());
             getElement(CLOSE_BTN_ID)?.addEventListener('click', () => {
                 apply(false, { persist: true, report: true });
@@ -1021,6 +1105,7 @@
             });
             onBridgeReady(() => {
                 painted = '';
+                structure = '';
                 refresh();
             });
             wireResize();
@@ -1033,6 +1118,10 @@
 
         return {
             wire, apply, toggle, isOpen, refresh, schedule, handleRow, setNotice, syncToggle,
+            wireRows, paintSnapshot,
+            pause: paused => wires?.setPaused(Boolean(paused)),
+            dispose: () => { wires?.dispose(); wires = null; },
+            invalidate: () => { structure = ''; painted = ''; },
             setSide, markInputTarget,
             getSide: () => side,
             getScale: () => scale

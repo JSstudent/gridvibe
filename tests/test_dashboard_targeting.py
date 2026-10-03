@@ -251,6 +251,7 @@ class CrewBoardNodeTargetTestCase(NodeHarnessTestCase):
                 wireAgentDashboard();
                 fetchAnswer = crewReading([link('s1', 's2')]);
                 await refreshAgentDashboard();
+                toggleAgentDashboardCrew('s1');
                 body().fire('click', {
                     target: { closest: () => ({ dataset: node('s2').dataset }) },
                     preventDefault() {}

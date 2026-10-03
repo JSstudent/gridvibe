@@ -365,18 +365,10 @@ function parseAgentRows() {
             hover: attributes['title'] || '',
             agent: attributes['data-agent'] || '',
             key: attributes['data-dashboard-key'] || '',
-            /* What is *drawn*: the name lives in `dash-agent-who`, which is out
-               of flow, and the state word in `dash-state-word`, which always
-               was. The two column classes the dialog draws are asked about by
-               name so their absence is an assertion rather than an omission. */
-            name: grab('dash-agent-name'),
+            /* Accessible agent and state words accompany the visible mark. */
             who: grab('dash-agent-who'),
             line: grab('dash-agent-line'),
             state: /class="dash-activity dash-state-([a-z]+)"/.exec(inner)?.[1] || '',
-            tags: [...inner.matchAll(/<span class="dash-tag[^"]*"[^>]*>([\s\S]*?)<\/span>/g)]
-                .map(match => match[1].trim()),
-            tagClasses: [...inner.matchAll(/<span class="(dash-tag[^"]*)"[^>]*>/g)]
-                .map(match => match[1].split(/\s+/).filter(Boolean)),
             word: grab('dash-state-word'),
             glyph: glyph ? glyph[0] : '',
             hasBar: inner.includes('dash-progress-fill'),
@@ -536,6 +528,14 @@ function drawnAgentRows() {
                    in-place write is told apart from a rebuilt row. */
                 element.readingSlot = fakeSlot();
                 element.progressSlot = fakeSlot();
+                element.readingSlot.innerHTML = dashboardActivityHtml({
+                    ...fetchAnswer.workspaces.flatMap(w => w.groups).flatMap(g => g.panes)
+                        .find(p => p.session_id === row.dataset.sessionId), waiting: '' });
+                element.progressSlot.innerHTML = dashboardProgressHtml({
+                    ...fetchAnswer.workspaces.flatMap(w => w.groups).flatMap(g => g.panes)
+                        .find(p => p.session_id === row.dataset.sessionId), waiting: '' });
+                element.readingSlot.writes = 0;
+                element.progressSlot.writes = 0;
                 /* The agent's mark and the words kept beside it, as the markup
                    drew them: empty of flags, with every write counted, so a
                    frame turned on in place is told apart from a rebuilt row. */
@@ -666,7 +666,6 @@ class DashboardSidebarRowTestCase(DashboardSidebarNodeTestCase):
         self.assertIn("/docs/images/agent/claude-code.svg", row["glyph"])
         self.assertEqual(row["state"], "working")
         # Not drawn, and the dialog's own column class is the one that is gone.
-        self.assertIsNone(row["name"])
         self.assertNotIn("dash-agent-name", row["html"])
         # Kept, out of flow, so the row still names its agent when it is heard.
         self.assertEqual(row["who"], "Claude Code")
@@ -695,10 +694,9 @@ class DashboardSidebarRowTestCase(DashboardSidebarNodeTestCase):
                 pane({ session_id: 's2', index: 1, agent_mcp: true })
             ])]);
             await sidebar.refresh();
-            report({ html: body().innerHTML, tags: parseAgentRows().map(row => row.tags) });
+            report({ html: body().innerHTML });
             """
         )
-        self.assertEqual(result["tags"], [[], []])
         self.assertNotIn("dash-tag", result["html"])
         self.assertNotIn(">MCP<", result["html"])
 
@@ -907,7 +905,7 @@ class DashboardSidebarRowTestCase(DashboardSidebarNodeTestCase):
                     glyphKey: dashboardAgentGlyphKey(reading),
                     activity: dashboardActivityHtml(reading),
                     progress: dashboardProgressHtml(reading),
-                    mcp: dashboardMcpTagHtml(reading)
+                    mcp: dashboardAgentMarkState(reading).mcp
                 },
                 totals: totals().textContent
             });
@@ -923,8 +921,8 @@ class DashboardSidebarRowTestCase(DashboardSidebarNodeTestCase):
         self.assertEqual(row["percent"], 42)
         # The chip is the dialog's builder too, so a pane without the tools
         # draws exactly what the dialog draws for it: nothing.
-        self.assertEqual(dialog["mcp"], "")
-        self.assertEqual(row["tags"], [])
+        self.assertFalse(dialog["mcp"])
+        self.assertNotIn("dash-tag", row["html"])
         # The shell the pane runs on left the line in the dialog too; it is the
         # last line of the hover on both surfaces.
         self.assertTrue(row["hover"].endswith("SSH"))
@@ -1227,7 +1225,7 @@ class DashboardSidebarSurfaceTestCase(DashboardSidebarNodeTestCase):
             body().querySelector = () => focusTarget;
             body().scrollTop = 88;
             fetchAnswer = snapshot([group([pane({
-                activity: activity({ title: 'Second' })
+                agent_selection: 'codex', activity: activity({ title: 'Second' })
             })])]);
             await sidebar.refresh();
             report({
@@ -1624,7 +1622,7 @@ class DashboardSidebarInputTargetTestCase(DashboardSidebarNodeTestCase):
             const kept = drawnAgentRows()[0] === before
                 && before.classList.contains('is-input-target');
             fetchAnswer = snapshot([group([
-                pane({ activity: activity({ title: 'Second' }) }),
+                pane({ agent_selection: 'codex', activity: activity({ title: 'Second' }) }),
                 pane({ session_id: 's2', index: 1 })
             ])]);
             await sidebar.refresh();
@@ -3471,6 +3469,17 @@ class DashboardSidebarPageTestCase(unittest.TestCase):
         self.assertIn("15%", width.group(1))
         self.assertIn("clamp(", width.group(1))
 
+    def test_resize_strip_is_reserved_outside_the_scroller_on_both_edges(self):
+        css = self._static("css/agent-dashboard-sidebar.css")
+        base = re.search(r"\n\.agent-sidebar \{([^}]*)\}", css).group(1)
+        right = re.search(r"body\.agent-sidebar-right \.agent-sidebar \{([^}]*)\}", css).group(1)
+        handle = re.search(r"\n\.agent-sidebar-resizer \{([^}]*)\}", css).group(1)
+        self.assertIn("--agent-sidebar-resize-strip: 6px;", base)
+        self.assertIn("padding-right: var(--agent-sidebar-resize-strip);", base)
+        self.assertIn("padding-right: 0;", right)
+        self.assertIn("padding-left: var(--agent-sidebar-resize-strip);", right)
+        self.assertIn("width: var(--agent-sidebar-resize-strip);", handle)
+
     def test_the_mark_wears_the_headers_frame_and_the_auto_pin_from_tokens(self):
         """The frame is the pane header's, down to its two colours: the same
         accent and the same override token, so the surfaces cannot disagree. The
@@ -3483,7 +3492,7 @@ class DashboardSidebarPageTestCase(unittest.TestCase):
             self.assertIsNotNone(found, selector)
             return found.group(1)
 
-        frame = rule(css, ".agent-sidebar .dash-agent-icon[data-mcp]")
+        frame = rule(css, ".agent-sidebar-list .dash-agent-icon[data-mcp]")
         header_frame = rule(header, ".terminal-agent-icon[data-mcp]")
         self.assertIn("outline: 1.5px solid var(--gv-accent);", frame)
         # `--t-accent` is `--gv-accent`: the header's own spelling of the same token.
@@ -3492,14 +3501,14 @@ class DashboardSidebarPageTestCase(unittest.TestCase):
         self.assertIn("outline-offset: 1.5px;", header_frame)
         self.assertIn(
             "outline-color: var(--gv-mcp-override);",
-            rule(css, ".agent-sidebar .dash-agent-icon[data-mcp][data-mcp-override]"),
+            rule(css, ".agent-sidebar-list .dash-agent-icon[data-mcp][data-mcp-override]"),
         )
-        pin = rule(css, ".agent-sidebar .dash-agent-icon[data-auto]::after")
+        pin = rule(css, ".agent-sidebar-list .dash-agent-icon[data-auto]::after")
         self.assertIn("content: 'A';", pin)
         self.assertIn("position: absolute;", pin)
         self.assertIn("border: 1px solid var(--gv-warning);", pin)
         # The chip is gone from the column's stylesheet.
-        self.assertNotIn(".agent-sidebar .dash-tag", css)
+        self.assertNotIn(".agent-sidebar-list .dash-tag", css)
 
     def test_the_column_states_no_palette_of_its_own(self):
         """Guardrail 7: every colour is a shared token, the same ones the dialog
@@ -3518,7 +3527,7 @@ class DashboardSidebarPageTestCase(unittest.TestCase):
         for the light theme, so the ring follows the theme with the pane."""
         css = self._static("css/agent-dashboard-sidebar.css")
         rule = re.search(
-            r"\.agent-sidebar \.dash-agent\.is-input-target\s*\{([^}]*)\}", css
+            r"\.agent-sidebar-list \.dash-agent\.is-input-target\s*\{([^}]*)\}", css
         )
         self.assertIsNotNone(rule)
         self.assertIn("box-shadow: inset 0 0 0 2px var(--gv-accent)", rule.group(1))
@@ -3547,21 +3556,21 @@ class DashboardSidebarPageTestCase(unittest.TestCase):
 
         self.assertIn(
             "padding-left: var(--dash-wire-gutter, 16px)",
-            rule(".agent-sidebar.has-crews .agent-sidebar-body"),
+            rule(".agent-sidebar-list.has-crews .agent-sidebar-body"),
         )
         # With no crew the column keeps its own padding, whatever a stale
         # property says: the gutter rule is behind `has-crews` alone.
-        self.assertNotIn("--dash-wire-gutter", rule(".agent-sidebar .agent-sidebar-body"))
+        self.assertNotIn("--dash-wire-gutter", rule(".agent-sidebar-list .agent-sidebar-body"))
         self.assertIn(
             "opacity: .32",
-            rule(".agent-sidebar.is-crew-highlight .dash-agent:not(.is-crew-member) > *"),
+            rule(".agent-sidebar-list.is-crew-highlight .dash-agent:not(.is-crew-member) > *"),
         )
         self.assertNotRegex(
             css, r"is-crew-highlight \.dash-agent:not\(\.is-crew-member\)\s*\{"
         )
         self.assertIn(
             "inset 0 0 0 1.5px color-mix(in srgb, var(--gv-accent) 75%, transparent)",
-            rule(".agent-sidebar.is-crew-highlight "
+            rule(".agent-sidebar-list.is-crew-highlight "
                  ".dash-agent.is-crew-member:not(.is-input-target)"),
         )
 

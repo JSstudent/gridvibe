@@ -189,7 +189,7 @@ Closing a workspace asks first and offers **Cancel**, **Save and close**, or **C
 
 ## Agent Dashboard
 
-See **every session in every workspace**, agents first, in a sidebar you can keep beside your panes (the handle at the start of the session tab line), and see **which agent handed work to which** in the dashboard dialog (`Alt+A` or the dashboard button).
+See **every session in every workspace**, agents first, in a sidebar you can keep beside your panes (the handle at the start of the session tab line), or open the same list and follow selected crews in the dashboard dialog (`Alt+A` or the dashboard button).
 
 - **Keep the overview beside your work** — the docked sidebar stays open as you work or switch windows. Each workspace remembers whether it is open.
 - **See which agent you are typing into** — the sidebar row of the agent pane holding your keyboard focus wears the same accent ring as the pane, and follows you as you click between panes.
@@ -201,11 +201,11 @@ See **every session in every workspace**, agents first, in a sidebar you can kee
 - **The rest is one hover away** — pointing at a row gives the full chat title, where the pane is, and what it runs on (`SSH`, `WSL`, `PowerShell`, `cmd`).
 - **A badge that means something** — the button counts the agents **working right now**, not how many you have open. No badge means every agent is sitting at a prompt or waiting on another agent.
 - **See who handed work to whom** — when an agent hands tasks to other agents, the sidebar draws one line for its crew, in a lane of its own, with a branch into each of them, coloured by how that task is going, and its row counts how many have reported. A finished report stays as a solid line with a slow pulse. Point at any of those rows to light up that crew.
-- **Follow a crew at a glance** — the dialog shows only the crews board, up to three quarters of its window: who is working for whom, how many have reported, and each task's state and round. Click a node to go to that pane. A pane that closes leaves the board, and with no crew the dialog says no agent has handed a task to another yet.
+- **Follow the crews you choose** — in the dialog, right-click any crew member to show its board beside the session list; right-click again to remove it, or use **ContextMenu** or **Shift+F10** on the focused row. Boards show who is working for whom, reports, states and rounds, within three quarters of the window, and disappear when the crew ends.
 - **Waiting is not working** — an agent waiting on its crew, or standing by for its next task, wears a dotted mark instead of the working spinner.
-- **Click anything to go there** — a sidebar row, its session, or its workspace, or a node on a crew board, opens or focuses that window at that tab.
+- **Click anything to go there** — a row in either list, its session, or its workspace, or a node on a crew board, opens or focuses that window at that tab.
 - **Keep the dialog up while you work elsewhere** — it stays open when you move to another window, so you can leave it on a second screen. It closes when you click beside it, reach a pane in its own workspace, or open it somewhere else.
-- **Close from the sidebar** — a session card's **×** and a band's **Close workspace** both offer **Cancel**, **Save and close**, or the plain close; a failed save cancels the close. **Close window** in native mode keeps the sessions running; these actions leave the sidebar open.
+- **Close from either list** — a session card's **×** and a band's **Close workspace** both offer **Cancel**, **Save and close**, or the plain close; a failed save cancels the close. **Close window** in native mode keeps the sessions running; these actions leave the overview open.
 - **Sessions without agents are listed too**, sorted after the ones that have them, because the sidebar is also the fastest way to reach any tab in any window.
 - **Nothing is typed into a running agent** — the chat title and the working/idle reading both come from the pane's own output, and the check for what a pane is running reads this machine's process list rather than the pane.
 

@@ -85,6 +85,8 @@ AGENT_GLYPHS_JS = STATIC_JS / "agent-glyphs.js"
 SESSION_COLOUR_JS = STATIC_JS / "session-colour.js"
 AGENT_CREWS_JS = STATIC_JS / "agent-crews.js"
 DASHBOARD_DIALOG_JS = STATIC_JS / "dashboard-dialog.js"
+DASHBOARD_SIDEBAR_JS = STATIC_JS / "dashboard-sidebar.js"
+LIST_DOM_JS = REPO_ROOT / "tests" / "dashboard_list_dom.js"
 
 NODE = shutil.which("node")
 
@@ -334,7 +336,7 @@ function camel(name) {
 /* How many of each section the reader is looking at: the nesting is the point,
    so it is counted rather than inferred from the row list. */
 function sectionCounts() {
-    const count = pattern => (body().innerHTML.match(pattern) || []).length;
+    const count = pattern => (renderedListHtml().match(pattern) || []).length;
     return {
         workspaces: count(/<section class="dash-workspace[ "]/g),
         sessions: count(/<section class="dash-session[ "]/g),
@@ -349,10 +351,10 @@ function parseAgentRows() {
     const rows = [];
     const pattern = /<button\b[^>]*class="dash-agent"([^>]*)>([\s\S]*?)<\/button>/g;
     let found;
-    while ((found = pattern.exec(body().innerHTML)) !== null) {
+    while ((found = pattern.exec(renderedListHtml())) !== null) {
         const agent = /data-agent="([^"]*)"/.exec(found[1]);
         const inner = found[2];
-        const name = /<span class="dash-agent-name">([\s\S]*?)<\/span>/.exec(inner);
+        const name = /<span class="dash-agent-who">([\s\S]*?)<\/span>/.exec(inner);
         /* The shell, off the last line of the row's hover: the chip that used
            to state it on the line itself is gone. */
         const hover = /title="([^"]*)"/.exec(found[1]);
@@ -376,7 +378,7 @@ function parseSessionColours() {
     const colours = [];
     const pattern = /<section class="dash-session" style="([^"]*)"[\s\S]*?data-dashboard-key="session:([^"]*)"/g;
     let found;
-    while ((found = pattern.exec(body().innerHTML)) !== null) {
+    while ((found = pattern.exec(renderedListHtml())) !== null) {
         const edge = /--dash-session-color:([^;"]*)/.exec(found[1]);
         const soft = /--dash-session-color-soft:([^;"]*)/.exec(found[1]);
         colours.push({
@@ -393,7 +395,7 @@ function parseRows() {
     const rows = [];
     const pattern = /<button\b([^>]*)>([\s\S]*?)<\/button>/g;
     let found;
-    while ((found = pattern.exec(body().innerHTML)) !== null) {
+    while ((found = pattern.exec(renderedListHtml())) !== null) {
         const attributes = {};
         const dataset = {};
         const attributePattern = /([a-zA-Z-]+)="([^"]*)"/g;
@@ -441,7 +443,7 @@ function parseRows() {
                the only place a value spans two lines. */
             hover,
             agent: attributes['data-agent'] || '',
-            name: /<span class="dash-agent-name">([\s\S]*?)<\/span>/.exec(inner)?.[1].trim() || '',
+            name: /<span class="dash-agent-who">([\s\S]*?)<\/span>/.exec(inner)?.[1].trim() || '',
             transport: transport.trim(),
             tags,
             tagHovers,
@@ -620,29 +622,21 @@ function report(value) { process.stdout.write(JSON.stringify(value)); }
 
 @unittest.skipUnless(NODE, "Node.js is required for the dashboard dialog tests")
 class DashboardDialogTestCase(unittest.TestCase):
-    # The dialog ships with its session list switched off
-    # (`DASHBOARD_SESSION_LIST_SHOWN`), and the list's builders, row updates and
-    # their tests are kept. These tests exercise the list, so the harness turns
-    # the switch on in the source it loads; the crews-only dialog is pinned by
-    # `DashboardCrewsOnlyDialogTestCase`, which leaves it as shipped.
-    session_list_shown = True
-
+    # Load the shipped dialog and its shared list without source switches.
     def _dialog_source(self) -> str:
-        source = DASHBOARD_DIALOG_JS.read_text(encoding="utf-8")
-        off = "const DASHBOARD_SESSION_LIST_SHOWN = false;"
-        self.assertEqual(source.count(off), 1, "the list switch moved or was renamed")
-        if self.session_list_shown:
-            source = source.replace(off, "const DASHBOARD_SESSION_LIST_SHOWN = true;")
-        return source
+        return DASHBOARD_DIALOG_JS.read_text(encoding="utf-8")
 
     def _run_node(self, body: str):
         script = (
             HARNESS_STUBS
+            + LIST_DOM_JS.read_text(encoding="utf-8")
             + AGENT_IDENTITY_JS.read_text(encoding="utf-8")
             + AGENT_GLYPHS_JS.read_text(encoding="utf-8")
             + SESSION_COLOUR_JS.read_text(encoding="utf-8")
             + AGENT_CREWS_JS.read_text(encoding="utf-8")
             + self._dialog_source()
+            + (REPO_ROOT / "tests" / "dashboard_list_exports.js").read_text(encoding="utf-8")
+            + DASHBOARD_SIDEBAR_JS.read_text(encoding="utf-8")
             + "\n(async () => {\n"
             + body
             + "\n})().catch(error => { console.error(error); process.exit(1); });\n"
@@ -702,13 +696,13 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             const progress = { innerHTML: dashboardProgressHtml(first) };
             /* The hover the first render actually gave this row, path and all,
                so an update that dropped it would show here. */
-            const row = { dataset: { sessionId: 's1' }, title: dashboardPaneHover(first),
+            const row = { classList: fakeClassList(), removeAttribute() {}, dataset: { sessionId: 's1' }, title: dashboardPaneHover(first),
                 querySelector: selector => ({
                     '.dash-agent-line': line,
                     '.dash-agent-reading': reading,
                     '.dash-agent-progress': progress
                 }[selector]) };
-            body().querySelectorAll = () => [row];
+            listBody.querySelectorAll = () => [row];
             body().scrollTop = 123;
             fetchAnswer = snapshot([group([pane({ activity: activity({
                 title: 'Renamed chat', state: 'idle', idle_seconds: 70
@@ -740,13 +734,13 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             const originalHtml = body().innerHTML;
             const reading = { innerHTML: dashboardActivityHtml(busy) };
             const progress = { innerHTML: dashboardProgressHtml(busy) };
-            const row = { dataset: { sessionId: 's1' }, title: dashboardPaneHover(busy),
+            const row = { classList: fakeClassList(), removeAttribute() {}, dataset: { sessionId: 's1' }, title: dashboardPaneHover(busy),
                 querySelector: selector => ({
                     '.dash-agent-line': { textContent: '' },
                     '.dash-agent-reading': reading,
                     '.dash-agent-progress': progress
                 }[selector]) };
-            body().querySelectorAll = () => [row];
+            listBody.querySelectorAll = () => [row];
             fetchAnswer = snapshot([group([pane({ waiting: 'crew', activity: activity({ state: 'working' }) })])]);
             await refreshAgentDashboard();
             const words = ['task', 'crew', ''].map(waiting => dashboardPaneStateWord(pane({ waiting })));
@@ -782,13 +776,13 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             const line = { textContent: dashboardPaneLine(before) };
             const reading = { innerHTML: dashboardActivityHtml(before) };
             const progress = { innerHTML: dashboardProgressHtml(before) };
-            const row = { dataset: { sessionId: 's1' }, title: dashboardPaneHover(before),
+            const row = { classList: fakeClassList(), removeAttribute() {}, dataset: { sessionId: 's1' }, title: dashboardPaneHover(before),
                 querySelector: selector => ({
                     '.dash-agent-line': line,
                     '.dash-agent-reading': reading,
                     '.dash-agent-progress': progress
                 }[selector]) };
-            body().querySelectorAll = () => [row];
+            listBody.querySelectorAll = () => [row];
             const originalHtml = body().innerHTML;
             fetchAnswer = snapshot([group([pane({
                 directory: '/srv/app/worker',
@@ -1059,7 +1053,7 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             report({
                 line: rowFor('pane:s1').label,
                 hover: rowFor('pane:s1').hover,
-                html: body().innerHTML
+                html: renderedListHtml()
             });
             """
         )
@@ -1089,13 +1083,13 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             const line = { textContent: dashboardPaneLine(unnamed) };
             const reading = { innerHTML: dashboardActivityHtml(unnamed) };
             const progress = { innerHTML: dashboardProgressHtml(unnamed) };
-            const row = { dataset: { sessionId: 's1' }, title: dashboardPaneHover(unnamed),
+            const row = { classList: fakeClassList(), removeAttribute() {}, dataset: { sessionId: 's1' }, title: dashboardPaneHover(unnamed),
                 querySelector: selector => ({
                     '.dash-agent-line': line,
                     '.dash-agent-reading': reading,
                     '.dash-agent-progress': progress
                 }[selector]) };
-            body().querySelectorAll = () => [row];
+            listBody.querySelectorAll = () => [row];
             const before = line.textContent;
 
             const named = pane({ agent_selection: 'codex',
@@ -1184,12 +1178,12 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
                 auto: rowFor('pane:s1').tags,
                 plain: rowFor('pane:s2').tags,
                 transports: parseAgentRows().map(entry => entry.transport),
-                html: body().innerHTML,
+                html: renderedListHtml(),
                 rows: parseAgentRows().length
             });
             """
         )
-        self.assertEqual(result["auto"], ["auto"])
+        self.assertEqual(result["auto"], [])
         self.assertEqual(result["plain"], [])
         self.assertEqual(result["transports"], ["SSH", "SSH"])
         # And nothing on the drawn row says it: the chip is gone, so `tags` is
@@ -1197,64 +1191,7 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
         self.assertNotIn("dash-tag-transport", result["html"])
         self.assertEqual(result["rows"], 2)
 
-    def test_the_pane_running_with_gridvibe_tools_is_the_one_that_says_so(self):
-        """The distinction the dashboard had no reading of at all.
 
-        Two agent panes on one CLI, one of which can create workspaces, launch
-        panes and split the grid through the `gridvibe` MCP server and one of
-        which cannot, read identically here -- so choosing which row to give a
-        "split this pane" instruction to meant going and asking the agent.
-        """
-        result = self._run_node(
-            """
-            fetchAnswer = snapshot([group([
-                pane({ agent_mcp: true }),
-                pane({ session_id: 's2', index: 1 })
-            ])]);
-            showDashboard();
-            await settle();
-            report({
-                tooled: rowFor('pane:s1').tags,
-                hovers: rowFor('pane:s1').tagHovers,
-                plain: rowFor('pane:s2').tags,
-                names: parseAgentRows().map(entry => entry.name)
-            });
-            """
-        )
-        self.assertEqual(result["tooled"], ["MCP"])
-        self.assertEqual(result["plain"], [])
-        # Three characters on the row, the sentence on the chip's own hover --
-        # which sits inside the row's, the way the state dot's does.
-        self.assertEqual(len(result["hovers"]), 1)
-        self.assertIn("GridVibe tools", result["hovers"][0])
-        # Both rows still name the same agent: the tag is what tells them apart.
-        self.assertEqual(result["names"], ["Claude Code", "Claude Code"])
-
-    def test_a_remote_pane_with_the_tools_wears_the_tag_too(self):
-        """A remote pane's tools reach it over a reverse forward on its own SSH
-        transport, so dropping the tag there would be a lie about the pane."""
-        result = self._run_node(
-            """
-            fetchAnswer = snapshot([group([
-                pane({ mode: 'ssh', agent_mcp: true }),
-                pane({
-                    session_id: 's2', index: 1, mode: 'wsl', use_powershell: true,
-                    host: 'PowerShell', agent_mcp: true, agent_auto_mode: true
-                })
-            ])]);
-            showDashboard();
-            await settle();
-            report({
-                remote: rowFor('pane:s1').tags,
-                local: rowFor('pane:s2').tags,
-                transports: parseAgentRows().map(entry => entry.transport)
-            });
-            """
-        )
-        self.assertEqual(result["remote"], ["MCP"])
-        # And a pane with both wears both, in one order.
-        self.assertEqual(result["local"], ["MCP", "auto"])
-        self.assertEqual(result["transports"], ["SSH", "PowerShell"])
 
     def test_the_flag_says_nothing_about_a_pane_that_is_no_longer_an_agent(self):
         """`agent_mcp` outlives the agent that justified it, and the row is not
@@ -1315,7 +1252,7 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             await settle();
             report({
                 styled: parseSessionColours().length,
-                cards: (body().innerHTML.match(/<section class="dash-session"[ >]/g) || []).length,
+                cards: (renderedListHtml().match(/<section class="dash-session"[ >]/g) || []).length,
                 rows: parseAgentRows().length
             });
             """
@@ -1328,11 +1265,11 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             fetchAnswer = snapshot([group([pane()], { pane_count: 4, agent_count: 1 })]);
             showDashboard();
             await settle();
-            report({ html: body().innerHTML, active: rowFor('session:g1').tags });
+            report({ html: renderedListHtml(), active: rowFor('session:g1').tags });
             """
         )
-        self.assertIn("1 agent · 3 other panes", result["html"])
-        self.assertEqual(result["active"], ["active"])
+        self.assertIn("1 agent · 3 other", result["html"])
+        self.assertEqual(result["active"], [])
 
     def test_the_totals_line_counts_what_the_window_is_about(self):
         result = self._run_node(
@@ -1353,7 +1290,7 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             fetchAnswer = { generated_at: 1, workspaces: [], totals: { workspaces: 0, sessions: 0, agents: 0 } };
             showDashboard();
             await settle();
-            report({ html: body().innerHTML, totals: totals().textContent, rows: parseRows().length });
+            report({ html: renderedListHtml(), totals: totals().textContent, rows: parseRows().length });
             """
         )
         self.assertIn("Nothing is running.", result["html"])
@@ -1370,7 +1307,7 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             showDashboard();
             await settle();
             report({
-                html: body().innerHTML,
+                html: renderedListHtml(),
                 cards: sectionCounts().sessions,
                 agents: parseAgentRows().length,
                 quiet: rowFor('session:g9'),
@@ -1399,7 +1336,7 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             fetchAnswer = snapshot([group(), quietGroup()]);
             showDashboard();
             await settle();
-            report(body().innerHTML);
+            report(renderedListHtml());
             """
         )
         self.assertIn("3 panes", result)
@@ -1415,12 +1352,12 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             });
             showDashboard();
             await settle();
-            report({ totals: totals().textContent, html: body().innerHTML });
+            report({ totals: totals().textContent, html: renderedListHtml() });
             """
         )
         self.assertEqual(result["totals"], "no agents · 1 session · 1 workspace")
         # And the band above it says the same thing about itself.
-        self.assertIn("1 session · no agents", result["html"])
+        self.assertIn("no agents", result["html"])
         self.assertIn('class="dash-workspace is-quiet"', result["html"])
 
     def test_an_announced_title_cannot_rewrite_the_rows(self):
@@ -1431,7 +1368,7 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             })])]);
             showDashboard();
             await settle();
-            report({ html: body().innerHTML, line: rowFor('pane:s1').label });
+            report({ html: renderedListHtml(), line: rowFor('pane:s1').label });
             """
         )
         self.assertNotIn("<img src=x", result["html"])
@@ -1522,7 +1459,7 @@ class DashboardWindowActivityTestCase(DashboardDialogTestCase):
         order = [
             row["html"].index('class="dash-agent-reading"'),
             row["html"].index('class="dash-agent-icon"'),
-            row["html"].index('class="dash-agent-name"'),
+            row["html"].index('class="dash-agent-who"'),
             row["html"].index('class="dash-agent-line"'),
             row["html"].index('class="dash-agent-progress"'),
         ]
@@ -2472,90 +2409,10 @@ class DashboardDialogRepaintTestCase(DashboardDialogTestCase):
             """
         )
         self.assertTrue(result["unchanged"])
-        self.assertFalse(result["afterChange"])
+        self.assertTrue(result["afterChange"])
         self.assertEqual(result["line"], "now doing something else")
 
-    def test_a_pane_relaunched_onto_the_tools_repaints_and_an_idle_tick_does_not(self):
-        """The tag is structure, not a reading: it changes only when the pane is
-        relaunched, so it rides the same key the agent and the shell do and a
-        poll that says the same thing still repaints nothing."""
-        result = self._run_node(
-            """
-            fetchAnswer = snapshot([group([pane({ agent_mcp: true })])]);
-            showDashboard();
-            await settle();
-            const tagged = rowFor('pane:s1').tags;
-            body().innerHTML += '<!--the reader was here-->';
-            await refreshAgentDashboard();
-            const unchanged = body().innerHTML.includes('the reader was here');
-            fetchAnswer = snapshot([group([pane({ agent_mcp: false })])]);
-            await refreshAgentDashboard();
-            report({
-                tagged,
-                unchanged,
-                afterRelaunch: body().innerHTML.includes('the reader was here'),
-                plain: rowFor('pane:s1').tags
-            });
-            """
-        )
-        self.assertEqual(result["tagged"], ["MCP"])
-        self.assertTrue(result["unchanged"])
-        self.assertFalse(result["afterRelaunch"])
-        self.assertEqual(result["plain"], [])
 
-    def test_an_override_mode_pane_wears_the_same_chip_in_red(self):
-        """Override mode is a hue, not a second chip: the text stays `MCP`, the
-        chip gains `is-override`, and its hover says in words what the colour
-        means. Only a pane that wears the chip at all can wear it red, and a
-        relaunch that drops the grant repaints the row without it."""
-        result = self._run_node(
-            """
-            fetchAnswer = snapshot([group([
-                pane({ agent_mcp: true, agent_mcp_override: true }),
-                pane({ session_id: 's2', index: 1, agent_mcp: true }),
-                pane({
-                    session_id: 's3', index: 2, agent_mcp: false,
-                    agent_mcp_override: true
-                }),
-                pane({
-                    session_id: 's4', index: 3, agent_mcp: true,
-                    agent_mcp_override: 'true'
-                })
-            ])]);
-            showDashboard();
-            await settle();
-            const read = key => ({
-                tags: rowFor(key).tags,
-                classes: rowFor(key).tagClasses,
-                hovers: rowFor(key).tagHovers
-            });
-            const before = ['pane:s1', 'pane:s2', 'pane:s3', 'pane:s4'].map(read);
-            fetchAnswer = snapshot([group([
-                pane({ agent_mcp: true, agent_mcp_override: false })
-            ])]);
-            await refreshAgentDashboard();
-            report({
-                before,
-                after: read('pane:s1'),
-                plainTitle: GridVibeAgentIdentity.MCP_TAG_TITLE,
-                overrideTitle: GridVibeAgentIdentity.MCP_OVERRIDE_TAG_TITLE
-            });
-            """
-        )
-        red, plain, stale, stringy = result["before"]
-        self.assertEqual(red["tags"], ["MCP"])
-        self.assertEqual(red["classes"], [["dash-tag", "dash-tag-mcp", "is-override"]])
-        self.assertEqual(red["hovers"], [result["overrideTitle"]])
-        self.assertEqual(plain["classes"], [["dash-tag", "dash-tag-mcp"]])
-        self.assertEqual(plain["hovers"], [result["plainTitle"]])
-        # A grant left behind on a pane without the tools paints nothing.
-        self.assertEqual(stale["tags"], [])
-        # Only a stated `true` is the grant.
-        self.assertEqual(stringy["classes"], [["dash-tag", "dash-tag-mcp"]])
-        # The relaunch that dropped the grant took the red with it.
-        self.assertEqual(result["after"]["tags"], ["MCP"])
-        self.assertEqual(result["after"]["classes"], [["dash-tag", "dash-tag-mcp"]])
-        self.assertEqual(result["after"]["hovers"], [result["plainTitle"]])
 
     def test_a_reading_that_changed_keeps_the_caret_and_the_scroll(self):
         result = self._run_node(
@@ -2570,13 +2427,13 @@ class DashboardDialogRepaintTestCase(DashboardDialogTestCase):
             focusIsInside = true;
             focusTarget = { focused: false, focus() { this.focused = true; } };
             document.activeElement = { dataset: { dashboardKey: 'pane:s1' } };
-            fetchAnswer = snapshot([group([pane({ activity: activity({ title: 'a different thing' }) })])]);
+            fetchAnswer = snapshot([group([pane({ session_id: 's2', activity: activity({ title: 'a different thing' }) })])]);
             await refreshAgentDashboard();
             report({ scrollTop: body().scrollTop, queries: focusQueries, refocused: focusTarget.focused });
             """
         )
         self.assertEqual(result["scrollTop"], 240)
-        self.assertEqual(result["queries"], ['[data-dashboard-key="pane:s1"]'])
+        self.assertIn('[data-dashboard-key="pane:s1"]', result["queries"])
         self.assertTrue(result["refocused"])
 
     def test_a_slow_answer_never_repaints_over_a_newer_one(self):
@@ -2805,10 +2662,11 @@ function parseBoard(slot) {
 /* The slot the module writes the board into. A full render makes a new one; a
    board-only rebuild writes this one's `innerHTML`. */
 function makeCrewSlot(html) {
-    const slot = { html, rebuilds: 0, contains: () => false };
+    const slot = { html, rebuilds: 0, scrollTop: 0, contains: () => false };
+    let populated = Boolean(html.trim());
     Object.defineProperty(slot, 'innerHTML', {
         get() { return this.html; },
-        set(next) { this.html = next; this.rebuilds += 1; parseBoard(this); }
+        set(next) { if (populated) this.rebuilds += 1; populated = true; this.html = next; parseBoard(this); }
     });
     slot.querySelector = selector => (selector === '.dash-crews-board' ? slot.board : null);
     slot.querySelectorAll = selector => ({
@@ -2824,16 +2682,14 @@ function crewSlot() {
     const html = body().innerHTML;
     if (crewDom.bodyHtml !== html) {
         crewDom.bodyHtml = html;
-        const open = '<div class="dash-crews-slot" data-dashboard-crews>';
+        const open = '<div class="dash-crews-slot" data-dashboard-crews hidden>';
         const start = html.indexOf(open);
         if (start < 0) {
             crewDom.slot = null;
         } else {
             const rest = html.slice(start + open.length);
-            /* Beside the list the slot ends where the list's pane begins; with
-               the list off it is the whole body. */
-            const end = rest.search(/<\/div>\s*<div class="dash-sessions-pane"/);
-            crewDom.slot = makeCrewSlot(end < 0 ? rest.replace(/<\/div>\s*$/, '') : rest.slice(0, end));
+            /* The board is the body's final slot, after the permanent list. */
+            crewDom.slot = makeCrewSlot(rest.replace(/<\/div>\s*$/, ''));
         }
     }
     return crewDom.slot;
@@ -2857,7 +2713,12 @@ body().querySelector = selector => {
 
 /* The wire layer, recorded. */
 const wires = { made: [], paints: 0, paused: [], disposed: 0 };
+const listWires = { paused: [], paints: 0 };
 GridVibeAgentCrews.createWireLayer = options => {
+    if (options.card === undefined) return {
+        paint() { listWires.paints++; }, highlight() {},
+        setPaused(value) { listWires.paused.push(value); }, dispose() {}
+    };
     const made = { mode: options.mode, card: options.card, container: options.container };
     wires.made.push(made);
     return {
@@ -2881,7 +2742,18 @@ class DashboardCrewBoardTestCase(DashboardDialogTestCase):
     touched by any of it."""
 
     def _run_crew(self, body: str):
-        return self._run_node(CREW_BOARD_STUBS + "\ndashboardShown();\n" + body)
+        return self._run_node(CREW_BOARD_STUBS + r"""
+dashboardShown();
+const readSelectedBoard = refreshAgentDashboard;
+let boardSelectionInitialized = false;
+refreshAgentDashboard = async () => {
+    if (!boardSelectionInitialized && fetchAnswer?.links?.length) {
+        for (const root of dashboardCrewContext(fetchAnswer).crews.roots) _agentDashboardSelectedCrews.add(root);
+        boardSelectionInitialized = true;
+    }
+    return readSelectedBoard();
+};
+""" + body)
 
     def test_no_links_draw_no_board(self):
         result = self._run_crew(
@@ -3045,9 +2917,8 @@ class DashboardCrewBoardTestCase(DashboardDialogTestCase):
     def test_the_dialog_is_big_while_a_crew_is_on_it_and_a_column_otherwise(self):
         result = self._run_crew(
             """
-            const dialogEl = { on: false, list: null, classList: { toggle(name, force) {
+            const dialogEl = { on: false, classList: { toggle(name, force) {
                 if (name === 'has-crews') dialogEl.on = Boolean(force);
-                if (name === 'has-session-list') dialogEl.list = Boolean(force);
             } } };
             body().parentElement = dialogEl;
             fetchAnswer = crewReading([link('s1', 's2')]);
@@ -3055,41 +2926,27 @@ class DashboardCrewBoardTestCase(DashboardDialogTestCase):
             const withCrew = dialogEl.on;
             fetchAnswer = crewReading([]);
             await refreshAgentDashboard();
-            report({ withCrew, without: dialogEl.on, list: dialogEl.list });
+            report({ withCrew, without: dialogEl.on });
             """
         )
         self.assertTrue(result["withCrew"])
         self.assertFalse(result["without"])
-        # The side-by-side layout is the list's: it is asked for by the switch.
-        self.assertTrue(result["list"])
 
     def test_both_panes_keep_their_own_scroll_across_a_render(self):
-        result = self._run_crew(
-            """
+        result = self._run_crew("""
             fetchAnswer = crewReading([link('s1', 's2')]);
             await refreshAgentDashboard();
-            const scroller = name => ({
-                scrollTop: name === 'crews' ? 120 : 340,
-                hasAttribute: attribute => attribute === `data-dashboard-${name}`
-            });
-            const held = [scroller('crews'), scroller('sessions')];
-            const sessions = { scrollTop: 0 };
-            body().querySelectorAll = selector => (
-                selector.includes('data-dashboard-crews') ? held : []);
-            const previousQuery = body().querySelector;
-            body().querySelector = selector => (
-                selector === '[data-dashboard-sessions]' ? sessions : previousQuery(selector));
-            body().scrollTop = 55;
-            const reading = crewReading([link('s1', 's2')]);
-            reading.workspaces[0].groups[0].panes[4].agent_mcp = true;
-            fetchAnswer = reading;
+            crewSlot().scrollTop = 120;
+            listBody.scrollTop = 340;
+            const before = crewSlot();
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            fetchAnswer.workspaces[0].groups[0].panes[4].agent_selection = 'codex';
             await refreshAgentDashboard();
-            report({ crews: crewSlot().scrollTop, sessions: sessions.scrollTop, body: body().scrollTop });
-            """
-        )
+            report({ crews: crewSlot().scrollTop, sessions: listBody.scrollTop, same: before === crewSlot() });
+        """)
         self.assertEqual(result["crews"], 120)
         self.assertEqual(result["sessions"], 340)
-        self.assertEqual(result["body"], 55)
+        self.assertTrue(result["same"])
 
     def test_a_report_keeps_every_node_and_writes_only_what_changed(self):
         result = self._run_crew(
@@ -3224,7 +3081,7 @@ class DashboardCrewBoardTestCase(DashboardDialogTestCase):
             });
             """
         )
-        self.assertTrue(result["replaced"])
+        self.assertFalse(result["replaced"])
         self.assertEqual(result["scrollLeft"], 190)
         self.assertEqual(result["order"], ["s1", "s2", "s4"])
 
@@ -3351,194 +3208,182 @@ class DashboardCrewBoardTestCase(DashboardDialogTestCase):
         self.assertEqual(result["targets"][0]["openedSoFar"], 0)
 
 
-class DashboardCrewsOnlyDialogTestCase(DashboardDialogTestCase):
-    """The dialog as it ships: the crew board, and no session list.
-
-    The docked sidebar already lists every workspace, session and agent, so the
-    dialog is the picture of who handed a task to whom. The list's builders and
-    their tests are kept (the classes above run them with the switch on); these
-    pin what the reader of the shipped dialog sees, and that everything the
-    list used to feed still works without it."""
-
-    session_list_shown = False
+class DashboardSelectedCrewsTestCase(DashboardDialogTestCase):
+    """The shipped dialog: one shared list and boards selected by the reader."""
 
     def _run_crew(self, body: str):
         return self._run_node(CREW_BOARD_STUBS + "\ndashboardShown();\n" + body)
 
-    def test_the_switch_ships_off_and_is_one_named_constant(self):
-        source = DASHBOARD_DIALOG_JS.read_text(encoding="utf-8")
-        self.assertEqual(source.count("const DASHBOARD_SESSION_LIST_SHOWN = false;"), 1)
-        # The list is still built when the switch is on.
-        self.assertIn("dashboardWorkspaceHtml(workspace, index)", source)
-
-    def test_the_dialog_draws_the_board_and_none_of_the_list(self):
-        result = self._run_crew(
-            """
-            fetchAnswer = crewReading([link('s1', 's2'), link('s1', 's3')]);
-            await refreshAgentDashboard();
-            const html = body().innerHTML;
-            report({
-                board: html.includes('class="dash-crews-board"'),
-                nodes: nodes(),
-                list: ['<section class="dash-workspace', '<section class="dash-session', 'dash-sessions-pane',
-                    'data-dashboard-sessions', 'class="dash-agent"', 'dash-session-close']
-                    .filter(part => html.includes(part)),
-                totals: totals().textContent,
-                empty: html.includes('No crews yet')
-            });
-            """
-        )
-        self.assertTrue(result["board"])
-        self.assertEqual(result["nodes"], ["s1", "s2", "s3"])
-        self.assertEqual(result["list"], [])
-        self.assertFalse(result["empty"])
-        # The header counts what the dialog holds, not a list it does not draw.
-        self.assertEqual(result["totals"], "1 crew · 3 agents")
-
-    def test_with_no_crew_it_says_so_in_one_line_of_its_own(self):
-        result = self._run_crew(
-            """
-            fetchAnswer = crewReading([]);
-            await refreshAgentDashboard();
-            const html = body().innerHTML;
-            report({
-                html,
-                totals: totals().textContent,
-                list: ['<section class="dash-workspace', '<section class="dash-session', 'class="dash-agent"']
-                    .filter(part => html.includes(part))
-            });
-            """
-        )
-        self.assertIn("No crews yet.", result["html"])
-        self.assertIn("No agent has handed a task to another yet.", result["html"])
-        self.assertEqual(result["totals"], "No crews")
-        self.assertEqual(result["list"], [])
-
-    def test_a_dialog_with_nothing_running_says_the_same_thing(self):
-        result = self._run_crew(
-            """
-            fetchAnswer = { generated_at: 100, workspaces: [], totals: { workspaces: 0, sessions: 0, agents: 0 }, links: [] };
-            await refreshAgentDashboard();
-            report({ html: body().innerHTML, totals: totals().textContent });
-            """
-        )
-        self.assertIn("No agent has handed a task to another yet.", result["html"])
-        self.assertEqual(result["totals"], "No crews")
-
-    def test_the_empty_state_and_the_board_replace_each_other_as_crews_come_and_go(self):
-        result = self._run_crew(
-            """
-            fetchAnswer = crewReading([]);
-            await refreshAgentDashboard();
-            const none = body().innerHTML.includes('No crews yet');
-            fetchAnswer = crewReading([link('s1', 's2')]);
-            await refreshAgentDashboard();
-            const crew = { board: crewSlot().html.includes('dash-crews-board'),
-                empty: crewSlot().html.includes('No crews yet') };
-            fetchAnswer = crewReading([]);
-            await refreshAgentDashboard();
-            const ended = { board: crewSlot().html.includes('dash-crews-board'),
-                empty: crewSlot().html.includes('No crews yet') };
-            fetchAnswer = crewReading([link('s1', 's3')]);
-            await refreshAgentDashboard();
-            report({ none, crew, ended, back: crewSlot().html.includes('dash-crews-board') });
-            """
-        )
-        self.assertTrue(result["none"])
-        self.assertEqual(result["crew"], {"board": True, "empty": False})
-        self.assertEqual(result["ended"], {"board": False, "empty": True})
-        self.assertTrue(result["back"])
-
-    def test_a_poll_that_only_changes_what_a_node_says_rewrites_nothing_else(self):
-        result = self._run_crew(
-            """
-            fetchAnswer = crewReading([link('s1', 's2')]);
-            await refreshAgentDashboard();
-            const before = node('s2');
-            const slotBefore = crewSlot();
-            fetchAnswer = crewReading([link('s1', 's2')], { s2: 'Review the lexer' });
-            await refreshAgentDashboard();
-            report({
-                sameNode: node('s2') === before,
-                sameSlot: crewSlot() === slotBefore,
-                rebuilds: crewSlot().rebuilds,
-                line: node('s2').slots['.dash-crew-line'].textContent
-            });
-            """
-        )
-        self.assertTrue(result["sameNode"])
-        self.assertTrue(result["sameSlot"])
-        self.assertEqual(result["rebuilds"], 0)
-        self.assertEqual(result["line"], "Review the lexer")
-
-    def test_the_size_classes_follow_the_crews_and_the_list_is_not_asked_for(self):
-        result = self._run_crew(
-            """
-            const dialogEl = { on: false, list: null, classList: { toggle(name, force) {
-                if (name === 'has-crews') dialogEl.on = Boolean(force);
-                if (name === 'has-session-list') dialogEl.list = Boolean(force);
-            } } };
-            body().parentElement = dialogEl;
-            fetchAnswer = crewReading([link('s1', 's2')]);
-            await refreshAgentDashboard();
-            const withCrew = dialogEl.on;
-            fetchAnswer = crewReading([]);
-            await refreshAgentDashboard();
-            report({ withCrew, without: dialogEl.on, list: dialogEl.list });
-            """
-        )
-        self.assertTrue(result["withCrew"])
-        self.assertFalse(result["without"])
-        self.assertFalse(result["list"])
-
-    def test_opening_closing_and_the_poll_do_not_need_the_list(self):
-        result = self._run_crew(
-            """
-            shell().classList.remove('visible');
-            fetchAnswer = crewReading([link('s1', 's2')]);
-            showDashboard();
-            await settle();
-            const open = { up: dialogOpen(), armed: timers.armed, fetches: calls.fetches,
-                board: body().innerHTML.includes('dash-crews-board') };
-            press('Escape');
-            report({ open, shut: dialogOpen(), cleared: timers.cleared });
-            """
-        )
-        self.assertEqual(result["open"], {"up": True, "armed": 1, "fetches": 1, "board": True})
-        self.assertFalse(result["shut"])
-        self.assertGreaterEqual(result["cleared"], 1)
-
-    def test_a_node_press_still_opens_the_pane_it_names(self):
-        result = self._run_crew(
-            """
+    def test_list_click_routes_once_and_list_wires_pause_with_the_dialog(self):
+        result = self._run_crew("""
             wireAgentDashboard();
             fetchAnswer = crewReading([link('s1', 's2')]);
             await refreshAgentDashboard();
-            body().fire('click', {
-                target: { closest: () => ({ dataset: node('s2').dataset }) },
-                preventDefault() {}
-            });
+            const event = { target: listRow('s2'), preventDefault() {} };
+            listBody.fire('click', event);
+            body().fire('click', event); // the same event bubbling to the body
             await settle();
-            report({ opened: calls.openWorkspaceWindow, targets: calls.focusTargets });
-            """
-        )
-        self.assertEqual(
-            result["opened"], [{"workspaceId": "default", "options": {"groupId": "g1"}}]
-        )
-        self.assertEqual(result["targets"][0]["options"], {"groupId": "g1", "sessionId": "s2"})
+            document.hidden = true;
+            scheduleAgentDashboardRefresh();
+            const hidden = listWires.paused.at(-1);
+            document.hidden = false;
+            scheduleAgentDashboardRefresh();
+            const visible = listWires.paused.at(-1);
+            closeAgentDashboardDialog();
+            report({ opened: calls.openWorkspaceWindow, hidden, visible, shut: listWires.paused.at(-1) });
+        """)
+        self.assertEqual(result["opened"], [{"workspaceId": "default", "options": {"groupId": "g1"}}])
+        self.assertTrue(result["hidden"])
+        self.assertFalse(result["visible"])
+        self.assertTrue(result["shut"])
 
-    def test_a_failed_read_keeps_the_board_behind_its_notice(self):
-        result = self._run_crew(
-            """
+    def test_list_navigation_keeps_the_target_resolvers_retry_notice(self):
+        result = self._run_crew("""
             fetchAnswer = crewReading([link('s1', 's2')]);
             await refreshAgentDashboard();
-            fetchAnswer = null;
+            workspaceOpens = false;
+            listBody.fire('click', { target: listRow('s2'), preventDefault() {} });
+            await settle();
+            report({ text: notice().textContent, up: dialogOpen() });
+        """)
+        self.assertEqual(result["text"], WORKSPACE_TAB_BLOCKED_HINT)
+        self.assertTrue(result["up"])
+
+    def test_a_removed_board_returns_focus_to_its_member_in_the_list(self):
+        result = self._run_crew("""
+            fetchAnswer = crewReading([link('s1', 's2')]);
             await refreshAgentDashboard();
-            report({ board: body().innerHTML.includes('dash-crews-board'), notice: notice().textContent });
-            """
-        )
-        self.assertTrue(result["board"])
-        self.assertIn("Could not refresh", result["notice"])
+            toggleAgentDashboardCrew('s1');
+            crewSlot().contains = () => true;
+            document.activeElement = node('s2');
+            toggleAgentDashboardCrew('s1');
+            report({ focused: Boolean(listRow('s2').focused), hidden: crewSlot().hidden });
+        """)
+        self.assertTrue(result["focused"])
+        self.assertTrue(result["hidden"])
+
+    def test_the_list_uses_the_sidebar_renderer_and_boards_start_hidden(self):
+        result = self._run_crew("""
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            await refreshAgentDashboard();
+            const runtime = { esc: escHtml, activity: dashboardActivityHtml, progress: dashboardProgressHtml,
+                glyph: dashboardAgentGlyphHtml, glyphKey: dashboardAgentGlyphKey, line: dashboardPaneLine,
+                hover: dashboardPaneHover, agentName: dashboardAgentName, workspaceLabel: dashboardWorkspaceLabel,
+                sessionColourStyle: dashboardSessionColourStyle };
+            report({ same: listBody.innerHTML === GridVibeDashboardSidebar.policy.bodyHtml(
+                GridVibeDashboardSidebar.policy.withoutWaiting(fetchAnswer), runtime, dashboardCloseActions()),
+                agents: sectionCounts().agents, hidden: crewSlot().hidden, nodes: nodes(),
+                hint: listRow('s2').title, words: listRow('s2').slots['.dash-agent-selection'].textContent });
+        """)
+        self.assertTrue(result["same"])
+        self.assertEqual(result["agents"], 5)
+        self.assertTrue(result["hidden"])
+        self.assertEqual(result["nodes"], [])
+        self.assertIn("Right-click to show this crew", result["hint"])
+        self.assertIn("Shift+F10", result["words"])
+
+    def test_mouse_and_keyboard_toggle_crews_in_selection_order_and_ignore_plain_rows(self):
+        result = self._run_crew("""
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            await refreshAgentDashboard();
+            let prevented = 0;
+            const toggle = (id, type = 'contextmenu', extra = {}) => listBody.fire(type, {
+                target: listRow(id), preventDefault() { prevented++; }, ...extra });
+            toggle('s5');
+            const plain = { prevented, nodes: nodes() };
+            toggle('s4');
+            toggle('s2', 'keydown', { key: 'ContextMenu' });
+            const both = { roots: crewSlot().heads.map(h => h.dataset.crewRoot), hidden: crewSlot().hidden,
+                selected: listRow('s1').classList.contains('is-crew-selected'), title: listRow('s1').title };
+            toggle('s1', 'keydown', { key: 'F10', shiftKey: true });
+            const one = nodes();
+            toggle('s3');
+            report({ plain, both, one, none: nodes(), hidden: crewSlot().hidden, prevented,
+                selection: listRow('s3').slots['.dash-agent-selection'].textContent });
+        """)
+        self.assertEqual(result["plain"], {"prevented": 0, "nodes": []})
+        self.assertEqual(result["both"]["roots"], ["s3", "s1"])
+        self.assertFalse(result["both"]["hidden"])
+        self.assertTrue(result["both"]["selected"])
+        self.assertIn("Crew shown", result["both"]["title"])
+        self.assertEqual(result["one"], ["s3", "s4"])
+        self.assertEqual(result["none"], [])
+        self.assertTrue(result["hidden"])
+        self.assertEqual(result["prevented"], 4)
+        self.assertIn("show this crew", result["selection"])
+
+    def test_context_menu_key_claims_both_defaults_and_toggles_once(self):
+        result = self._run_crew("""
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            const prevented = [];
+            for (const type of ['keydown', 'keyup']) {
+                let claimed = false;
+                listBody.fire(type, { target: listRow('s2'), key: 'ContextMenu',
+                    preventDefault() { claimed = true; } });
+                prevented.push(claimed);
+                if (!claimed) listBody.fire('contextmenu', { target: listRow('s2'), preventDefault() {} });
+            }
+            let plainClaimed = false;
+            listBody.fire('keyup', { target: listRow('s5'), key: 'ContextMenu',
+                preventDefault() { plainClaimed = true; } });
+            report({ prevented, nodes: nodes(), plainClaimed });
+        """)
+        self.assertEqual(result["prevented"], [True, True])
+        self.assertEqual(result["nodes"], ["s1", "s2"])
+        self.assertFalse(result["plainClaimed"])
+
+    def test_selection_survives_close_and_an_ended_crew_leaves_automatically(self):
+        result = self._run_crew("""
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            await refreshAgentDashboard();
+            toggleAgentDashboardCrew('s1');
+            toggleAgentDashboardCrew('s3');
+            closeAgentDashboardDialog();
+            showDashboard();
+            await settle();
+            const kept = nodes();
+            fetchAnswer = crewReading([link('s3', 's4')]);
+            await refreshAgentDashboard();
+            const remaining = nodes();
+            fetchAnswer = crewReading([]);
+            await refreshAgentDashboard();
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            report({ kept, remaining, none: nodes(), hidden: crewSlot().hidden,
+                selected: [..._agentDashboardSelectedCrews] });
+        """)
+        self.assertEqual(result["kept"], ["s1", "s2", "s3", "s4"])
+        self.assertEqual(result["remaining"], ["s3", "s4"])
+        self.assertEqual(result["none"], [])
+        self.assertTrue(result["hidden"])
+        self.assertEqual(result["selected"], [])
+
+    def test_marks_waiting_and_selection_are_decorations_on_the_shared_rows(self):
+        result = self._run_crew("""
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            const before = listRow('s1');
+            const rebuilds = listBody.rebuilds;
+            listBody.scrollTop = 137;
+            fetchAnswer.workspaces[0].groups[0].panes[0] = { ...fetchAnswer.workspaces[0].groups[0].panes[0],
+                agent_mcp: true, agent_mcp_override: true, agent_auto_mode: true, waiting: 'crew' };
+            await refreshAgentDashboard();
+            toggleAgentDashboardCrew('s1');
+            report({ same: before === listRow('s1'), rebuilds: listBody.rebuilds - rebuilds,
+                scroll: listBody.scrollTop, mark: before.icon.dataset, title: before.icon.title,
+                reading: before.slots['.dash-agent-reading'].innerHTML,
+                flags: before.slots['.dash-agent-flags'].textContent,
+                selected: before.classList.contains('is-crew-selected') });
+        """)
+        self.assertTrue(result["same"])
+        self.assertEqual(result["rebuilds"], 0)
+        self.assertEqual(result["scroll"], 137)
+        self.assertEqual(result["mark"], {"mcp": "on", "mcpOverride": "on", "auto": "on"})
+        self.assertIn("override", result["title"])
+        self.assertIn("auto-approval", result["flags"])
+        self.assertIn("dash-state-waiting", result["reading"])
+        self.assertTrue(result["selected"])
 
 
 class DashboardCrewBoardStylingTestCase(unittest.TestCase):
@@ -3565,7 +3410,7 @@ class DashboardCrewBoardStylingTestCase(unittest.TestCase):
         # The column it always was is the unqualified rule, under the same cap.
         base = re.search(r"\n\.dash-dialog \{([^}]*)\}", css)
         self.assertIsNotNone(base)
-        self.assertIn("width: min(520px, 75vw);", base.group(1))
+        self.assertIn("width: min(380px, 75vw);", base.group(1))
         self.assertIn("height: min(75vh, 820px);", base.group(1))
         # No narrow-window override puts it back to the whole window.
         self.assertNotIn(".dash-dialog.has-crews { height: 100%; }", css)
@@ -3575,24 +3420,18 @@ class DashboardCrewBoardStylingTestCase(unittest.TestCase):
         wide = re.search(r"@media \(min-width: (\d+)px\) \{(.*?)\n\}\n", css, flags=re.S)
         self.assertIsNotNone(wide)
         block = wide.group(2)
-        # Only with the list on (`has-session-list`): the board alone has no
-        # second pane to sit beside.
-        self.assertIn(".dash-dialog.has-crews.has-session-list .dash-body", block)
+        # The list stays on the left; the selected boards take the remainder.
+        self.assertIn(".dash-dialog.has-crews > .dash-body", block)
         self.assertIn("grid-template-columns:", block)
         # Each pane scrolls on its own inside a body that does not.
-        self.assertIn(".dash-dialog.has-crews.has-session-list .dash-crews-slot", block)
-        self.assertIn(".dash-dialog.has-crews.has-session-list .dash-sessions-pane", block)
-        self.assertIn("overflow: hidden;", block)
+        self.assertIn(".dash-dialog.has-crews .dash-crews-slot", block)
+        self.assertIn("minmax(240px, 320px) minmax(0, 1fr)", block)
+        self.assertIn("overflow: hidden;", css)
         self.assertIn("overflow-y: auto;", block)
         # Below that width nothing is declared for the panes: they stack in
         # the one scroller, as they did.
-        self.assertNotIn("dash-sessions-pane", css[:wide.start()])
+        self.assertIn("grid-template-rows: minmax(0, 1fr) minmax(0, 1fr)", css[:wide.start()])
 
-    def test_the_board_alone_is_not_divided_from_a_list_that_is_not_there(self):
-        css = self.CSS.read_text(encoding="utf-8")
-        rule = re.search(r"\.dash-dialog:not\(\.has-session-list\) \.dash-crews \{([^}]*)\}", css)
-        self.assertIsNotNone(rule)
-        self.assertIn("border-bottom: 0;", rule.group(1))
 
     def test_the_narrow_board_reads_its_gutter_from_the_wire_layer(self):
         css = self.CSS.read_text(encoding="utf-8")
@@ -3606,7 +3445,7 @@ class DashboardCrewBoardStylingTestCase(unittest.TestCase):
 
     def test_the_board_wears_only_tokens(self):
         css = self.CSS.read_text(encoding="utf-8")
-        board = css[css.index("/* ── Crews: the board above the list ──"):]
+        board = css[css.index("/* The permanent list and optional crew window"):]
         self.assertNotIn("#", board.replace("/* ──", ""))
         self.assertNotIn("rgb(", board)
         self.assertNotIn("rgba(", board)
@@ -3646,10 +3485,10 @@ class OverrideModeStylingTestCase(unittest.TestCase):
             ".terminal-agent-icon[data-mcp][data-mcp-override] {",
         )
         self.assertIn("var(--gv-mcp-override)", frame)
-        chip = self._block(self._css("agent-dashboard.css"), ".dash-tag-mcp.is-override {")
-        self.assertIn("color: var(--gv-mcp-override);", chip)
-        self.assertIn("background: var(--gv-mcp-override-soft);", chip)
-        for rule in (frame, chip):
+        frame = self._block(self._css("agent-dashboard-sidebar.css"),
+                            ".agent-sidebar-list .dash-agent-icon[data-mcp][data-mcp-override] {")
+        self.assertIn("outline-color: var(--gv-mcp-override);", frame)
+        for rule in (frame,):
             self.assertNotIn("#", rule)
             self.assertNotIn("rgb", rule)
 

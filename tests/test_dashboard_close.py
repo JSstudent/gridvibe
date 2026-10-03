@@ -302,7 +302,7 @@ function buttons() {
     const found = [];
     const pattern = /<button\b([^>]*)>/g;
     let match;
-    while ((match = pattern.exec(body().innerHTML)) !== null) {
+    while ((match = pattern.exec(renderedListHtml())) !== null) {
         const attributes = {};
         const attributePattern = /([a-zA-Z-]+)="([^"]*)"/g;
         let attribute;
@@ -807,25 +807,19 @@ class DashboardCloseControlsTestCase(DashboardCloseNodeTestCase):
     def _run_window(self, body: str):
         script = (
             WINDOW_STUBS
+            + (REPO_ROOT / "tests" / "dashboard_list_dom.js").read_text(encoding="utf-8")
             + DASHBOARD_CLOSE_JS.read_text(encoding="utf-8")
             + AGENT_IDENTITY_JS.read_text(encoding="utf-8")
             + AGENT_GLYPHS_JS.read_text(encoding="utf-8")
-            + self._dialog_with_list()
+            + DASHBOARD_DIALOG_JS.read_text(encoding="utf-8")
+            + (REPO_ROOT / "tests" / "dashboard_list_exports.js").read_text(encoding="utf-8")
+            + (STATIC_JS / "dashboard-sidebar.js").read_text(encoding="utf-8")
             + "\n(async () => {\n"
             + body
             + "\n})().catch(error => { console.error(error); process.exit(1); });\n"
         )
         return self._execute(script, [])
 
-    @staticmethod
-    def _dialog_with_list() -> str:
-        """The dialog ships with its session list switched off
-        (`DASHBOARD_SESSION_LIST_SHOWN`); the list is where these controls live,
-        so the switch is turned on in the source this harness loads."""
-        source = DASHBOARD_DIALOG_JS.read_text(encoding="utf-8")
-        off = "const DASHBOARD_SESSION_LIST_SHOWN = false;"
-        assert source.count(off) == 1, "the list switch moved or was renamed"
-        return source.replace(off, "const DASHBOARD_SESSION_LIST_SHOWN = true;")
 
     def test_the_session_close_is_a_control_beside_the_heading_never_inside_it(self):
         """A button inside a button is not a control, and the heading already
@@ -835,7 +829,7 @@ class DashboardCloseControlsTestCase(DashboardCloseNodeTestCase):
             fetchAnswer = snapshot();
             showDashboard();
             await settle();
-            const html = body().innerHTML;
+            const html = renderedListHtml();
             const head = html.split('<header class="dash-session-head">')[1].split('</header>')[0];
             report({
                 actions: actions(),

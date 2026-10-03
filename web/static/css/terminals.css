@@ -1042,7 +1042,7 @@
            A negative margin and not `transform: scale()`, so the browser still
            picks its source entry from the size it actually paints and the
            artwork stays crisp. dashboard.css carries the same two lines for
-           active_ws.ico with the fraction that asset measures, because that
+           crew.ico with the fraction that asset measures, because that
            button is shared with the launcher page and cannot read anything
            declared here. */
         .session-bar-launcher-icon,

@@ -25,8 +25,7 @@
 
 .terminal-name[data-agent],
 .pane-shell-menu-item[data-agent] .pane-shell-menu-label,
-.startup-mode-name[data-agent],
-.dash-agent-name {
+.startup-mode-name[data-agent] {
     background: var(--agent-brand-ground, transparent);
     border-radius: calc(var(--gv-radius-s) / 2);
     padding-inline: 3px;

@@ -954,10 +954,15 @@ class DashboardRouteTestCase(unittest.TestCase):
                 self.assertIn('id="agentDashboardShell"', body)
                 self.assertIn("agentDashboardBody", body)
                 self.assertIn("dashboard-dialog.js", body)
+                self.assertIn("dashboard-sidebar.js", body)
+                self.assertIn("css/agent-dashboard-sidebar.css", body)
+                self.assertEqual(body.count('src="/docs/images/crew.ico"'), 2)
                 # The button that raises it, and the badge that is the reason
                 # to.
                 self.assertIn('id="dashboardBtn"', body)
         self.assertEqual(self.client.get("/dashboard").status_code, 404)
+        with self.client.get("/docs/images/crew.ico") as response:
+            self.assertEqual(response.status_code, 200)
 
 
 if __name__ == "__main__":

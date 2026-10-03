@@ -52,6 +52,8 @@
    percentage `flex-basis`, so the clamp resolves against the row and not
    against whatever a browser decides a flex base is. */
 .agent-sidebar {
+    --agent-sidebar-resize-strip: 6px;
+    padding-right: var(--agent-sidebar-resize-strip);
     --agent-sidebar-width: clamp(240px, 15%, 400px);
     display: none;
     flex: 0 0 auto;
@@ -77,8 +79,8 @@
 .agent-sidebar-resizer {
     position: absolute;
     inset: 0 0 0 auto;
-    width: 6px;
-    min-width: 6px;
+    width: var(--agent-sidebar-resize-strip);
+    min-width: var(--agent-sidebar-resize-strip);
     padding: 0;
     border: 0;
     border-left: 1px solid var(--gv-dialog-border);
@@ -103,6 +105,8 @@
    (`dashboard-sidebar.js`), which reads the side off this same body class. */
 body.agent-sidebar-right .agent-sidebar {
     order: 1;
+    padding-right: 0;
+    padding-left: var(--agent-sidebar-resize-strip);
     border-right: 0;
     border-left: 1px solid var(--gv-dialog-border);
 }
@@ -122,29 +126,29 @@ body.agent-sidebar-right .agent-sidebar-resizer {
 /* A compact × leaves the session title its width. Workspace word buttons
    share a dedicated second line below the name/count, even in native mode;
    they never compete with the band title or wrap onto separate lines. */
-.agent-sidebar .dash-session-close {
+.agent-sidebar-list .dash-session-close {
     width: 22px;
     min-width: 22px;
     flex: 0 0 22px;
 }
 
-.agent-sidebar .dash-session-close svg {
+.agent-sidebar-list .dash-session-close svg {
     width: 12px;
     height: 12px;
 }
 
-.agent-sidebar .dash-workspace-head {
+.agent-sidebar-list .dash-workspace-head {
     flex-wrap: wrap;
 }
 
-.agent-sidebar .dash-workspace-actions {
+.agent-sidebar-list .dash-workspace-actions {
     flex: 0 0 100%;
     justify-content: flex-end;
     gap: 5px;
     margin: 0;
 }
 
-.agent-sidebar .dash-workspace-action {
+.agent-sidebar-list .dash-workspace-action {
     padding: 3px 5px;
     font-size: .62rem;
     white-space: nowrap;
@@ -239,16 +243,16 @@ body.agent-sidebar-right .agent-sidebar-resizer {
    is this width's, and the notice is the dialog's element at this width too.
    Written as a descendant rather than on the class alone, so it outranks the
    shared rule by specificity and not by which stylesheet loads second. */
-.agent-sidebar .agent-sidebar-body {
+.agent-sidebar-list .agent-sidebar-body {
     padding: 10px 10px 18px;
 }
 
-.agent-sidebar .dash-notice {
+.agent-sidebar-list .dash-notice {
     padding: 6px 12px;
     font-size: .68rem;
 }
 
-.agent-sidebar .dash-empty {
+.agent-sidebar-list .dash-empty {
     min-height: 30vh;
     padding: 0 6px;
 }
@@ -257,45 +261,45 @@ body.agent-sidebar-right .agent-sidebar-resizer {
 
    Everything here is a measurement, not a new look: the same band, card and row
    the dialog draws, with the space between them scaled to the column. */
-.agent-sidebar .dash-workspace + .dash-workspace {
+.agent-sidebar-list .dash-workspace + .dash-workspace {
     margin-top: 16px;
     padding-top: 16px;
 }
 
-.agent-sidebar .dash-workspace-head {
+.agent-sidebar-list .dash-workspace-head {
     gap: 6px;
     padding-bottom: 6px;
     margin-bottom: 9px;
 }
 
-.agent-sidebar .dash-workspace-name {
+.agent-sidebar-list .dash-workspace-name {
     font-size: .74rem;
     letter-spacing: .05em;
 }
 
-.agent-sidebar .dash-workspace-meta {
+.agent-sidebar-list .dash-workspace-meta {
     font-size: .64rem;
     margin-left: auto;
 }
 
-.agent-sidebar .dash-sessions {
+.agent-sidebar-list .dash-sessions {
     gap: 8px;
 }
 
-.agent-sidebar .dash-session-open {
+.agent-sidebar-list .dash-session-open {
     padding: 6px 8px;
     gap: 6px;
 }
 
-.agent-sidebar .dash-session-name {
+.agent-sidebar-list .dash-session-name {
     font-size: .75rem;
 }
 
-.agent-sidebar .dash-session-meta {
+.agent-sidebar-list .dash-session-meta {
     font-size: .62rem;
 }
 
-.agent-sidebar .dash-agents {
+.agent-sidebar-list .dash-agents {
     padding: 4px;
     gap: 1px;
 }
@@ -309,7 +313,7 @@ body.agent-sidebar-right .agent-sidebar-resizer {
    would wrap the title onto a second line under a name this surface does not
    draw, which would cost every row a line to gain nothing. Two classes, so it
    outranks that rule wherever the two files load in. */
-.agent-sidebar .dash-agent {
+.agent-sidebar-list .dash-agent {
     flex-wrap: nowrap;
     gap: 7px;
     padding: 5px 6px;
@@ -320,7 +324,7 @@ body.agent-sidebar-right .agent-sidebar-resizer {
    together, and inset, so it takes no width. A ring and not a fill, so it
    never reads as the row's hover or keyboard-focus wash, and it leaves the
    activity dot's colour alone. */
-.agent-sidebar .dash-agent.is-input-target {
+.agent-sidebar-list .dash-agent.is-input-target {
     box-shadow: inset 0 0 0 2px var(--gv-accent);
 }
 
@@ -334,7 +338,7 @@ body.agent-sidebar-right .agent-sidebar-resizer {
    The fallback holds the space for the first paint. The wires themselves are
    that layer's, dressed in `agent-dashboard.css`; they leave each card's edge
    into this space. */
-.agent-sidebar.has-crews .agent-sidebar-body {
+.agent-sidebar-list.has-crews .agent-sidebar-body {
     padding-left: var(--dash-wire-gutter, 16px);
 }
 
@@ -342,26 +346,26 @@ body.agent-sidebar-right .agent-sidebar-resizer {
    the crew's own. The dim is on a row's contents and not on the row, so the
    input-target ring (the row's own box-shadow) stays at full strength on a
    dimmed row, and keeps its own ring on a crew row. */
-.agent-sidebar .dash-agent > * {
+.agent-sidebar-list .dash-agent > * {
     transition: opacity .2s;
 }
 
-.agent-sidebar.is-crew-highlight .dash-agent:not(.is-crew-member) > * {
+.agent-sidebar-list.is-crew-highlight .dash-agent:not(.is-crew-member) > * {
     opacity: .32;
 }
 
-.agent-sidebar.is-crew-highlight .dash-agent.is-crew-member:not(.is-input-target) {
+.agent-sidebar-list.is-crew-highlight .dash-agent.is-crew-member:not(.is-input-target) {
     box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--gv-accent) 75%, transparent);
 }
 
-.agent-sidebar .dash-agent-line {
+.agent-sidebar-list .dash-agent-line {
     flex: 1 1 auto;
     flex-basis: auto;
     order: 0;
     font-size: .78rem;
 }
 
-.agent-sidebar .dash-agent-icon {
+.agent-sidebar-list .dash-agent-icon {
     width: 19px;
     height: 19px;
     border-radius: 5px;
@@ -372,16 +376,16 @@ body.agent-sidebar-right .agent-sidebar-resizer {
    override token, so the two surfaces cannot disagree. An outline, so
    switching it on or off moves nothing. `dashboard-sidebar.js` sets the
    attributes from the header's rule; the mark's hover carries the words. */
-.agent-sidebar .dash-agent-icon {
+.agent-sidebar-list .dash-agent-icon {
     position: relative;
 }
 
-.agent-sidebar .dash-agent-icon[data-mcp] {
+.agent-sidebar-list .dash-agent-icon[data-mcp] {
     outline: 1.5px solid var(--gv-accent);
     outline-offset: 1.5px;
 }
 
-.agent-sidebar .dash-agent-icon[data-mcp][data-mcp-override] {
+.agent-sidebar-list .dash-agent-icon[data-mcp][data-mcp-override] {
     outline-color: var(--gv-mcp-override);
 }
 
@@ -390,7 +394,7 @@ body.agent-sidebar-right .agent-sidebar-resizer {
    drawn here and not in the markup, so it is a pure decoration, and the letter
    is only the picture of it: the words are the mark's hover and the row's
    accessible name. */
-.agent-sidebar .dash-agent-icon[data-auto]::after {
+.agent-sidebar-list .dash-agent-icon[data-auto]::after {
     content: 'A';
     position: absolute;
     top: -6px;
@@ -413,7 +417,8 @@ body.agent-sidebar-right .agent-sidebar-resizer {
 
 /* The words for the frame and the pin, kept for a reader who is hearing the row
    and not drawn: out of flow, like the agent's name beside it. */
-.dash-agent-flags {
+.dash-agent-flags,
+.dash-agent-selection {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -424,7 +429,7 @@ body.agent-sidebar-right .agent-sidebar-resizer {
     white-space: nowrap;
 }
 
-.agent-sidebar .dash-agent-icon .dash-agent-glyph {
+.agent-sidebar-list .dash-agent-icon .dash-agent-glyph {
     width: 15px;
     height: 15px;
 }
@@ -445,11 +450,11 @@ body.agent-sidebar-right .agent-sidebar-resizer {
     white-space: nowrap;
 }
 
-.agent-sidebar .dash-progress {
+.agent-sidebar-list .dash-progress {
     width: 34px;
 }
 
-.agent-sidebar .dash-progress-value {
+.agent-sidebar-list .dash-progress-value {
     min-width: 22px;
     font-size: .6rem;
 }
@@ -489,4 +494,10 @@ body.agent-sidebar-right .agent-sidebar-resizer {
     .agent-sidebar {
         display: none !important;
     }
+}
+
+/* Selection is a dialog-only decoration, outside the row's structure key. */
+.dash-dialog-list .dash-agent.is-crew-selected {
+    border-left: 2px solid var(--gv-accent);
+    background: var(--gv-dialog-panel-soft);
 }

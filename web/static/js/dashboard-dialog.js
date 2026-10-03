@@ -9,11 +9,9 @@
        and the agents inside those — what each one is announcing and whether it
        is doing anything.
 
-       **It shows the crew board, and the list is switched off.** The docked
-       sidebar lists every workspace, session and agent while the reader works,
-       so the dialog is the picture of who handed a task to whom and nothing
-       else (`DASHBOARD_SESSION_LIST_SHOWN`). What follows about the list is
-       what it does when that switch is on.
+       **One shared session list, with selected crews beside it.** The
+       docked sidebar supplies the list renderer, decorations and lane wires.
+       Right-click or ContextMenu / Shift+F10 selects a crew for the board.
 
        **It lists every session, and it is still about the agents.** Being the
        one place all of them are named at once makes it the fastest way to
@@ -131,15 +129,10 @@
     const AGENT_DASHBOARD_REFRESH_BTN_ID = 'agentDashboardRefreshBtn';
     const AGENT_DASHBOARD_CLOSE_BTN_ID = 'agentDashboardCloseBtn';
 
-    /* The dialog shows the crew board and nothing else: the docked sidebar
-       already lists every workspace, session and agent. This is the one switch
-       for the list underneath it. Flip it to `true` and the dialog draws the
-       list again, beside the board, exactly as it did (the builders below, the
-       row updates, the close controls and their tests are all still here); an
-       icon that brings it up on demand would set the same thing. */
-    const DASHBOARD_SESSION_LIST_SHOWN = false;
+    let _agentDashboardList = null;
+    let _agentDashboardSnapshot = null;
+    const _agentDashboardSelectedCrews = new Set();
 
-    /* A dashboard that lags the thing it describes is just a screenshot. */
     const AGENT_DASHBOARD_REFRESH_MS = 2000;
     const AGENT_DASHBOARD_TIMEOUT_MS = 10000;
     /* How long a confirmation stays on the notice line. Only non-errors are
@@ -156,7 +149,6 @@
     let _agentDashboardPainted = '';
     let _agentDashboardController = null;
     let _agentDashboardStructure = '';
-    let _agentDashboardRows = new Map();
     let _agentDashboardActionNotice = '';
     let _agentDashboardActionTone = 'error';
     let _agentDashboardNoticeTimer = null;
@@ -280,23 +272,10 @@
         return identity ? identity.paneAgentMcpTagTitle(pane) : '';
     }
 
-    /* Override mode keeps the chip's `MCP` and adds `is-override`, which the
-       stylesheet turns red. Same reading as the pane header's red frame. */
+    /* The pane header's reading for the shared list's red MCP frame. */
     function dashboardMcpOverride(pane) {
         const identity = dashboardIdentity();
         return Boolean(identity && identity.paneAgentMcpOverride(pane));
-    }
-
-    /* The whole chip, so the docked sidebar draws *this* one rather than
-       composing it out of three of this module's answers -- the same reason
-       every other field on its row is asked for by name here. */
-    function dashboardMcpTagHtml(pane) {
-        return dashboardTagHtml(
-            dashboardMcpTag(pane),
-            'mcp',
-            dashboardMcpTagTitle(pane),
-            dashboardMcpOverride(pane) ? 'is-override' : ''
-        );
     }
 
     /* What the docked sidebar says about a pane's agent on its mark instead of
@@ -525,91 +504,8 @@
         `;
     }
 
-    /* `title` is optional and only ever the chip's own: a hover on a chip sits
-       inside the row's, the same way the state dot's does, so a marker the
-       reader may not recognise can answer on itself instead of spending row
-       width on prose. A chip whose label is already the word (`auto`,
-       `active`) is handed none. */
-    function dashboardTagHtml(label, modifier = '', title = '', state = '') {
-        if (!label) {
-            return '';
-        }
-        return `<span class="dash-tag${modifier ? ` dash-tag-${escHtml(modifier)}` : ''}`
-            + `${state ? ` ${escHtml(state)}` : ''}"`
-            + `${title ? ` title="${escHtml(title)}"` : ''}>${escHtml(label)}</span>`;
-    }
-
-    /* One running pane, as one line — and the whole line, because the agent it
-       runs is now stated *on* it rather than over a block of its siblings.
-
-       It was a block: a heading naming the agent and its shell, with one line
-       per pane under it. That grouping bought a saving only when several panes
-       of one agent sat in one session card, which is the uncommon case; what it
-       cost in every other was a two-line entry for one pane, a heading and its
-       lines competing for the eye, and — because the block was keyed on the
-       agent *and* its shell — a session with three agents drawn as three
-       separate stacks. Stating the mark, the name and the shell to the left of
-       the title puts all four facts on one line, in one column order, so a card
-       is read straight down the titles with the agents scanned in the margin.
-
-       `data-agent` therefore rides the row: it is what tints the mark, and the
-       block it used to sit on is gone.
-
-       The two chips after the title are on the row and not in the hover, which
-       is the opposite of where the transport label went, and the difference is
-       the trade rather than the width. A shell name is a long word that is
-       looked up when something is wrong with the pane; `MCP` and `auto` are
-       three and four characters that say what this agent may *do* — which is
-       what the reader is choosing between when they pick a row to give an
-       instruction to, and an answer that costs a hover is an answer they will
-       not ask for on every row in the card.
-
-       The session id rides the row because the window this row opens needs it:
-       naming the workspace lands in the right window, and naming the group and
-       the pane is what lands on the right tab and the right pane inside it. */
-    function dashboardAgentRowHtml(pane) {
-        return `
-            <button
-                type="button"
-                class="dash-agent"
-                data-agent="${escHtml(dashboardAgentGlyphKey(pane))}"
-                data-dashboard-action="pane"
-                data-dashboard-key="pane:${escHtml(pane?.session_id || '')}"
-                data-workspace-id="${escHtml(pane?.workspace_id || '')}"
-                data-group-id="${escHtml(pane?.group_id || '')}"
-                data-session-id="${escHtml(pane?.session_id || '')}"
-                title="${escHtml(dashboardPaneHover(pane))}"
-            >
-                <span class="dash-agent-reading">${dashboardActivityHtml(pane)}</span>
-                <span class="dash-agent-icon" aria-hidden="true">${dashboardAgentGlyphHtml(pane)}</span>
-                <span class="dash-agent-name">${escHtml(dashboardAgentName(pane))}</span>
-                <span class="dash-agent-line">${escHtml(dashboardPaneLine(pane))}</span>
-                ${dashboardMcpTagHtml(pane)}
-                ${pane?.agent_auto_mode ? dashboardTagHtml('auto', 'auto') : ''}
-                <span class="dash-agent-progress">${dashboardProgressHtml(pane)}</span>
-            </button>
-        `;
-    }
-
-    /* The one glyph on this page that is a control rather than a mark. Stroke
-       SVG and not a text ×, so it takes `currentColor` and lines up with the
-       title bar's own icon box instead of being centred by font metrics. */
-    const DASHBOARD_CLOSE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"'
-        + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"'
-        + ' focusable="false"><line x1="18" y1="6" x2="6" y2="18"></line>'
-        + '<line x1="6" y1="6" x2="18" y2="18"></line></svg>';
-
     function dashboardCloseActions() {
         return typeof window !== 'undefined' ? window.GridVibeDashboardClose : undefined;
-    }
-
-    /* Whether the *window* verb is on this page at all. Asked at render time
-       rather than remembered, because the native bridge arrives after the
-       first paint — the `pywebviewready` listener below invalidates the
-       rendered structure so this question is put again once it has. */
-    function dashboardCanCloseWindows() {
-        const actions = dashboardCloseActions();
-        return Boolean(actions && actions.canCloseWindow());
     }
 
     /* The two custom properties that carry a session's own hue onto its card.
@@ -641,174 +537,25 @@
             + `--dash-session-color-soft:${escHtml(colour.sessionColourRgba(groupId, 0.14))}"`;
     }
 
-    /* One session tab, as a card: its own heading, its own agents, its own
-       edge — in its own colour, which is its tab's. The heading is pressable
-       for the same reason the agent rows are — it is the way to the tab
-       itself, which may hold panes this surface deliberately does not list.
-
-       The × is a control *beside* that heading and never inside it: a button
-       inside a button is not a control, and the heading already has an action
-       of its own. It ends live shells, so it goes through the same
-       three-outcome prompt the session tab's × does. */
-    function dashboardSessionHtml(group) {
-        const panes = Array.isArray(group?.panes) ? group.panes : [];
-        /* `agent_count` and not `panes.length`: an empty list is exactly what a
-           session with no agent in it has, so falling back to the length would
-           make the two cases indistinguishable at the one point that has to
-           tell them apart. The fallback stays for a card that carries no count
-           at all, where a list of rows is the better guess than none. */
-        const declared = Number(group?.agent_count);
-        const agents = Number.isFinite(declared) ? declared : panes.length;
-        const total = Number(group?.pane_count) || panes.length;
-        const others = Math.max(0, total - agents);
-        const name = String(group?.name || group?.group_id || '');
-        const actions = dashboardCloseActions();
-        /* No controller, no ×: a control that cannot do the thing it names is
-           worse than a heading with no control beside it. The same rule the
-           band's two verbs follow, and the same one this file already applies
-           to the identity and glyph modules. */
-        const closeTitle = actions ? actions.policy.sessionCloseTitle(`"${name}"`) : '';
-        const closeButton = actions
-            ? `
-                    <button
-                        type="button"
-                        class="dash-session-close"
-                        data-dashboard-action="close-session"
-                        data-dashboard-key="close-session:${escHtml(group?.group_id || '')}"
-                        data-workspace-id="${escHtml(group?.workspace_id || '')}"
-                        data-group-id="${escHtml(group?.group_id || '')}"
-                        data-session-name="${escHtml(name)}"
-                        title="${escHtml(closeTitle)}"
-                        aria-label="${escHtml(closeTitle)}"
-                    >${DASHBOARD_CLOSE_ICON}</button>`
-            : '';
-        /* What the card is a card *of*. With an agent in it that is how many,
-           and the panes around them; with none it is simply the session's
-           size, because "0 agents · 3 other panes" describes the row by what
-           it is not and makes the reader do the subtraction to find out what
-           it is. */
-        const meta = agents
-            ? `${agents} agent${agents === 1 ? '' : 's'}${others ? ` · ${others} other pane${others === 1 ? '' : 's'}` : ''}`
-            : `${total} pane${total === 1 ? '' : 's'}`;
-        return `
-            <section class="dash-session${agents ? '' : ' is-quiet'}"${dashboardSessionColourStyle(group)}>
-                <header class="dash-session-head">
-                    <button
-                        type="button"
-                        class="dash-session-open"
-                        data-dashboard-action="session"
-                        data-dashboard-key="session:${escHtml(group?.group_id || '')}"
-                        data-workspace-id="${escHtml(group?.workspace_id || '')}"
-                        data-group-id="${escHtml(group?.group_id || '')}"
-                    >
-                        <span class="dash-session-name">${escHtml(name)}</span>
-                        ${group?.is_active ? dashboardTagHtml('active', 'active') : ''}
-                        <span class="dash-session-meta">${escHtml(meta)}</span>
-                    </button>${closeButton}
-                </header>
-                <div class="dash-agents">
-                    ${agents
-                        ? panes.map(dashboardAgentRowHtml).join('')
-                        : '<p class="dash-session-none">No active agents</p>'}
-                </div>
-            </section>
-        `;
-    }
-
-    /* The band's two close verbs. Words rather than glyphs, and deliberately:
-       they differ by whether the sessions survive, which no pair of icons this
-       size says and a label plus a title does. The window verb is simply not
-       rendered in browser mode (`dashboard-close.js` owns that predicate). */
-    function dashboardWorkspaceActionsHtml(workspace, index) {
-        const actions = dashboardCloseActions();
-        if (!actions) {
-            return '';
-        }
-        const label = dashboardWorkspaceLabel(workspace, index);
-        const workspaceId = escHtml(workspace?.workspace_id || '');
-        /* What closing the workspace would end, which is every live session in
-           it — and now also every session the band lists, because the tree no
-           longer drops any. It was two fields while it was two numbers. */
-        const closes = Number(workspace?.group_count) || 0;
-        const controls = actions.policy
-            .workspaceControls(workspace, { native: dashboardCanCloseWindows() })
-            .map(control => `
-                <button
-                    type="button"
-                    class="dash-workspace-action${control.danger ? ' is-danger' : ''}"
-                    data-dashboard-action="${escHtml(control.action)}"
-                    data-dashboard-key="${escHtml(control.action)}:${workspaceId}"
-                    data-workspace-id="${workspaceId}"
-                    data-workspace-label="${escHtml(label)}"
-                    data-group-count="${escHtml(String(closes))}"
-                    title="${escHtml(control.title)}"
-                >${escHtml(control.label)}</button>
-            `)
-            .join('');
-        return `<div class="dash-workspace-actions">${controls}</div>`;
-    }
-
-    /* One workspace, as a titled band across the page, with its sessions stacked
-       one under another inside it — full width, every card the same width. They
-       used to flow into as many columns as the dialog was wide enough for,
-       which made a card's width a function of how many sessions happened to be
-       open beside it: two cards side by side truncated every title in both, and
-       a third session arriving re-flowed the two the reader was already reading.
-       A card is a session and a session is read along its rows, so the width
-       goes to the rows. */
-    function dashboardWorkspaceHtml(workspace, index) {
-        const groups = Array.isArray(workspace?.groups) ? workspace.groups : [];
-        const agents = Number(workspace?.agent_count) || 0;
-        /* "no agents" rather than "0 agents": the band still exists, so the
-           zero is a fact about it and not a count that failed to arrive. */
-        const meta = `${groups.length} session${groups.length === 1 ? '' : 's'} · `
-            + (agents ? `${agents} agent${agents === 1 ? '' : 's'}` : 'no agents');
-        return `
-            <section class="dash-workspace${agents ? '' : ' is-quiet'}">
-                <header class="dash-workspace-head">
-                    <button
-                        type="button"
-                        class="dash-workspace-open"
-                        data-dashboard-action="workspace"
-                        data-dashboard-key="workspace:${escHtml(workspace?.workspace_id || '')}"
-                        data-workspace-id="${escHtml(workspace?.workspace_id || '')}"
-                    >
-                        <span class="dash-workspace-name">${escHtml(dashboardWorkspaceLabel(workspace, index))}</span>
-                    </button>
-                    <span class="dash-workspace-meta">${escHtml(meta)}</span>
-                    ${dashboardWorkspaceActionsHtml(workspace, index)}
-                </header>
-                <div class="dash-sessions">
-                    ${groups.length
-                        ? groups.map(dashboardSessionHtml).join('')
-                        : '<p class="dash-session-none">No sessions</p>'}
-                </div>
-            </section>
-        `;
-    }
-
     /* ── The crew board ──
 
        The dialog's answer to "how far along is this crew": one box per crew,
        the orchestrator on the left and the agents it handed tasks to in
        columns to its right, one column per depth, a parent centred on its
-       children and a fan of wires between them. The board is the dialog's
-       whole body while the session list is switched off
-       (`DASHBOARD_SESSION_LIST_SHOWN`); with the list on, the list is
-       untouched by it and a crew's agents are named twice.
+       children and a fan of wires between them. The board has its own slot;
+       the shared list is untouched by board updates.
 
          · **The dialog is three quarters of the window while a crew exists.**
            That is the most it takes, in width and in height, and a crew larger
-           than that scrolls inside the board. With the list on, the board and
+           than that scrolls inside the board. The board and
            the list are two panes side by side, each scrolling on its own, and
-           on a window too narrow for two they stack in the one scroller. With
-           no crew the dialog is the column it was, with a line saying so.
+           on a window too narrow for two they stack. With no selected crew
+           the dialog is the compact list column.
 
          · **It is laid out from the crew index, never from `link_id`.** A new
            round mints a new id for the same pair, and a board keyed by it
            would rebuild every node on every `send_task`. Nodes are named by
-           session id and crews by their root, in `indexCrews`' order, which is
-           the list's.
+           session id and crews by their root, in selection order.
          · **It has its own structure key.** What changes the board's shape --
            who is in which crew and where, whether a pane is still open, which
            agent and session it is -- rebuilds the board and nothing else. What
@@ -1083,33 +830,8 @@
 
     /* What the dialog says while no agent has handed a task to another: the
        only thing on it once the list is off, so it names what would appear. */
-    const DASHBOARD_CREW_EMPTY_HTML = `
-        <div class="dash-empty">
-            <p class="dash-empty-title">No crews yet.</p>
-            <p class="dash-empty-note">
-                No agent has handed a task to another yet. When one does, the
-                crew appears here as a board.
-            </p>
-        </div>`;
-
-    /* The crews slot's content: the board, or with the list off the empty
-       state in its place, so the slot is never blank. */
     function dashboardCrewSlotHtml(draw) {
-        if (draw.html) return draw.html;
-        return DASHBOARD_SESSION_LIST_SHOWN ? '' : DASHBOARD_CREW_EMPTY_HTML;
-    }
-
-    /* The header's reading while the list is off: what the board holds, in
-       the dialog's own units, instead of the workspace and session counts of
-       a list it does not draw. */
-    function dashboardCrewTotalsText(snapshot) {
-        const board = dashboardCrewModel()
-            ? dashboardCrewBoardModel(snapshot, dashboardCrewContext(snapshot))
-            : [];
-        if (!board.length) return 'No crews';
-        const agents = board.reduce((sum, crewBox) => sum + crewBox.nodes.length, 0);
-        return `${board.length} crew${board.length === 1 ? '' : 's'} · `
-            + `${agents} agent${agents === 1 ? '' : 's'}`;
+        return draw.html;
     }
 
     function dashboardWriteSlot(element, selector, property, value, before) {
@@ -1125,8 +847,7 @@
         if (!draw.key && !previous.key) return;
         const slot = body.querySelector?.('[data-dashboard-crews]');
         if (!slot) {
-            _agentDashboardPainted = '';
-            renderAgentDashboard(dashboardBodyHtml(snapshot, draw));
+            return;
         } else if (draw.key !== previous.key) {
             const active = document.activeElement;
             const focusedKey = slot.contains?.(active) ? active?.dataset?.dashboardKey || '' : '';
@@ -1137,7 +858,11 @@
                 if (board) board.scrollLeft = scrollLeft;
             }
             if (focusedKey) {
-                slot.querySelector?.(`[data-dashboard-key="${focusedKey}"]`)?.focus?.({ preventScroll: true });
+                const replacement = slot.querySelector?.(`[data-dashboard-key="${focusedKey}"]`)
+                    || document.getElementById('agentDashboardListBody')
+                        ?.querySelector?.(`[data-dashboard-key="pane:${active?.dataset?.sessionId || ''}"]`)
+                    || body.parentElement;
+                replacement?.focus?.({ preventScroll: true });
             }
         } else {
             slot.querySelectorAll?.('[data-crew-node]').forEach(element => {
@@ -1233,48 +958,41 @@
         wires.layer.paint(snapshot);
     }
 
-    /* Empty now means empty: the tree carries every live workspace, so an
-       absent one is a server with nothing open on it rather than a server with
-       nothing *agentic* open on it. The copy says the first thing, which is
-       also the only one of the two a reader can act on from here.
-
-       The crew board leads, in a slot of its own that is there (and empty)
-       whenever anything is, so a change to the board alone can be written
-       into it without touching the list. */
-    function dashboardBodyHtml(snapshot, draw) {
-        const workspaces = Array.isArray(snapshot?.workspaces) ? snapshot.workspaces : [];
-        if (!DASHBOARD_SESSION_LIST_SHOWN) {
-            return `<div class="dash-crews-slot" data-dashboard-crews>${dashboardCrewSlotHtml(
-                draw || dashboardCrewBoardDraw(snapshot, dashboardCrewContext(snapshot))
-            )}</div>`;
-        }
-        if (!workspaces.length) {
-            return `
-                <div class="dash-empty">
-                    <p class="dash-empty-title">Nothing is running.</p>
-                    <p class="dash-empty-note">
-                        Launch a session and it appears here, with the agents inside it
-                        listed first.
-                    </p>
-                </div>
-            `;
-        }
-        const board = draw || dashboardCrewBoardDraw(snapshot, dashboardCrewContext(snapshot));
-        return `<div class="dash-crews-slot" data-dashboard-crews>${board.html}</div>`
-            + '<div class="dash-sessions-pane" data-dashboard-sessions>'
-            + workspaces.map((workspace, index) => dashboardWorkspaceHtml(workspace, index)).join('')
-            + '</div>';
+    /* Permanent sibling slots: a list rebuild cannot replace the crew board. */
+    function dashboardBodyHtml() {
+        return '<div class="dash-dialog-list agent-sidebar-list" id="agentDashboardList">'
+            + '<div class="dash-body agent-sidebar-body" id="agentDashboardListBody" data-dashboard-sessions></div></div>'
+            + '<div class="dash-crews-slot" data-dashboard-crews hidden></div>';
     }
 
-    /* While a crew is on it the dialog is as big as it gets (three quarters of
-       the window it was opened in, in each direction), and the column it always
-       was when none is. Classes and not styles, so the stylesheet owns every
-       size and the breakpoint that puts the board and, when the list is shown,
-       the list side by side. */
+    function dashboardDialogList() {
+        if (!_agentDashboardList && typeof window.createAgentDashboardList === 'function') {
+            _agentDashboardList = window.createAgentDashboardList({
+                ids: { shell: 'agentDashboardList', body: 'agentDashboardListBody' },
+                inputTarget: () => '',
+                notice: setAgentDashboardNotice,
+                refresh: refreshAgentDashboard,
+                targetOwnsNotice: true,
+                crewSelected: root => _agentDashboardSelectedCrews.has(root),
+                onCrewToggle: toggleAgentDashboardCrew
+            });
+            _agentDashboardList.wireRows();
+        }
+        return _agentDashboardList;
+    }
+
+    function toggleAgentDashboardCrew(root) {
+        const context = dashboardCrewContext(_agentDashboardSnapshot);
+        if (!context?.crews?.roots.includes(root)) return false;
+        if (_agentDashboardSelectedCrews.has(root)) _agentDashboardSelectedCrews.delete(root);
+        else _agentDashboardSelectedCrews.add(root);
+        paintAgentDashboardSnapshot(_agentDashboardSnapshot);
+        return true;
+    }
+
     function paintAgentDashboardSize(hasCrews) {
         const dialog = document.getElementById(AGENT_DASHBOARD_BODY_ID)?.parentElement;
         dialog?.classList?.toggle?.('has-crews', Boolean(hasCrews));
-        dialog?.classList?.toggle?.('has-session-list', DASHBOARD_SESSION_LIST_SHOWN);
     }
 
     /* The three counts always, once anything is open. The agent count leads
@@ -1340,79 +1058,27 @@
     function paintAgentDashboardSnapshot(snapshot) {
         const body = document.getElementById(AGENT_DASHBOARD_BODY_ID);
         if (!body) return;
-        const rows = new Map();
-        const structure = JSON.stringify(snapshot.workspaces.map(workspace => ({
-            ...workspace,
-            groups: workspace.groups.map(group => ({
-                ...group,
-                panes: group.panes.map(pane => {
-                    rows.set(pane.session_id, pane);
-                    /* `waiting` is a reading like `activity`: it only changes
-                       which mark the dot wears. */
-                    const { activity, title, directory, status, waiting, ...identity } = pane;
-                    return identity;
-                })
-            }))
-        })));
-        /* The board is drawn from the same reading, against its own key: links
-           sit outside `workspaces`, so nothing about a crew is in the rows'. */
-        const draw = dashboardCrewBoardDraw(snapshot, dashboardCrewContext(snapshot));
-        // Ordinary polls update existing rows. Idle ages and title changes must
-        // not replace buttons, interrupt a press, or destroy text selections.
-        if (structure === _agentDashboardStructure && body.querySelectorAll) {
-            /* Rows only: a board node carries the same target attributes. */
-            body.querySelectorAll('.dash-agent[data-session-id]').forEach(row => {
-                const pane = rows.get(row.dataset.sessionId);
-                const previous = _agentDashboardRows.get(row.dataset.sessionId);
-                if (!pane) return;
-                const line = dashboardPaneLine(pane);
-                if (!previous || line !== dashboardPaneLine(previous)) {
-                    row.querySelector('.dash-agent-line').textContent = line;
-                }
-                /* The hover is its own comparison rather than a second write
-                   under the line's. It carries the full path the line
-                   shortened away, which is the whole reason shortening the
-                   line is lossless — writing the line into it would throw that
-                   away on the first title change — and `directory` is
-                   deliberately absent from the structure key above, so a pane
-                   that only moved would otherwise go on naming where it was. */
-                const hover = dashboardPaneHover(pane);
-                if (!previous || hover !== dashboardPaneHover(previous)) {
-                    row.title = hover;
-                }
-                const reading = dashboardActivityHtml(pane);
-                if (!previous || reading !== dashboardActivityHtml(previous)) {
-                    row.querySelector('.dash-agent-reading').innerHTML = reading;
-                }
-                /* The bar is its own comparison for the same reason it is its
-                   own element: it sits at the other end of the row from the
-                   dot, and an agent that has only crossed a percentage must not
-                   cost a repaint of the indicator the reader is watching. */
-                const progress = dashboardProgressHtml(pane);
-                if (!previous || progress !== dashboardProgressHtml(previous)) {
-                    row.querySelector('.dash-agent-progress').innerHTML = progress;
-                }
-            });
-            _agentDashboardPainted = '';
-            paintAgentDashboardCrewBoard(body, snapshot, draw);
-        } else {
-            /* A change in the list replaces the board element too, and a deep
-               crew scrolled sideways would snap back for something that
-               happened elsewhere. */
-            const scrollLeft = _agentDashboardBoard.key
-                ? body.querySelector?.('.dash-crews-board')?.scrollLeft || 0
-                : 0;
-            renderAgentDashboard(dashboardBodyHtml(snapshot, draw));
-            if (scrollLeft && draw.key) {
-                const board = body.querySelector?.('.dash-crews-board');
-                if (board) board.scrollLeft = scrollLeft;
-            }
-            _agentDashboardBoard = { key: draw.key, nodes: draw.nodes, heads: draw.heads };
+        _agentDashboardSnapshot = snapshot;
+        if (!_agentDashboardPainted) renderAgentDashboard(dashboardBodyHtml());
+        const context = dashboardCrewContext(snapshot);
+        const roots = context?.crews?.roots || [];
+        for (const root of _agentDashboardSelectedCrews) {
+            if (!roots.includes(root)) _agentDashboardSelectedCrews.delete(root);
         }
-        _agentDashboardStructure = structure;
-        _agentDashboardRows = rows;
+        const selected = context ? { ...context, crews: { ...context.crews,
+            roots: [..._agentDashboardSelectedCrews] } } : null;
+        const draw = dashboardCrewBoardDraw(snapshot, selected);
+        dashboardDialogList()?.paintSnapshot(snapshot);
+        paintAgentDashboardCrewBoard(body, snapshot, draw);
+        const slot = body.querySelector?.('[data-dashboard-crews]');
+        if (slot) slot.hidden = !draw.key;
         paintAgentDashboardSize(Boolean(draw.key));
-        paintAgentDashboardCrewWires(snapshot, Boolean(draw.key));
+        // Measure only the selected crews; unrelated links have no endpoints here.
+        const selectedSnapshot = { ...snapshot, links: (snapshot.links || []).filter(link =>
+            _agentDashboardSelectedCrews.has(context?.crews?.rootOf?.get(String(link.requester_session_id || '')))) };
+        paintAgentDashboardCrewWires(selectedSnapshot, Boolean(draw.key));
+        _agentDashboardList?.pause(agentDashboardWiresPaused());
+        _agentDashboardStructure = 'ready';
     }
 
     /* A render replaces the row the pointer or the caret was on, so the row is
@@ -1492,9 +1158,7 @@
         }
         const totals = document.getElementById(AGENT_DASHBOARD_TOTALS_ID);
         if (totals) {
-            totals.textContent = DASHBOARD_SESSION_LIST_SHOWN
-                ? dashboardTotalsText(snapshot)
-                : dashboardCrewTotalsText(snapshot);
+            totals.textContent = dashboardTotalsText(snapshot);
         }
         paintAgentDashboardSnapshot(snapshot);
     }
@@ -1515,6 +1179,7 @@
     function scheduleAgentDashboardRefresh() {
         /* The board's wires stop with the poll. */
         _agentDashboardCrewWires?.layer.setPaused(agentDashboardWiresPaused());
+        _agentDashboardList?.pause(agentDashboardWiresPaused());
         if (_agentDashboardTimer !== null) {
             clearInterval(_agentDashboardTimer);
             _agentDashboardTimer = null;
@@ -1906,6 +1571,7 @@
            listener on a row would not outlive the reading that drew it. */
         body.addEventListener('click', event => {
             const row = event.target?.closest?.('[data-dashboard-action]');
+            if (document.getElementById('agentDashboardListBody')?.contains?.(row)) return;
             if (!row) {
                 return;
             }
@@ -1957,7 +1623,7 @@
            browser-mode shape for as long as the page lives. */
         window.addEventListener?.('pywebviewready', () => {
             _agentDashboardStructure = '';
-            _agentDashboardPainted = '';
+            _agentDashboardList?.invalidate();
             refreshAgentDashboard();
         });
         /* Not a dismissal: the page itself is going away, so this runs
@@ -1968,6 +1634,8 @@
             ++_agentDashboardRequestId;
             _agentDashboardController?.abort();
             _agentDashboardController = null;
+            _agentDashboardList?.dispose();
+            disposeAgentDashboardCrewWires();
         });
         window.addEventListener?.('pageshow', event => {
             if (event.persisted && agentDashboardDialogOpen()) {

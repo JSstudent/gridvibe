@@ -1085,7 +1085,7 @@ unless the task explicitly changes this contract.
   every live workspace, its groups and their agent panes. Consumers must not fan
   out per-workspace requests to rebuild it.
 - The payload carries **every live session, agents first**. The list surfaces
-  (the docked sidebar, and the dialog's list while that is switched on) are the
+  (the docked sidebar and the dialog's shared list) are the
   agent list *and* the only place every workspace and session is named at once,
   so they are also how a reader reaches one — which makes dropping a session the
   removal of its only route from here. The two jobs are reconciled in the
@@ -1141,27 +1141,23 @@ unless the task explicitly changes this contract.
   part of the rule — a remote pane's tools arrive over the reverse forward on
   its own SSH transport, so `pane_can_run_the_sidecar()` picks the *shape* of
   the answer (local config file against tunnelled URL) and never whether there
-  is one. The pane header and the docked sidebar draw the tag as a frame
+  is one. The pane header and both dashboard lists draw the tag as a frame
   around the agent's mark (`data-mcp` on the icon, written by
   `syncPaneAgentIcon()` in the header and by `decorateMarks()` in the sidebar),
   with `MCP_TAG_TITLE` on the mark's hover, because neither has width to spare
-  for a word; the dialog's session list, while it is switched on, draws it as an
-  `MCP` chip. The tag is its own value
+  for a word. The tag is its own value
   and is never folded into `paneDisplayTitle()`
   or `paneChatLine()`: a title is also what the reader typed, and a chip
   concatenated into one would be indistinguishable from a name and would reach
   the typed-title comparison as though somebody had chosen it. `agent_mcp`
-  therefore stays in `PANE_FIELDS` and in the dialog list's repaint structure
-  key, so a relaunch on or off the tools rebuilds a list row and an unchanged
-  poll does not; the sidebar rewrites the mark's attributes in place instead.
+  therefore stays in `PANE_FIELDS`; both dashboard lists rewrite the mark's
+  attributes in place, so a relaunch on or off the tools never rebuilds a row.
 - **Override mode is a state of that same tag, never a second one.**
   `paneAgentMcpOverride()` in `agent-identity.js` is true only when the pane
   wears the MCP tag *and* `agent_mcp_override === true`, so a stale or stringy
-  grant paints nothing. The header and the sidebar write `data-mcp-override`
-  beside `data-mcp` and the dialog list's chip gains `is-override`; all three
-  colour through
-  `--gv-mcp-override` / `--gv-mcp-override-soft` (the theme's danger hue, never
-  a literal), the chip text stays `MCP`, and `paneAgentMcpTagTitle()` swaps in
+  grant paints nothing. The header and both lists write `data-mcp-override`
+  beside `data-mcp` and colour through `--gv-mcp-override` (the theme's danger
+  hue, never a literal). `paneAgentMcpTagTitle()` swaps in
   `MCP_OVERRIDE_TAG_TITLE` so colour is not the only signal.
   `agent_mcp_override` is in `PANE_FIELDS`, read from the live record, so a
   relaunch that drops the grant clears the red where the pane stands.
@@ -1254,21 +1250,31 @@ unless the task explicitly changes this contract.
   and `EXPLORER_ESCAPE_CLAIM_SELECTOR` already claims Escape for it. Include
   the partial *before* the confirm dialogs on each page; at equal z-index the
   later element wins.
-- **The dialog shows the crew board and nothing else.** The docked sidebar lists
-  every workspace, session and agent, so the dialog is the picture of which
-  agent handed a task to which. One constant, `DASHBOARD_SESSION_LIST_SHOWN` in
-  `dashboard-dialog.js`, switches the dialog's session list: off, the body is the
-  crews slot alone, holding the board or, with no crew, "No crews yet." and a
-  line saying no agent has handed a task to another yet; the header counts
-  crews and their agents (`dashboardCrewTotalsText()`; the sidebar keeps the
-  session and workspace totals). On, the list is drawn beside the board exactly
-  as it was: its builders, in-place row updates, close controls and the
-  `has-session-list` side-by-side layout are kept and tested with the switch
-  on. Nothing else depends on the list: the button badge, `Alt+A`, the poll,
-  the claim, dismissal and node targeting all run from the board. The dialog's
-  close-workspace and close-window controls are the list's, so they are
-  reachable from the sidebar while the list is off. The dialog is never larger
-  than three quarters of the window it opened in, in width and in height.
+- **The dialog uses the docked sidebar's list with an optional crew window.**
+  `dashboard-sidebar.js` supplies a second controller instance with its own
+  body and shell, but the same renderer, in-place decorations, hover/focus
+  highlight and lane wire layer. The dialog supplies the snapshot from its
+  existing poll; the list instance neither polls nor persists sidebar state.
+  The list shows workspace bands, session cards, agent rows and close actions;
+  the header counts agents, sessions and workspaces. There is no hidden-list
+  switch or alternative dialog list renderer.
+- **Crew selection is a dialog-only gesture.** Right-clicking an orchestrator
+  or worker row toggles its root crew in the board window. ContextMenu and
+  Shift+F10 on a focused crew row do the same; only crew rows suppress the
+  native context menu. The hover and accessible text explain the gesture and
+  whether the crew is shown, and selected rows carry `is-crew-selected` in
+  place. Selection is an insertion-ordered, in-memory set for the page's dialog
+  lifetime, retained across dismissal and reopen. A root absent from the next
+  reading is removed automatically; returning links do not reselect it.
+  The first selection shows the crew window and the last removal hides it.
+  The docked sidebar keeps its ordinary context menu and has no crew toggle.
+- **The dialog is capped at 75% of its window in both dimensions.** With no
+  selected crew it is a compact list column. With selections it grows to the
+  cap; from 1000px window width the list is on the left and the crew window
+  takes the remaining width on the right. Below that width the crew window
+  stacks under the list; both scroll within the cap without page overflow.
+  Its button and header mark use `/docs/images/crew.ico`, compensating for its
+  114px ink width on a 128px canvas. The docked logo and handle marks are unchanged.
 - The dialog polls only while it is open **and its document is visible**.
   Opening arms the poll, reads once, publishes the exclusivity claim below and
   moves focus to the surface rather than to a control in it; closing disarms the
@@ -1343,7 +1349,8 @@ unless the task explicitly changes this contract.
   var(--agent-sidebar-scale, 1))`, with the base owned solely by the CSS clamp
   `clamp(240px, 15%, 400px)`. Dragging measures the rendered border-box width
   divided by its current scale, never restating the clamp in JavaScript. The
-  edge button captures the pointer and listens for move/up/cancel on the window;
+  edge button occupies a reserved 6px strip, outside the content box on either
+  docked side, so it cannot cover the scrollbar. It captures the pointer and listens for move/up/cancel on the window;
   each move writes a scale clamped to 100..200. The drag captures its
   direction from the side at the press, so the handle always widens away from
   the grid; a side change under the pointer abandons the drag rather than
@@ -1355,7 +1362,7 @@ unless the task explicitly changes this contract.
   a separate row for workspace word buttons beneath the band heading; shared
   `agent-dashboard.css` rules and palette tokens remain the styling owners.
 - Acting closes the dialog only when the act lands on this page: a board node
-  (or a list row, while the list is on) for the workspace this window already
+  or a list row for the workspace this window already
   is takes the dialog with it, because a surface over the pane it just reached
   is in the way. A node for any other workspace leaves it up, and so does a
   refusal, which is reported on it. The close verbs never close it.
@@ -1419,36 +1426,17 @@ unless the task explicitly changes this contract.
   progress bar is the trailing column and a separate reading: only the agents
   that speak the progress sequence have one, so it must never widen the
   state's column.
-- The drawn row of the dialog's list is therefore the dot, the agent's mark and
-  name, the chat title, `MCP` and `auto` — the two chips left on it, and both
-  say what this agent may *do*, which is what a reader choosing a row to
-  instruct is deciding between. What the pane runs *on* is still `paneTransportLabel()`'s single
-  word, and the dashboard states it as the last line of the row's own hover
-  rather than as a chip on the line: it is looked up when something is wrong
-  with a pane, not scanned down a card, and the width belongs to the title.
-  A chip may carry a hover of its own for a label the reader may not recognise;
-  one whose label is already the word carries none.
-- The docked sidebar's row drops the agent's *name* out of flow because its mark
-  already answers which agent it is, and it draws **no chip at all**. What the
-  agent may do is on the mark: a frame when it has GridVibe's tools (blue,
-  red in override mode) and a small framed `A` pinned to its corner when it was
-  launched with auto-approval. The frame is the pane header's own, from the same
-  rule (`paneAgentMcpTag()`, `paneAgentMcpOverride()`), the same accent and
-  `--gv-mcp-override` tokens and the same hover sentence
-  (`paneAgentMcpTagTitle()`); the pin is the warning hue the dialog's `auto`
-  chip wears and its hover says the agent runs with auto-approval. Colour is
-  never the only signal: both sentences are also in `dash-agent-flags`, an
-  out-of-flow slot in the row, so the row's accessible name states them. The
-  mark is dressed by `decorateMarks()` after every reading, in place — the
-  `data-mcp`, `data-mcp-override` and `data-auto` attributes on the mark, its
-  title and the flags slot, each written only when it differs — and none of it
-  is in the markup the sidebar compares, so a relaunch onto the tools or a
-  change of auto mode never rebuilds a row, and the stylesheet draws the frame
-  as an outline and the pin from `::after`, so nothing moves. The dialog's
-  `dashboardAgentMarkState()` is the one answer, handed in through the
-  runtime. Every other field on that row stays the dialog's answer asked for by
-  name; a second copy of any of them is how one pane comes to read two ways on
-  two surfaces.
+- **Both lists draw one shared row.** Its visible columns are the status dot,
+  agent mark, chat title, crew chip where applicable and progress bar. The
+  agent's name remains in accessible text. MCP is the pane header's frame
+  (blue, red in override mode); auto-approval is a small warning-coloured `A`
+  pinned to the mark. `dashboardAgentMarkState()` supplies both lists with the
+  header's rules and hover sentences. `decorateMarks()` updates the mark's
+  `data-mcp`, `data-mcp-override` and `data-auto`, title and `dash-agent-flags`
+  only when they change. These decorations never enter the structure key or
+  move the row; flags remain in its accessible text. Transport and the full
+  directory remain in the row hover. `agent-sidebar-list` scopes the shared
+  list styling on both hosts; sidebar chrome keeps its own styles.
 - **The docked row of the pane being typed into wears the input-target ring.**
   The page's answer is `focusedTerminalSessionId()` in `terminals.js`: the
   session of the focused slot, read when asked, and only while that slot's card
@@ -1535,7 +1523,7 @@ unless the task explicitly changes this contract.
   a column with more crews than the limit packs lanes by row overlap
   (`assignLanes()`). Lanes are planned from each reading, so a smaller crew
   never keeps the old width. A wide board draws a curve per link instead.
-- **The sidebar lays crews on rows already drawn.** Its markup is drawn from
+- **Both lists lay crews on rows already drawn.** Its markup is drawn from
   the reading with `waiting` cleared, so nothing from `links` or the waiting
   reading enters it. `decorateCrews()` then fills the crew chip slot (the
   dialog's `dashboardCrewChipHtml`, handed in through the runtime), the
@@ -1548,26 +1536,18 @@ unless the task explicitly changes this contract.
   fallback) and removes with the last crew. The highlight dims a row's
   children, never the row, so the input-target ring keeps its full strength.
 - **The dialog's crew board has its own structure key.** It sits in the
-  `data-dashboard-crews` slot, beside the list when that is on, which the board
-  never touches.
+  permanent `data-dashboard-crews` slot beside the shared list, which the board
+  never touches. Only selected roots are drawn, in selection order.
   Its key holds membership and layout — never the phase and never `link_id` —
   so a new member or a closed pane rewrites only the board slot, keeping the
   focused node and the sideways scroll, while pills, rounds, ages, readings and
-  the crew header are written in place. A full render of the list carries the
-  board's `scrollLeft` across, and the dialog's scrollers (the body, or each
-  pane) keep their positions. Every node is a `data-dashboard-action="pane"`
-  button with its row's target attributes; the board draws only panes the
-  reading lists, so a closed pane is not on it. The board's header counts
-  every member of the crew, nested ones included; the chip counts direct
-  workers. **While a crew is on the board the dialog is three quarters of the
-  window it opened in, in width and in height** (`.has-crews` on `.dash-dialog`),
-  never more, and the column it always was with none, under the same cap; a
-  crew larger than that scrolls inside the board. With the list on
-  (`has-session-list`), from 1000px wide the board (`data-dashboard-crews`) and
-  the list (`data-dashboard-sessions`) are two panes side by side inside a body
-  that does not scroll, each scrolling on its own; below that they stack in the
-  one scroller. Below `DASHBOARD_CREW_NARROW_PX` (the session card's
-  breakpoint) the board is one indented column with buses.
+  the crew header are written in place. List rebuilds never replace the board
+  slot, so its node focus and scroll survive changes elsewhere. Both scrollers
+  keep their positions. Every node is a `data-dashboard-action="pane"` button
+  with its row's target attributes; only listed panes appear. The board header
+  counts every member, including nested workers; a row's chip counts direct
+  workers. Only selected crews' links reach the board's wire layer. Below
+  `DASHBOARD_CREW_NARROW_PX` the board becomes one indented column with buses.
 - Dashboard layout must remain usable without horizontal overflow at narrow
   widths. A polling update that changes only a row's title, hover, status,
   progress, or idle age updates that row in place, each field on its own
@@ -2395,7 +2375,7 @@ in `README.md`; state the rules a change has to keep.
   controls together. Find bars keep the shared ↑/↓/× exception; any conversion
   converts all find bars. Reuse selectors/tokens instead of copying declarations.
   Supplied artwork with a palette of its own — the app logo, the dashboard
-  button's `active_ws.ico` — stays an `<img>` from `/docs/images/`; it is an
+  button's `crew.ico` — stays an `<img>` from `/docs/images/`; it is an
   identity, not a control glyph, and must not be converted to a stroke SVG.
 - A session's hue is `session-colour.js` and an agent's mark is
   `agent-glyphs.js`, each DOM-free, Node-tested and read by both the workspace
