@@ -199,7 +199,10 @@ See **every session in every workspace**, agents first. Open the dashboard dialo
 - **Every agent on one line** — a leading status dot, the agent's mark, its chat title, and `MCP` when the agent has GridVibe tools, in red when it runs in override mode. The dialog also draws the agent's name and `auto` when it was launched with auto-approval.
 - **The state is the leading mark** — a spinning green ring while working, amber z's while idle, a red dot when unreachable. Point at it for the words: how long it has been idle, or what went wrong.
 - **The rest is one hover away** — pointing at a row gives the full chat title, where the pane is, and what it runs on (`SSH`, `WSL`, `PowerShell`, `cmd`).
-- **A badge that means something** — the button counts the agents **working right now**, not how many you have open. No badge means every agent is sitting at a prompt.
+- **A badge that means something** — the button counts the agents **working right now**, not how many you have open. No badge means every agent is sitting at a prompt or waiting on another agent.
+- **See who handed work to whom** — when an agent hands tasks to other agents, the sidebar draws a line from it to each of them, coloured by how the task is going, and its row counts how many have reported. Point at any of those rows to light up that crew.
+- **Follow a crew at a glance** — the dialog opens with a board for each crew: who is working for whom, how many have reported, and each task's state and round. Click a node to go to that pane.
+- **Waiting is not working** — an agent waiting on its crew, or standing by for its next task, wears a dotted mark instead of the working spinner.
 - **Click anything to go there** — a row, its session, or its workspace opens or focuses that window at that tab.
 - **Keep the dialog up while you work elsewhere** — it stays open when you move to another window, so you can leave it on a second screen. It closes when you click beside it, reach a pane in its own workspace, or open it somewhere else.
 - **Close from either view** — a session card's **×** and a band's **Close workspace** both offer **Cancel**, **Save and close**, or the plain close; a failed save cancels the close. **Close window** in native mode keeps the sessions running; these actions leave the dashboard open.
