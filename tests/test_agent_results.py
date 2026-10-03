@@ -660,7 +660,6 @@ class LinksSnapshotTestCase(unittest.TestCase):
             "h-a",
             requester_session_id=REQUESTER,
             worker_session_id="worker-a",
-            worker_agent={"agent_selection": "codex", "group_id": "g1", "password": "hunter2"},
         )
 
         (link,) = store.links_snapshot()
@@ -676,11 +675,6 @@ class LinksSnapshotTestCase(unittest.TestCase):
         self.assertEqual(link["reported_at"], "")
         self.assertEqual(link["reason"], "")
         self.assertEqual(link["round"], 1)
-        # Only the worker facts the dashboard draws from, whatever was offered.
-        self.assertEqual(
-            link["worker_agent"],
-            {"agent_selection": "codex", "custom_agent": "", "group_id": "g1"},
-        )
         self.assertRegex(link["link_id"], r"^[0-9a-f]{16}$")
 
     def test_no_text_receipt_or_handoff_id_at_any_depth(self):

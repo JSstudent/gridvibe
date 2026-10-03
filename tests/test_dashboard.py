@@ -518,7 +518,6 @@ def link(requester, worker, **overrides):
         "reported_at": "",
         "reason": "",
         "round": 1,
-        "worker_agent": {"agent_selection": "codex", "custom_agent": "", "group_id": "g1"},
     }
     payload.update(overrides)
     return payload
@@ -555,12 +554,15 @@ class DashboardCrewTestCase(unittest.TestCase):
             for pane in group_row["panes"]
         }
 
-    def test_links_are_composed_only_for_an_agent_requester(self):
+    def test_links_are_composed_only_between_two_agent_rows(self):
         snapshot = self._compose(
             links=[
                 link("orch", "worker"),
-                # A closed worker keeps its link: the board draws a ghost.
-                link("orch", "closed-pane"),
+                # A closed pane is in no crew: its link is not published, so
+                # every surface loses it together and none draws a ghost.
+                link("orch", "closed-pane", state="reported", status="done"),
+                # Nor is a pane that is open but no longer an agent pane.
+                link("orch", "shell"),
                 # A requester with no agent row is not an orchestrator here.
                 link("shell", "worker"),
                 link("gone", "worker"),
@@ -569,9 +571,36 @@ class DashboardCrewTestCase(unittest.TestCase):
 
         self.assertEqual(
             [(item["requester_session_id"], item["worker_session_id"]) for item in snapshot["links"]],
-            [("orch", "worker"), ("orch", "closed-pane")],
+            [("orch", "worker")],
         )
         self.assertEqual(snapshot["links"][0], link("orch", "worker"))
+
+    def test_a_worker_whose_agent_ended_but_whose_pane_is_open_keeps_its_link(self):
+        snapshot = self._compose(
+            links=[link("orch", "worker", state="ended", reason="agent exited")]
+        )
+
+        (published,) = snapshot["links"]
+        self.assertEqual(published["state"], "ended")
+        self.assertEqual(published["reason"], "agent exited")
+
+    def test_a_pane_that_closes_takes_its_links_out_of_the_next_reading(self):
+        links = [link("orch", "worker"), link("orch", "other")]
+        before = self._compose(
+            sessions_by_group={
+                "g1": [session(name, "g1") for name in ("orch", "worker", "other")]
+            },
+            links=links,
+        )
+        after = self._compose(
+            sessions_by_group={"g1": [session(name, "g1") for name in ("orch", "other")]},
+            links=links,
+        )
+
+        self.assertEqual(
+            [item["worker_session_id"] for item in before["links"]], ["worker", "other"]
+        )
+        self.assertEqual([item["worker_session_id"] for item in after["links"]], ["other"])
 
     def test_no_links_is_an_empty_list(self):
         self.assertEqual(self._compose()["links"], [])
@@ -841,20 +870,32 @@ class DashboardRouteTestCase(unittest.TestCase):
         _, agent, _ = self._launch_group()
         result_store.reset()
         self.addCleanup(result_store.reset)
+        worker = api.session_manager.create_session(
+            group_id=agent.group_id,
+            host="10.0.0.5",
+            directory="/srv/app",
+            password="hunter2",
+            title="Terminal 3",
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection="codex",
+        )
         result_store.expect(
-            "h-1",
-            requester_session_id=agent.session_id,
-            worker_session_id="closed-worker",
-            worker_agent={"agent_selection": "codex", "group_id": "g9"},
+            "h-1", requester_session_id=agent.session_id, worker_session_id=worker.session_id
+        )
+        result_store.expect(
+            "h-2", requester_session_id=agent.session_id, worker_session_id="closed-worker"
         )
         result_store.wait_until_settled(agent.session_id, timeout=0.01)
 
         payload = self.client.get("/api/dashboard").get_json()
 
+        # The live worker's link is published; the closed pane's is not.
         (published,) = payload["links"]
-        self.assertEqual(published["worker_session_id"], "closed-worker")
-        self.assertEqual(published["worker_agent"]["group_id"], "g9")
+        self.assertEqual(published["worker_session_id"], worker.session_id)
+        self.assertNotIn("worker_agent", published)
         self.assertNotIn("h-1", json.dumps(payload))
+        self.assertNotIn("closed-worker", json.dumps(payload))
         self.assertEqual(
             payload["workspaces"][0]["groups"][0]["panes"][0]["waiting"], WAITING_CREW
         )

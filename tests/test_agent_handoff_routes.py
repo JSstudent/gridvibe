@@ -63,13 +63,13 @@ def _detect_found(target, binary):
     return {"found": True, "path": f"/usr/bin/{binary}"}
 
 
-def _worker_agent(session_id):
-    """What the dashboard link for this worker says about it."""
+def _requester_of(session_id):
+    """Who the dashboard link for this worker says handed it its task."""
     links = [
         link for link in result_store.links_snapshot()
         if link["worker_session_id"] == session_id
     ]
-    return links[-1]["worker_agent"] if links else None
+    return links[-1]["requester_session_id"] if links else None
 
 
 class _RouteCase(unittest.TestCase):
@@ -278,16 +278,13 @@ class SplitTakesTheHandleTestCase(_RouteCase):
         self.assertEqual(started[0]["state"], WAITING)
         self.assertNotIn("task", json.dumps(created))
 
-    def test_the_link_records_the_new_pane_as_it_was_bound(self):
+    def test_the_new_pane_is_linked_to_the_agent_that_handed_it_the_task(self):
         caller = self._agent_pane()
         split_request = self._record(caller)
 
         created = self._split(caller, split_request).get_json()["session"]
 
-        self.assertEqual(
-            _worker_agent(created["session_id"]),
-            {"agent_selection": "codex", "custom_agent": "", "group_id": caller.group_id},
-        )
+        self.assertEqual(_requester_of(created["session_id"]), caller.session_id)
 
     def test_a_source_that_closes_between_take_and_bind_costs_the_task_not_the_split(self):
         caller = self._agent_pane()
@@ -436,7 +433,7 @@ class LaunchTaskTestCase(_RouteCase):
             self.assertNotIn(second_brief, surface)
             self.assertNotIn('"task"', surface)
 
-    def test_each_link_records_the_pane_it_was_bound_to(self):
+    def test_each_launched_pane_is_linked_to_the_agent_that_launched_it(self):
         caller = self._agent_pane()
 
         status, payload = self._launch(
@@ -445,11 +442,8 @@ class LaunchTaskTestCase(_RouteCase):
         )
 
         self.assertEqual(status, 201, payload)
-        for created, agent in zip(payload["sessions"], ("claude", "codex")):
-            self.assertEqual(
-                _worker_agent(created["session_id"]),
-                {"agent_selection": agent, "custom_agent": "", "group_id": created["group_id"]},
-            )
+        for created in payload["sessions"]:
+            self.assertEqual(_requester_of(created["session_id"]), caller.session_id)
 
     def test_a_pane_without_a_task_is_launched_as_before(self):
         caller = self._agent_pane()
@@ -954,18 +948,14 @@ class RelaunchWithTaskTestCase(shell_tests.ShellTransitionTestCase):
         self.assertEqual(store.pending_for(target.session_id).source_session_id, caller.session_id)
         self.assertNotIn(BRIEF, json.dumps(payload))
 
-    def test_the_link_records_the_agent_the_pane_was_relaunched_into(self):
+    def test_the_relaunched_pane_is_linked_to_the_agent_that_handed_it_the_task(self):
         caller, repo = self._caller()
         target = self._target(caller, repo)
 
         response, _started = self._relaunch(target.session_id, self._body(caller))
 
         self.assertEqual(response.status_code, 200, response.get_json())
-        # The record already names the new agent by the time the task binds.
-        self.assertEqual(
-            _worker_agent(target.session_id),
-            {"agent_selection": "codex", "custom_agent": "", "group_id": caller.group_id},
-        )
+        self.assertEqual(_requester_of(target.session_id), caller.session_id)
 
     def test_a_task_turns_the_tools_on(self):
         caller, repo = self._caller()

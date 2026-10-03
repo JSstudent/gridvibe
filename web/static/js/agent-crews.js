@@ -15,9 +15,14 @@
      · **One parent per worker,** the requester of its newest link, and **no
        cycles**: a loop is broken at its earliest-handed link. So the index is
        always a forest and every walk over it terminates.
-     · **One drawn state per link.** `linkPhase` is the only place the five
-       mockup states are decided; the chip, the wire and the board pill all ask
-       it.
+     · **One drawn state per link.** `linkPhase` is the only place the drawn
+       states are decided (handed, working, one per report status, ended); the
+       chip, the wire and the board pill all ask it. Whether a report has been
+       collected is a fact beside the phase, put into words and never a
+       second look.
+     · **Only live panes are in a crew.** The server publishes a link only
+       while both of its panes are agent rows, so a pane that closes leaves the
+       crew everywhere at once and nothing here has a ghost to draw.
      · **Wires are a decoration.** The layer owns one `<svg>` inside the
        scroller and nothing else: a phase change rewrites that SVG and never a
        row, so scroll, focus and the input-target ring stay where they were.
@@ -35,22 +40,23 @@
 }(typeof globalThis !== 'undefined' ? globalThis : this, function () {
     'use strict';
 
-    const PHASES = Object.freeze(['handed', 'working', 'done', 'failed', 'blocked', 'collected', 'ended']);
-    const REPORTED_PHASES = Object.freeze(['done', 'failed', 'blocked', 'collected']);
+    const PHASES = Object.freeze(['handed', 'working', 'done', 'failed', 'blocked', 'ended']);
+    const REPORTED_PHASES = Object.freeze(['done', 'failed', 'blocked']);
 
-    /* Past this many parallel lanes the gutter would eat the column, so every
-       wire shares one trunk and enters its row as a tick. */
-    const MAX_LANES = 4;
     /* The innermost lane's distance from the card edge, and each further
        lane's step beyond it. */
-    const LANE_INSET = 8;
-    const LANE_STEP = 5;
-    const CORNER_RADIUS = 4;
+    const LANE_INSET = 9;
+    const LANE_STEP = 6;
+    /* The gutter a lane layout needs is however far its outermost bus sits
+       left of the cards, plus this much air; never narrower than the column's
+       own padding. */
+    const GUTTER_MARGIN = 5;
+    const GUTTER_MIN = 10;
     /* A fan wire's control points sit half the horizontal gap out, but never
        closer than this, so two nodes almost touching still read as a curve. */
     const FAN_MIN_PULL = 16;
-    /* Kept off the row edges so a wire leaving a row and one entering it at
-       the same height never share a lane. */
+    /* Kept off the row edges so two buses meeting at one row never share a
+       lane. */
     const LANE_SPAN_PAD = 3;
 
     const WAITING_WORDS = Object.freeze({
@@ -66,28 +72,25 @@
         return `${text(link?.requester_session_id)}>${text(link?.worker_session_id)}`;
     }
 
-    /* The drawn state of one assignment. Collected keeps no colour of its own
-       here: a collected blocked or failed report stays amber or red, faint,
-       which is `linkTone`'s answer and the stylesheet's business. */
+    /* The drawn state of one assignment. A report is drawn as its status
+       (done, blocked or failed) whether or not the orchestrator has collected
+       it yet: collecting is bookkeeping the person has no use for as a second
+       colour, so it is `linkCollected`'s, and the board says it in words. */
     function linkPhase(link) {
         const state = text(link?.state);
         if (state === 'working') {
             return link?.read ? 'working' : 'handed';
         }
         if (state === 'reported') {
-            if (link?.collected) return 'collected';
             const status = text(link?.status);
             return status === 'failed' || status === 'blocked' ? status : 'done';
         }
         return 'ended';
     }
 
-    /* The hue a settled report keeps once it fades: success, warning or
-       danger. Empty while nothing has been reported. */
-    function linkTone(link) {
-        if (text(link?.state) !== 'reported') return '';
-        const status = text(link?.status);
-        return status === 'failed' || status === 'blocked' ? status : 'done';
+    /* A report the orchestrator has already taken delivery of. */
+    function linkCollected(link) {
+        return text(link?.state) === 'reported' && Boolean(link?.collected);
     }
 
     function isReportedPhase(phase) {
@@ -117,9 +120,7 @@
        Siblings and crews are ordered by where their panes sit in the
        dashboard's list, which a new round does not change. Snapshot order
        would not hold still: the store drops a collected round before it adds
-       the follow-up, so the pair moves to the end of the reading. A worker with
-       no row (a ghost) follows the live ones, in the order its pair first
-       appeared.
+       the follow-up, so the pair moves to the end of the reading.
 
        `byRequester`: requester id → its workers' current links, in that order.
        `byWorker`: worker id → the one link that places it in the tree.
@@ -253,9 +254,9 @@
 
     /* Greedy interval packing. `spans` are `{ lo, hi }`; the answer is one lane
        per span, in input order, shortest spans nearest the cards, so a short
-       wire's ticks never cross a longer one. Spans that touch share a point,
-       and therefore a lane would join them into one line, so touching counts
-       as overlapping. Past `MAX_LANES` every span is put on one trunk. */
+       bus never crosses a longer one's branches. Spans that touch share a
+       point, and a shared lane would join them into one line, so touching
+       counts as overlapping. `count` is how many lanes were needed. */
     function assignLanes(spans) {
         const list = (Array.isArray(spans) ? spans : []).map((span, index) => {
             const a = Number(span?.lo);
@@ -274,36 +275,77 @@
             taken[lane].push(span);
             lanes[span.index] = lane;
         });
-        const trunk = taken.length > MAX_LANES;
-        return { lanes: trunk ? lanes.map(() => 0) : lanes, trunk };
+        return { lanes, count: taken.length };
     }
 
     function num(value) {
         return String(Math.round(Number(value) * 10) / 10);
     }
 
-    /* The path one wire draws. `from` and `to` are `{ x, y }` in the layer's
-       coordinates.
+    /* The buses of a narrow reading: one per orchestrator, however many
+       workers it has. A bus is a trunk out of the orchestrator's card, a
+       vertical spine in a lane of its own, and a short branch from the spine
+       into each worker, so a crew of six reads as one line with six ticks and
+       not six curves on top of each other.
 
-       `lane`: out of the orchestrator's card edge, left to its lane, down (or
-       up) the lane, and back right into the worker's card edge, with a rounded
-       corner at both bends.
-       `fan`: an S-curve from the parent's right edge to the child's left edge,
-       both control points half the gap out. */
-    function wirePath(mode, from, to, lane) {
+       `wires` are `{ requester, from, to }` in the layer's coordinates, `from`
+       the orchestrator's card edge and `to` the worker's. Crews whose rows
+       overlap get different lanes, nested crews included; crews whose rows do
+       not overlap share one. `gutter` is the left padding the outermost lane
+       needs, measured from the leftmost card, so the column is exactly as wide
+       as the lanes in use. */
+    function planBuses(wires) {
+        const groups = new Map();
+        (Array.isArray(wires) ? wires : []).forEach(wire => {
+            const id = text(wire.requester);
+            if (!groups.has(id)) groups.set(id, { requester: id, from: wire.from, wires: [] });
+            groups.get(id).wires.push(wire);
+        });
+        const buses = Array.from(groups.values());
+        buses.forEach(bus => {
+            const ys = [bus.from.y].concat(bus.wires.map(wire => wire.to.y));
+            const xs = [bus.from.x].concat(bus.wires.map(wire => wire.to.x));
+            bus.top = Math.min(...ys);
+            bus.bottom = Math.max(...ys);
+            bus.left = Math.min(...xs);
+        });
+        const packed = assignLanes(buses.map(bus => ({
+            lo: bus.top - LANE_SPAN_PAD,
+            hi: bus.bottom + LANE_SPAN_PAD
+        })));
+        buses.forEach((bus, index) => {
+            bus.lane = packed.lanes[index];
+            bus.x = bus.left - LANE_INSET - bus.lane * LANE_STEP;
+        });
+        const edge = buses.length ? Math.min(...buses.map(bus => bus.left)) : 0;
+        const reach = buses.length ? Math.max(...buses.map(bus => edge - bus.x)) : 0;
+        return {
+            buses,
+            lanes: packed.count,
+            gutter: buses.length ? Math.max(GUTTER_MIN, Math.ceil(reach + GUTTER_MARGIN)) : 0
+        };
+    }
+
+    /* The paths a narrow bus draws. The trunk and spine are one neutral path;
+       each branch is its own, so it can wear its worker's phase. */
+    function busPaths(bus) {
+        const trunk = `M${num(bus.from.x)} ${num(bus.from.y)} H${num(bus.x)}`
+            + ` M${num(bus.x)} ${num(bus.top)} V${num(bus.bottom)}`;
+        return {
+            trunk,
+            branches: bus.wires.map(wire => `M${num(bus.x)} ${num(wire.to.y)} H${num(wire.to.x)}`)
+        };
+    }
+
+    /* The path a wide board's wire draws: an S-curve from the parent's right
+       edge to the child's left edge, both control points half the gap out. */
+    function fanPath(from, to) {
         const x0 = Number(from?.x) || 0;
         const y0 = Number(from?.y) || 0;
         const x1 = Number(to?.x) || 0;
         const y1 = Number(to?.y) || 0;
-        if (mode === 'fan') {
-            const pull = Math.max(FAN_MIN_PULL, (x1 - x0) / 2);
-            return `M${num(x0)} ${num(y0)} C${num(x0 + pull)} ${num(y0)} ${num(x1 - pull)} ${num(y1)} ${num(x1)} ${num(y1)}`;
-        }
-        const x = Math.min(x0, x1) - LANE_INSET - Math.max(0, Number(lane) || 0) * LANE_STEP;
-        const sign = y1 >= y0 ? 1 : -1;
-        const r = Math.min(CORNER_RADIUS, Math.abs(y1 - y0) / 2);
-        return `M${num(x0)} ${num(y0)} H${num(x + r)} Q${num(x)} ${num(y0)} ${num(x)} ${num(y0 + r * sign)}`
-            + ` V${num(y1 - r * sign)} Q${num(x)} ${num(y1)} ${num(x + r)} ${num(y1)} H${num(x1)}`;
+        const pull = Math.max(FAN_MIN_PULL, (x1 - x0) / 2);
+        return `M${num(x0)} ${num(y0)} C${num(x0 + pull)} ${num(y0)} ${num(x1 - pull)} ${num(y1)} ${num(x1)} ${num(y1)}`;
     }
 
     /* The classes one wire wears. Awaited only means anything while working:
@@ -311,19 +353,13 @@
     function wireClasses(link, options) {
         const phase = linkPhase(link);
         const classes = ['dash-wire', `is-${phase}`];
-        const tone = linkTone(link);
-        if (phase === 'collected' && tone !== 'done') classes.push(`is-tone-${tone}`);
         if (phase === 'working' && options?.awaited) classes.push('is-awaited');
         return classes.join(' ');
     }
 
-    /* The worker-end dot wears the wire's colour, faded tone included. */
+    /* The worker-end dot wears the wire's colour. */
     function endClasses(link) {
-        const phase = linkPhase(link);
-        const tone = linkTone(link);
-        return phase === 'collected' && tone !== 'done'
-            ? `dash-wire-end is-collected is-tone-${tone}`
-            : `dash-wire-end is-${phase}`;
+        return `dash-wire-end is-${linkPhase(link)}`;
     }
 
     function escAttr(value) {
@@ -333,7 +369,6 @@
     }
 
     const SVG_NS = 'http://www.w3.org/2000/svg';
-    let layerCount = 0;
 
     /* The wire layer: one `<svg class="dash-wires">` inside `container`, the
        scrolling element, so a scroll moves the wires with the rows and costs no
@@ -347,16 +382,18 @@
        wire still while the document is hidden. `dispose()` removes the SVG and
        stops observing.
 
-       Lane mode runs each wire from the edge of the card that holds its row
-       (`options.card`, default `.dash-session`); fan mode runs from the
-       endpoint's own edges. */
+       Lane mode draws one bus per orchestrator from the edge of the card that
+       holds its row (`options.card`, default `.dash-session`), and writes the
+       gutter the lanes need to the container as `--dash-wire-gutter`, which
+       the stylesheet turns into the column's left padding; the rows then move
+       right by exactly that, so a second measurement follows the first. Fan
+       mode runs one curve per link from the endpoints' own edges. */
     function createWireLayer(options) {
         const container = options?.container;
         const mode = options?.mode === 'fan' ? 'fan' : 'lane';
         const cardSelector = options?.card === undefined ? '.dash-session' : options.card;
         const doc = container?.ownerDocument || null;
         const view = doc?.defaultView || null;
-        const prefix = `dash-wire-${++layerCount}`;
         const findEndpoint = typeof options?.endpoint === 'function'
             ? id => options.endpoint(container, id)
             : id => {
@@ -367,7 +404,6 @@
         let svg = null;
         /* What the SVG holds; null forces the next paint to write. */
         let markup = null;
-        const pairIds = new Map();
         let lastSnapshot = null;
         let highlighted = '';
         let paused = false;
@@ -430,6 +466,7 @@
                 if (!a || !b) return;
                 wires.push({
                     link,
+                    requester,
                     crew: crews.rootOf.get(requester) || requester,
                     awaited: awaited.has(requester),
                     from: mode === 'fan' ? { x: a.right, y: a.cy } : { x: a.left, y: a.cy },
@@ -439,40 +476,48 @@
             return wires;
         }
 
-        /* A path's id names its pair for the layer's lifetime, so a wire keeps
-           its id however the list around it moves. */
-        function pathId(link) {
-            const key = pairKey(link);
-            if (!pairIds.has(key)) pairIds.set(key, `${prefix}-${pairIds.size + 1}`);
-            return pairIds.get(key);
+        function endDots(wire) {
+            return `<circle class="dash-wire-end is-from" r="2.6" cx="${num(wire.from.x)}" cy="${num(wire.from.y)}"/>`
+                + `<circle class="${endClasses(wire.link)}" r="2.6" cx="${num(wire.to.x)}" cy="${num(wire.to.y)}"/>`;
         }
 
-        function render(wires) {
-            if (mode === 'lane') {
-                const packed = assignLanes(wires.map(wire => ({
-                    lo: Math.min(wire.from.y, wire.to.y) - LANE_SPAN_PAD,
-                    hi: Math.max(wire.from.y, wire.to.y) + LANE_SPAN_PAD
-                })));
-                wires.forEach((wire, index) => { wire.lane = packed.lanes[index]; });
-            }
-            let paths = '';
-            let pulses = '';
-            wires.forEach(wire => {
-                const phase = linkPhase(wire.link);
-                const id = pathId(wire.link);
-                const d = wirePath(mode, wire.from, wire.to, wire.lane || 0);
-                paths += `<g class="dash-wire-group" data-crew="${escAttr(wire.crew)}">`
-                    + `<path id="${id}" class="${wireClasses(wire.link, { awaited: wire.awaited })}" d="${d}"/>`
-                    + `<circle class="dash-wire-end is-from" r="2.6" cx="${num(wire.from.x)}" cy="${num(wire.from.y)}"/>`
-                    + `<circle class="${endClasses(wire.link)}" r="2.6" cx="${num(wire.to.x)}" cy="${num(wire.to.y)}"/>`
+        function renderFan(wires) {
+            return wires.map(wire => `<g class="dash-wire-group" data-crew="${escAttr(wire.crew)}">`
+                + `<path class="${wireClasses(wire.link, { awaited: wire.awaited })}" d="${fanPath(wire.from, wire.to)}"/>`
+                + `${endDots(wire)}</g>`).join('');
+        }
+
+        function renderBuses(plan) {
+            return plan.buses.map(bus => {
+                const paths = busPaths(bus);
+                const crew = bus.wires[0].crew;
+                return `<g class="dash-wire-group" data-crew="${escAttr(crew)}">`
+                    + `<path class="dash-wire dash-wire-bus" d="${paths.trunk}"/>`
+                    + bus.wires.map((wire, index) => `<path class="${wireClasses(wire.link, { awaited: wire.awaited })}"`
+                        + ` d="${paths.branches[index]}"/>${endDots(wire)}`).join('')
                     + '</g>';
-                if (phase === 'done') {
-                    pulses += `<circle class="dash-wire-pulse" data-crew="${escAttr(wire.crew)}" r="3.2">`
-                        + '<animateMotion dur="2.4s" repeatCount="indefinite" keyPoints="1;0;0" keyTimes="0;0.55;1" calcMode="linear">'
-                        + `<mpath href="#${id}"/></animateMotion></circle>`;
-                }
-            });
-            return paths + pulses;
+            }).join('');
+        }
+
+        /* Writes the gutter the lanes need, and answers whether that moved the
+           rows. Cleared with the last crew, so a column with none is as it was. */
+        function setGutter(width) {
+            const value = width ? `${width}px` : '';
+            if ((container.style?.getPropertyValue('--dash-wire-gutter') || '') === value) return false;
+            if (value) container.style?.setProperty('--dash-wire-gutter', value);
+            else container.style?.removeProperty('--dash-wire-gutter');
+            return true;
+        }
+
+        function draw(crews, awaited) {
+            let wires = measure(crews, awaited);
+            if (mode !== 'lane') return renderFan(wires);
+            let plan = planBuses(wires);
+            if (setGutter(plan.gutter)) {
+                wires = measure(crews, awaited);
+                plan = planBuses(wires);
+            }
+            return renderBuses(plan);
         }
 
         function paint(snapshot) {
@@ -480,7 +525,8 @@
             lastSnapshot = snapshot;
             const crews = indexCrews(snapshot);
             const layer = ensureSvg();
-            const next = crews.edges.length ? render(measure(crews, awaitingRequesters(snapshot))) : '';
+            const next = crews.edges.length ? draw(crews, awaitingRequesters(snapshot)) : '';
+            if (!next && mode === 'lane') setGutter(0);
             if (next !== markup) {
                 layer.innerHTML = next;
                 markup = next;
@@ -508,6 +554,7 @@
             observer = null;
             svg?.parentNode?.removeChild(svg);
             container?.classList?.remove('has-dash-wires');
+            container?.style?.removeProperty('--dash-wire-gutter');
             svg = null;
             markup = null;
             lastSnapshot = null;
@@ -528,14 +575,12 @@
 
     return {
         PHASES,
-        MAX_LANES,
         LANE_INSET,
         LANE_STEP,
-        CORNER_RADIUS,
         WAITING_WORDS,
         pairKey,
         linkPhase,
-        linkTone,
+        linkCollected,
         isReportedPhase,
         waitingWord,
         indexCrews,
@@ -543,7 +588,9 @@
         crewSummary,
         awaitingRequesters,
         assignLanes,
-        wirePath,
+        planBuses,
+        busPaths,
+        fanPath,
         wireClasses,
         endClasses,
         createWireLayer

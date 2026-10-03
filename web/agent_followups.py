@@ -45,7 +45,6 @@ from web.agent_handoffs import (
     HandoffError,
     pane_description,
     validate_task,
-    worker_description,
 )
 from web.agent_handoffs import handoffs as agent_handoffs
 from web.agent_results import REPORTED
@@ -164,7 +163,6 @@ def hand_followup_task(
         raise _refused(exc) from exc
 
     caller_id = str(getattr(caller, "session_id", "") or "")
-    worker_agent = worker_description(worker)
     created = {}
 
     def create() -> str:
@@ -173,7 +171,6 @@ def hand_followup_task(
             session_id=worker_session_id,
             previous_handoff_id=live["handoff_id"],
             source_session_id=caller_id,
-            worker_agent=worker_agent,
             **pane_description(caller),
         )
         created["view"] = view

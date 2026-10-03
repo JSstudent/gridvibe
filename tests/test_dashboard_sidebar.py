@@ -568,8 +568,7 @@ function link(requester, worker, extra) {
         status: '',
         collected: false,
         round: 1,
-        reason: '',
-        worker_agent: { agent_selection: 'claude', custom_agent: '', group_id: 'g1' }
+        reason: ''
     }, extra || {});
 }
 body().querySelectorAll = selector => (
@@ -3357,7 +3356,8 @@ class DashboardSidebarPageTestCase(unittest.TestCase):
         self.assertIn("--t-accent: var(--gv-accent);", self._static("css/terminals.css"))
 
     def test_the_crew_gutter_highlight_and_chip_are_drawn_as_planned(self):
-        """The gutter is 18px more padding behind `has-crews` only. The
+        """The gutter is more padding behind `has-crews` only, as wide as the
+        lanes in use say (`--dash-wire-gutter`, with a first-paint fallback). The
         highlight dims a row's *contents*, never the row, so the input-target
         ring (the row's own box-shadow) is never dimmed, and a crew row's ring
         gives way to it. The chip is accent on accent-soft, mono 9.5px/600."""
@@ -3369,9 +3369,12 @@ class DashboardSidebarPageTestCase(unittest.TestCase):
             return found.group(1)
 
         self.assertIn(
-            "padding-left: 28px",
+            "padding-left: var(--dash-wire-gutter, 16px)",
             rule(".agent-sidebar.has-crews .agent-sidebar-body"),
         )
+        # With no crew the column keeps its own padding, whatever a stale
+        # property says: the gutter rule is behind `has-crews` alone.
+        self.assertNotIn("--dash-wire-gutter", rule(".agent-sidebar .agent-sidebar-body"))
         self.assertIn(
             "opacity: .32",
             rule(".agent-sidebar.is-crew-highlight .dash-agent:not(.is-crew-member) > *"),

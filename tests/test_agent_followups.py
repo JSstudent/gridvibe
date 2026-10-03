@@ -282,23 +282,6 @@ class FollowupRoundTestCase(_StoreCase):
 
         self.assertEqual(self._rounds(), [1])
 
-    def test_worker_agent_is_carried_onto_a_follow_up(self):
-        first, receipt = self._read_task()
-        self.results.report("worker", "Done.", None, receipt)
-
-        self.store.create_followup(
-            "Next.",
-            session_id="worker",
-            previous_handoff_id=first,
-            source_session_id="caller",
-            worker_agent={"agent_selection": "codex", "custom_agent": "", "group_id": "g1"},
-        )
-
-        self.assertEqual(
-            self.results.links_snapshot()[-1]["worker_agent"],
-            {"agent_selection": "codex", "custom_agent": "", "group_id": "g1"},
-        )
-
 
 class SupersededAssignmentTestCase(unittest.TestCase):
     def setUp(self):
@@ -397,10 +380,9 @@ class GuessingGameTestCase(_FollowupRouteCase):
         self.assertEqual([row["state"] for row in rows], [WORKING])
         self.assertEqual(handoff_store.count(), 1)
 
-    def test_each_send_task_round_is_counted_and_names_its_worker(self):
+    def test_each_send_task_round_is_counted(self):
         caller = self._agent_pane(title="Claude 1")
         worker, _connection, receipt = self._start_worker(caller)
-        group_id = api.session_manager.get_session(worker).group_id
         rounds = []
         for _ in range(2):
             self._report_with(worker, "7", receipt)
@@ -411,10 +393,7 @@ class GuessingGameTestCase(_FollowupRouteCase):
 
         self.assertEqual(rounds, [[2], [3]])
         (link,) = result_store.links_snapshot()
-        self.assertEqual(
-            link["worker_agent"],
-            {"agent_selection": "codex", "custom_agent": "", "group_id": group_id},
-        )
+        self.assertEqual(link["worker_session_id"], worker)
         self.assertEqual(link["requester_session_id"], caller.session_id)
 
     def test_a_report_says_how_to_stand_by(self):

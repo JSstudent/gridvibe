@@ -71,6 +71,7 @@ What is pinned is what the dashboard is *for*:
 """
 
 import json
+import re
 import shutil
 import subprocess
 import unittest
@@ -2687,8 +2688,7 @@ function link(requester, worker, extra) {
         handed_at: HANDED,
         reported_at: '',
         round: 1,
-        reason: '',
-        worker_agent: { agent_selection: 'claude', custom_agent: '', group_id: 'g1' }
+        reason: ''
     }, extra || {});
 }
 
@@ -2815,7 +2815,7 @@ function crewSlot() {
             crewDom.slot = null;
         } else {
             const rest = html.slice(start + open.length);
-            crewDom.slot = makeCrewSlot(rest.slice(0, rest.search(/<\/div>\s*<section class="dash-workspace/)));
+            crewDom.slot = makeCrewSlot(rest.slice(0, rest.search(/<\/div>\s*<div class="dash-sessions-pane"/)));
         }
     }
     return crewDom.slot;
@@ -2889,13 +2889,13 @@ class DashboardCrewBoardTestCase(DashboardDialogTestCase):
         self.assertEqual(result["made"], 0)
 
     def test_a_nested_crew_is_laid_out_by_depth_with_parents_spanning(self):
-        """`s1` handed tasks to `s2`, `s3` and a closed pane `s9`; `s2` handed
-        one on to `s4`. Depth-first in list order, ghosts last; a parent spans
-        its leaves' rows; the list below is the list it always was."""
+        """`s1` handed tasks to `s2` and `s3`; `s2` handed one on to `s4`.
+        Depth-first in list order; a parent spans its leaves' rows; the list
+        beside it is the list it always was."""
         result = self._run_crew(
             """
             fetchAnswer = crewReading([
-                link('s1', 's2'), link('s1', 's9'), link('s2', 's4'), link('s1', 's3')
+                link('s1', 's2'), link('s2', 's4'), link('s1', 's3')
             ]);
             await refreshAgentDashboard();
             report({
@@ -2911,47 +2911,33 @@ class DashboardCrewBoardTestCase(DashboardDialogTestCase):
             });
             """
         )
-        self.assertEqual(result["order"], ["s1", "s2", "s4", "s3", "s9"])
+        self.assertEqual(result["order"], ["s1", "s2", "s4", "s3"])
         self.assertEqual(result["cells"], {
-            "s1": {"col": 1, "row": 1, "span": 3},
+            "s1": {"col": 1, "row": 1, "span": 2},
             "s2": {"col": 2, "row": 1, "span": 1},
             "s4": {"col": 3, "row": 1, "span": 1},
             "s3": {"col": 2, "row": 2, "span": 1},
-            "s9": {"col": 2, "row": 3, "span": 1},
         })
         self.assertEqual(result["depths"], "3")
         self.assertEqual(result["crews"], ["s1"])
-        self.assertEqual(result["meta"], "0 of 4 reported")
-        self.assertEqual(result["segments"], 4)
+        self.assertEqual(result["meta"], "0 of 3 reported")
+        self.assertEqual(result["segments"], 3)
         self.assertEqual(result["title"], "Plan the release")
         # Every live session is still listed, crew or not.
         self.assertEqual(result["agents"], 5)
         self.assertIn("is-root", result["rootClass"])
 
-    def test_a_live_node_carries_its_rows_target_and_a_ghost_is_no_control(self):
+    def test_a_node_carries_its_rows_target(self):
         result = self._run_crew(
             """
-            fetchAnswer = crewReading([
-                link('s1', 's2'),
-                link('s1', 's9', { state: 'reported', status: 'done', reported_at: HANDED,
-                    worker_agent: { agent_selection: 'codex', custom_agent: '', group_id: 'g1' } })
-            ]);
+            fetchAnswer = crewReading([link('s1', 's2')]);
             await refreshAgentDashboard();
             const live = node('s2');
-            const ghost = node('s9');
             report({
                 live: { tag: live.tag, dataset: live.dataset },
                 row: rowFor('pane:s2').dataset,
-                ghost: {
-                    tag: ghost.tag,
-                    dataset: ghost.dataset,
-                    line: ghost.slots['.dash-crew-line'].textContent,
-                    pill: ghost.slots['.dash-crew-pill-slot'].innerHTML,
-                    closed: ghost.html.includes('<span class="dash-crew-pill is-closed">pane closed</span>'),
-                    session: /<span class="dash-crew-session"[^>]*>([^<]*)<\\/span>/.exec(ghost.html)?.[1] || '',
-                    title: ghost.title,
-                    className: ghost.attributes.class
-                }
+                agent: live.dataset.agent,
+                line: live.slots['.dash-crew-line'].textContent
             });
             """
         )
@@ -2961,18 +2947,128 @@ class DashboardCrewBoardTestCase(DashboardDialogTestCase):
             with self.subTest(attribute=name):
                 self.assertEqual(live["dataset"][name], result["row"][name])
         self.assertEqual(live["dataset"]["dashboardKey"], "crew:s2")
-        ghost = result["ghost"]
-        self.assertEqual(ghost["tag"], "div")
-        self.assertNotIn("dashboardAction", ghost["dataset"])
-        self.assertNotIn("sessionId", ghost["dataset"])
-        # Drawn from the agent captured at bind time.
-        self.assertEqual(ghost["dataset"]["agent"], "codex")
-        self.assertEqual(ghost["line"], "OpenAI Codex CLI")
-        self.assertIn("is-done", ghost["pill"])
-        self.assertTrue(ghost["closed"])
-        self.assertEqual(ghost["session"], "API work")
-        self.assertTrue(ghost["title"].startswith("Pane closed"))
-        self.assertIn("is-ghost", ghost["className"])
+        self.assertEqual(result["agent"], "codex")
+
+    def test_a_pane_that_is_not_listed_is_not_on_the_board(self):
+        """The server stops publishing a closed pane's links, and the board
+        draws only panes it can land on, so even a reading that still carried
+        one would draw no ghost of it: no node, no pill saying the pane
+        closed, and no dashed box."""
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([
+                link('s1', 's2'),
+                link('s1', 's9', { state: 'reported', status: 'done', reported_at: HANDED })
+            ]);
+            await refreshAgentDashboard();
+            report({
+                order: nodes(),
+                html: crewSlot().html,
+                meta: head('s1').slots['.dash-crew-meta'].textContent
+            });
+            """
+        )
+        self.assertEqual(result["order"], ["s1", "s2"])
+        self.assertNotIn("pane closed", result["html"].lower())
+        self.assertNotIn("is-ghost", result["html"])
+        self.assertNotIn('data-crew-node="s9"', result["html"])
+        self.assertEqual(result["meta"], "0 of 1 reported")
+
+    def test_every_report_wears_its_status_and_collecting_is_only_in_words(self):
+        result = self._run_crew(
+            """
+            const reported = (status, collected) => ({
+                state: 'reported', status, collected, reported_at: HANDED
+            });
+            fetchAnswer = crewReading([
+                link('s1', 's2', reported('done', false)),
+                link('s1', 's3', reported('blocked', true)),
+                link('s1', 's4', reported('failed', true))
+            ]);
+            await refreshAgentDashboard();
+            fetchAnswer = crewReading([
+                link('s1', 's2', reported('done', true)),
+                link('s1', 's3', reported('blocked', true)),
+                link('s1', 's4', reported('failed', true))
+            ]);
+            await refreshAgentDashboard();
+            report({
+                pills: ['s2', 's3', 's4'].map(id => node(id).slots['.dash-crew-pill-slot'].innerHTML),
+                segments: head('s1').slots['.dash-crew-segments'].innerHTML,
+                meta: head('s1').slots['.dash-crew-meta'].textContent
+            });
+            """
+        )
+        done, blocked, failed = result["pills"]
+        self.assertIn('class="dash-crew-pill is-done"', done)
+        self.assertIn(">done<", done)
+        self.assertIn("has collected the report", done)
+        self.assertIn('class="dash-crew-pill is-blocked"', blocked)
+        self.assertIn('class="dash-crew-pill is-failed"', failed)
+        # A report is never a pill of its own called "collected".
+        for pill in result["pills"]:
+            self.assertNotIn("is-collected", pill)
+            self.assertNotIn(">collected<", pill)
+        self.assertNotIn("is-collected", result["segments"])
+        self.assertEqual(result["meta"], "3 of 3 reported")
+
+    def test_an_uncollected_report_says_so_in_its_hover(self):
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([link('s1', 's2', {
+                state: 'reported', status: 'done', collected: false, reported_at: HANDED
+            })]);
+            await refreshAgentDashboard();
+            report({ pill: node('s2').slots['.dash-crew-pill-slot'].innerHTML });
+            """
+        )
+        self.assertIn("Reported done; its orchestrator has not collected the report yet", result["pill"])
+
+    def test_the_dialog_is_big_while_a_crew_is_on_it_and_a_column_otherwise(self):
+        result = self._run_crew(
+            """
+            const dialogEl = { on: false, classList: { toggle(name, force) {
+                if (name === 'has-crews') dialogEl.on = Boolean(force);
+            } } };
+            body().parentElement = dialogEl;
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            const withCrew = dialogEl.on;
+            fetchAnswer = crewReading([]);
+            await refreshAgentDashboard();
+            report({ withCrew, without: dialogEl.on });
+            """
+        )
+        self.assertTrue(result["withCrew"])
+        self.assertFalse(result["without"])
+
+    def test_both_panes_keep_their_own_scroll_across_a_render(self):
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            const scroller = name => ({
+                scrollTop: name === 'crews' ? 120 : 340,
+                hasAttribute: attribute => attribute === `data-dashboard-${name}`
+            });
+            const held = [scroller('crews'), scroller('sessions')];
+            const sessions = { scrollTop: 0 };
+            body().querySelectorAll = selector => (
+                selector.includes('data-dashboard-crews') ? held : []);
+            const previousQuery = body().querySelector;
+            body().querySelector = selector => (
+                selector === '[data-dashboard-sessions]' ? sessions : previousQuery(selector));
+            body().scrollTop = 55;
+            const reading = crewReading([link('s1', 's2')]);
+            reading.workspaces[0].groups[0].panes[4].agent_mcp = true;
+            fetchAnswer = reading;
+            await refreshAgentDashboard();
+            report({ crews: crewSlot().scrollTop, sessions: sessions.scrollTop, body: body().scrollTop });
+            """
+        )
+        self.assertEqual(result["crews"], 120)
+        self.assertEqual(result["sessions"], 340)
+        self.assertEqual(result["body"], 55)
 
     def test_a_report_keeps_every_node_and_writes_only_what_changed(self):
         result = self._run_crew(
@@ -3246,6 +3342,41 @@ class DashboardCrewBoardStylingTestCase(unittest.TestCase):
         width = script.split("const DASHBOARD_CREW_NARROW_PX = ", 1)[1].split(";", 1)[0]
         self.assertIn(f"@container dash-crews (max-width: {width}px)", css)
         self.assertIn("container: dash-crews / inline-size;", css)
+
+    def test_the_dialog_grows_to_its_window_only_while_a_crew_is_on_it(self):
+        css = self.CSS.read_text(encoding="utf-8")
+        rule = re.search(r"\.dash-dialog\.has-crews \{([^}]*)\}", css)
+        self.assertIsNotNone(rule)
+        self.assertIn("width: 100%;", rule.group(1))
+        self.assertIn("height: 100%;", rule.group(1))
+        # The column it always was is the unqualified rule.
+        self.assertIn("width: min(520px, 100%);", css)
+
+    def test_the_board_and_the_list_sit_side_by_side_only_when_there_is_room(self):
+        css = self.CSS.read_text(encoding="utf-8")
+        wide = re.search(r"@media \(min-width: (\d+)px\) \{(.*?)\n\}\n", css, flags=re.S)
+        self.assertIsNotNone(wide)
+        block = wide.group(2)
+        self.assertIn(".dash-dialog.has-crews .dash-body", block)
+        self.assertIn("grid-template-columns:", block)
+        # Each pane scrolls on its own inside a body that does not.
+        self.assertIn(".dash-dialog.has-crews .dash-crews-slot", block)
+        self.assertIn(".dash-dialog.has-crews .dash-sessions-pane", block)
+        self.assertIn("overflow: hidden;", block)
+        self.assertIn("overflow-y: auto;", block)
+        # Below that width nothing is declared for the panes: they stack in
+        # the one scroller, as they did.
+        self.assertNotIn("dash-sessions-pane", css[:wide.start()])
+
+    def test_the_narrow_board_reads_its_gutter_from_the_wire_layer(self):
+        css = self.CSS.read_text(encoding="utf-8")
+        narrow = css[css.index("@container dash-crews (max-width:"):]
+        self.assertIn("padding-left: var(--dash-wire-gutter, 16px);", narrow)
+
+    def test_no_stylesheet_draws_a_closed_pane(self):
+        css = self.CSS.read_text(encoding="utf-8")
+        self.assertNotIn("is-ghost", css)
+        self.assertNotIn("is-closed", css)
 
     def test_the_board_wears_only_tokens(self):
         css = self.CSS.read_text(encoding="utf-8")

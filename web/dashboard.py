@@ -327,13 +327,17 @@ def compose_dashboard(
     return {
         "generated_at": now,
         "workspaces": agents_first(composed_workspaces),
-        # Only links an agent row asked for: a crew is drawn from its
-        # orchestrator. The worker may have no row -- closed, or no longer an
-        # agent -- and its link stays, because the board draws it as a ghost.
+        # Only links between two agent rows still on the list: a crew is the
+        # agents that are open now. A pane that closes (or stops being an agent
+        # pane) takes its links out of the reading, so the board, the sidebar's
+        # wires, the chip and the header counts all lose it together and no
+        # surface keeps a ghost of it. An agent that exits while its pane stays
+        # an agent pane keeps its row, and so its ``ended`` link.
         "links": [
             dict(link)
             for link in links or ()
             if str(link.get("requester_session_id") or "") in agent_ids
+            and str(link.get("worker_session_id") or "") in agent_ids
         ],
         # Counted here rather than in the page so every surface that shows a
         # badge counts the same way, and a page that has not scrolled the tree

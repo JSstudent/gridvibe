@@ -60,8 +60,7 @@ import threading
 import time
 import unicodedata
 from dataclasses import dataclass, field
-from types import MappingProxyType
-from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -114,13 +113,7 @@ LINK_FIELDS = (
     "reported_at",
     "reason",
     "round",
-    "worker_agent",
 )
-
-#: What a link says about the worker, captured once when its task was bound:
-#: enough for the dashboard to draw a closed pane's agent and session. Not kept
-#: in step with the pane afterwards.
-WORKER_AGENT_FIELDS = ("agent_selection", "custom_agent", "group_id")
 
 #: Bytes of entropy behind one ``link_id``. It names an assignment on the
 #: dashboard and is a capability for nothing.
@@ -285,14 +278,6 @@ RESULT_NOTE = (
 )
 
 
-def worker_agent_mapping(values: Optional[Mapping[str, Any]]) -> Mapping[str, str]:
-    """A frozen copy of the worker facts a link carries, and nothing else."""
-    source = values or {}
-    return MappingProxyType(
-        {name: str(source.get(name) or "") for name in WORKER_AGENT_FIELDS}
-    )
-
-
 def _now_iso() -> str:
     return (
         datetime.datetime.now(datetime.timezone.utc)
@@ -323,8 +308,6 @@ class _Assignment:
     link_id: str = ""
     #: 1 for a task that started the agent, +1 for each follow-up to it.
     round: int = 1
-    #: :data:`WORKER_AGENT_FIELDS` of the worker when its task was bound.
-    worker_agent: Mapping[str, str] = field(default_factory=lambda: worker_agent_mapping(None))
     #: Whether a report may still be written: true until the handoff goes.
     #: Separate from ``state`` because a reported assignment keeps its report
     #: after that -- it just stops taking new ones.
@@ -362,7 +345,6 @@ class ResultStore:
         *,
         requester_session_id: str,
         worker_session_id: str,
-        worker_agent: Optional[Mapping[str, Any]] = None,
         continues: str = "",
         now: Optional[float] = None,
     ) -> bool:
@@ -384,7 +366,6 @@ class ResultStore:
         if not (requester and worker and resolved):
             return False
         moment = time.monotonic() if now is None else float(now)
-        identity = worker_agent_mapping(worker_agent)
         continued_id = str(continues or "")
         with self._changed:
             # Read before the loop below, which deletes the continued round
@@ -418,7 +399,6 @@ class ResultStore:
                 created_mono=moment,
                 link_id=secrets.token_hex(_LINK_ID_BYTES),
                 round=round_number,
-                worker_agent=identity,
             )
             self._changed.notify_all()
         logger.info(
@@ -839,9 +819,7 @@ _LINK_SOURCES = {"reason": "reason_key"}
 
 
 def _link(record: _Assignment) -> Dict[str, Any]:
-    link = {name: getattr(record, _LINK_SOURCES.get(name, name)) for name in LINK_FIELDS}
-    link["worker_agent"] = {name: record.worker_agent.get(name, "") for name in WORKER_AGENT_FIELDS}
-    return link
+    return {name: getattr(record, _LINK_SOURCES.get(name, name)) for name in LINK_FIELDS}
 
 
 def _receipt_matches(offered: str, expected: str) -> bool:

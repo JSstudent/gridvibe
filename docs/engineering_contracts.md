@@ -1441,13 +1441,14 @@ unless the task explicitly changes this contract.
   `ResultStore.links_snapshot()`: an opaque `link_id` (minted per assignment,
   never the `handoff_id`, which is a capability), requester and worker
   session ids, `state`, `read`, `status`, `collected`, `handed_at`,
-  `reported_at`, the end-reason *key* (never the requester-facing sentence),
-  `round` and `worker_agent`. The task text, the receipt and the handoff id
-  never reach it. Only links whose requester is a composed agent pane are
-  published; a worker with no row keeps its link. `worker_agent`
-  (`agent_selection`, `custom_agent`, `group_id`) is captured once when the
-  task is bound, on every bind path (split, launch, relaunch, follow-up), and
-  never followed afterwards.
+  `reported_at`, the end-reason *key* (never the requester-facing sentence)
+  and `round`. The task text, the receipt and the handoff id never reach it.
+  **Only links between two composed agent panes are published**
+  (`compose_dashboard()`, the one place that decides it): a pane that closes,
+  or stops being an agent pane, takes its links out of the next reading, so
+  the board, the sidebar wires, the chip and the header counts lose it
+  together and no surface draws a ghost of it. An agent that exits while its
+  pane stays an agent pane keeps its row, and so its `ended` link.
 - **A round counts tasks handed to the same running agent.** A task that
   starts an agent (split, launch, `set_pane_agent`) is round 1; only a
   `send_task` follow-up advances it, reading the continued assignment's round
@@ -1469,18 +1470,31 @@ unless the task explicitly changes this contract.
   `links`: one edge per orchestrator–worker pair (the newest round wins, so a
   follow-up never adds a wire), one parent per worker (the requester of its
   newest link), and any loop broken at its earliest-handed link. Siblings and
-  roots follow list order, ghosts last, so collecting and re-tasking never
-  reorders a crew. `linkPhase()` is the only place a link's drawn state
-  (`handed`, `working`, `done`, `failed`, `blocked`, `collected`, `ended`) is
-  decided. Nothing drawn is keyed by `link_id`, which changes every round.
+  roots follow list order, so collecting and re-tasking never reorders a crew.
+  `linkPhase()` is the only place a link's drawn state (`handed`, `working`,
+  `done`, `failed`, `blocked`, `ended`) is decided. **A report is drawn as its
+  status whether or not it has been collected**: `done` means the worker
+  reported success, and *collected* only says the orchestrator has taken
+  delivery of that report (`linkCollected()`), which the board puts in words
+  in the pill's hover and never in a second look. Nothing drawn is keyed by
+  `link_id`, which changes every round.
 - **Wires are decoration.** `createWireLayer()` keeps one `aria-hidden` SVG
   inside its scroller, measures only endpoint rows, rewrites only a changed
   picture, dims other crews in place, re-measures on resize and pauses through
   `setPaused()` wherever the poll stands down for a hidden document. A phase
   change rewrites the SVG and never a row. Colour and motion are never the
   only signal: the crew is stated in text on the chip, the hovers and the
-  board. Wire styles use status tokens only, and reduced motion stops the
-  flow and drops the pulse.
+  board. Wire styles use status tokens only. Motion belongs to work in
+  progress: a `working` wire flows, and a reported wire (`done` green,
+  `blocked` amber, `failed` red) is a solid line whose only motion is a slow,
+  slight pulse of its opacity; nothing travels along it. Reduced motion holds
+  every wire still. A narrow reading (the sidebar, and the board under its
+  breakpoint) draws **one bus per orchestrator**: a quiet trunk out of its
+  card, one spine in a lane of its own and a short branch into each worker,
+  the branch wearing that worker's phase. `planBuses()` gives crews whose
+  rows overlap (nested ones included) different lanes and lets crews that do
+  not overlap share one; it never collapses lanes into one trunk. A wide
+  board draws a curve per link instead.
 - **The sidebar lays crews on rows already drawn.** Its markup is drawn from
   the reading with `waiting` cleared, so nothing from `links` or the waiting
   reading enters it. `decorateCrews()` then fills the crew chip slot (the
@@ -1488,21 +1502,30 @@ unless the task explicitly changes this contract.
   worker's "Working for …" hover line (plus the round from round 2), the
   reading and progress slots, and the highlight, each written only when it
   changed. The panel opens its lane gutter (`has-crews`) only while an edge
-  exists, so a sidebar without crews keeps its exact width. The highlight dims
-  a row's children, never the row, so the input-target ring keeps its full
-  strength.
+  exists, so a sidebar without crews keeps its exact width; the gutter is
+  exactly what the lanes in use need, which the wire layer measures and writes
+  as `--dash-wire-gutter` (the stylesheet's padding, with a first-paint
+  fallback) and removes with the last crew. The highlight dims a row's
+  children, never the row, so the input-target ring keeps its full strength.
 - **The dialog's crew board has its own structure key.** It sits in the
-  `data-dashboard-crews` slot above the list, which is never touched by it.
-  Its key holds membership, layout and liveness — never the phase and never
-  `link_id` — so a new member or a closed pane rewrites only the board slot,
-  keeping the focused node and the sideways scroll, while pills, rounds, ages,
-  readings and the crew header are written in place. A full render of the
-  list carries the board's `scrollLeft` across. A live node is a
-  `data-dashboard-action="pane"` button with its row's target attributes; a
-  worker with no row is a non-interactive ghost drawn from `worker_agent`. The
-  board's header counts every member of the crew, nested ones included; the
-  chip counts direct workers. Below `DASHBOARD_CREW_NARROW_PX` (the session
-  card's breakpoint) the board is one indented column with lane wires.
+  `data-dashboard-crews` slot beside the list, which is never touched by it.
+  Its key holds membership and layout — never the phase and never `link_id` —
+  so a new member or a closed pane rewrites only the board slot, keeping the
+  focused node and the sideways scroll, while pills, rounds, ages, readings and
+  the crew header are written in place. A full render of the list carries the
+  board's `scrollLeft` across, and the dialog's scrollers (the body, or each
+  pane) keep their positions. Every node is a `data-dashboard-action="pane"`
+  button with its row's target attributes; the board draws only panes the
+  reading lists, so a closed pane is not on it. The board's header counts
+  every member of the crew, nested ones included; the chip counts direct
+  workers. **The dialog is as big as the window it opened in while a crew is
+  on the board** (`.has-crews` on `.dash-dialog`: the shell's padding is the
+  margin) and the column it always was with none. From 1000px wide the board
+  (`data-dashboard-crews`) and the session list (`data-dashboard-sessions`) are
+  two panes side by side inside a body that does not scroll, each scrolling on
+  its own; below that they stack in the one scroller. Below
+  `DASHBOARD_CREW_NARROW_PX` (the session card's breakpoint) the board is one
+  indented column with buses.
 - Dashboard layout must remain usable without horizontal overflow at narrow
   widths. A polling update that changes only a row's title, hover, status,
   progress, or idle age updates that row in place, each field on its own

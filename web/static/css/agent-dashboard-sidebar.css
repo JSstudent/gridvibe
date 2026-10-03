@@ -326,12 +326,16 @@ body.agent-sidebar-right .agent-sidebar-resizer {
 
 /* ── Crews ──
 
-   The lane gutter: 18px more on the scroller's left, only while the reading
+   The lane gutter: more room on the scroller's left, only while the reading
    holds a crew, so a column with no crews is as wide inside as it always was.
-   The wires themselves are `agent-crews.js`'s layer, dressed in
-   `agent-dashboard.css`; they leave each card's edge into this space. */
+   Its width is the lanes' own: `agent-crews.js` measures how far its outermost
+   bus sits left of the cards and writes it as `--dash-wire-gutter`, so one
+   crew costs one lane and nothing is reserved for lanes that are not drawn.
+   The fallback holds the space for the first paint. The wires themselves are
+   that layer's, dressed in `agent-dashboard.css`; they leave each card's edge
+   into this space. */
 .agent-sidebar.has-crews .agent-sidebar-body {
-    padding-left: 28px;
+    padding-left: var(--dash-wire-gutter, 16px);
 }
 
 /* Hovering or focusing a crew's row dims every row outside the crew and rings

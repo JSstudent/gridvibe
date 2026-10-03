@@ -8,9 +8,12 @@ in Node:
   newest round winning; one parent per worker, the requester of its newest
   link; a loop broken at its earliest-handed link, so every walk terminates.
 - **One drawn state per link.** `linkPhase` is the truth table the wire, the
-  chip and the board pill all read.
+  chip and the board pill all read. A report is its status whether or not it
+  has been collected; collecting is a fact beside the phase.
 - **The chip counts workers, not assignments.**
-- **Lanes pack shortest-first** and collapse to one trunk past four.
+- **A narrow reading draws one bus per orchestrator,** in a lane of its own
+  while its rows overlap another's, and asks for exactly the gutter its lanes
+  need.
 
 The wire layer is the module's one DOM part, so it runs against a small stub
 of the elements it touches: it must rewrite its SVG only when the picture
@@ -131,6 +134,12 @@ function makePage(rows) {
         scrollLeft: 0,
         scrollTop: 0,
         classList: classList(),
+        style: {
+            props: {},
+            getPropertyValue(name) { return this.props[name] || ''; },
+            setProperty(name, value) { this.props[name] = value; },
+            removeProperty(name) { delete this.props[name]; }
+        },
         get firstChild() { return children[0] || null; },
         children,
         rows,
@@ -342,8 +351,9 @@ class LinkPhaseTestCase(AgentCrewsNodeTestCase):
                 ['done', { state: 'reported', status: 'done' }],
                 ['failed', { state: 'reported', status: 'failed' }],
                 ['blocked', { state: 'reported', status: 'blocked' }],
-                ['collected', { state: 'reported', status: 'done', collected: true }],
-                ['collected', { state: 'reported', status: 'blocked', collected: true }],
+                ['done', { state: 'reported', status: 'done', collected: true }],
+                ['blocked', { state: 'reported', status: 'blocked', collected: true }],
+                ['failed', { state: 'reported', status: 'failed', collected: true }],
                 ['ended', { state: 'ended', reason: 'pane closed' }],
                 ['ended', { state: 'ended', read: true, collected: true }]
             ];
@@ -353,47 +363,41 @@ class LinkPhaseTestCase(AgentCrewsNodeTestCase):
         for want, got in result:
             self.assertEqual(got, want)
 
-    def test_a_collected_report_keeps_its_hue_faintly(self):
+    def test_collecting_a_report_changes_nothing_that_is_drawn(self):
+        """Collected is a fact beside the phase, put into words by the board
+        and never a second look: the wire and its end dot are the same
+        whether the orchestrator has taken the report or not."""
         result = self._run_node(
             """
+            const both = status => [false, true].map(collected => ({
+                wire: crews.wireClasses({ state: 'reported', status, collected }),
+                end: crews.endClasses({ state: 'reported', status, collected }),
+                collected: crews.linkCollected({ state: 'reported', status, collected })
+            }));
             report({
-                done: crews.wireClasses({ state: 'reported', status: 'done', collected: true }),
-                blocked: crews.wireClasses({ state: 'reported', status: 'blocked', collected: true }),
-                failed: crews.wireClasses({ state: 'reported', status: 'failed', collected: true }),
+                done: both('done'), blocked: both('blocked'), failed: both('failed'),
+                working: crews.linkCollected({ state: 'working', collected: true }),
+                phases: crews.PHASES,
                 awaitedWorking: crews.wireClasses({ state: 'working', read: true }, { awaited: true }),
                 awaitedHanded: crews.wireClasses({ state: 'working', read: false }, { awaited: true }),
                 awaitedDone: crews.wireClasses({ state: 'reported', status: 'done' }, { awaited: true })
             });
             """
         )
-        self.assertEqual(result["done"], "dash-wire is-collected")
-        self.assertEqual(result["blocked"], "dash-wire is-collected is-tone-blocked")
-        self.assertEqual(result["failed"], "dash-wire is-collected is-tone-failed")
+        for status in ("done", "blocked", "failed"):
+            with self.subTest(status=status):
+                fresh, taken = result[status]
+                self.assertEqual(fresh["wire"], f"dash-wire is-{status}")
+                self.assertEqual(fresh["end"], f"dash-wire-end is-{status}")
+                self.assertEqual((fresh["wire"], fresh["end"]), (taken["wire"], taken["end"]))
+                self.assertEqual([fresh["collected"], taken["collected"]], [False, True])
+        # Only a report can have been collected.
+        self.assertFalse(result["working"])
+        self.assertNotIn("collected", result["phases"])
         # The glow is for a worker still on it, nothing else.
         self.assertEqual(result["awaitedWorking"], "dash-wire is-working is-awaited")
         self.assertNotIn("is-awaited", result["awaitedHanded"])
         self.assertNotIn("is-awaited", result["awaitedDone"])
-
-    def test_the_worker_end_dot_keeps_the_same_faded_hue(self):
-        result = self._run_node(
-            """
-            report([
-                crews.endClasses({ state: 'reported', status: 'failed', collected: true }),
-                crews.endClasses({ state: 'reported', status: 'blocked', collected: true }),
-                crews.endClasses({ state: 'reported', status: 'done', collected: true }),
-                crews.endClasses({ state: 'working', read: true })
-            ]);
-            """
-        )
-        self.assertEqual(result, [
-            "dash-wire-end is-collected is-tone-failed",
-            "dash-wire-end is-collected is-tone-blocked",
-            "dash-wire-end is-collected",
-            "dash-wire-end is-working",
-        ])
-        css = DASHBOARD_CSS.read_text(encoding="utf-8")
-        self.assertRegex(css, r"\.dash-wire-end\.is-collected\.is-tone-failed \{ fill: var\(--gv-danger\); \}")
-        self.assertRegex(css, r"\.dash-wire-end\.is-collected\.is-tone-blocked \{ fill: var\(--gv-warning\); \}")
 
     def test_both_waiting_kinds_have_their_own_words(self):
         result = self._run_node(
@@ -448,55 +452,112 @@ class CrewSummaryTestCase(AgentCrewsNodeTestCase):
 
 
 class LaneGeometryTestCase(AgentCrewsNodeTestCase):
-    def test_lanes_pack_shortest_first_and_siblings_get_their_own(self):
+    def test_lanes_pack_shortest_first_and_overlapping_spans_get_their_own(self):
         result = self._run_node(
             """
             report({
-                // Two siblings leaving one row, a long one and a short one.
+                // Two spans leaving one row, a long one and a short one.
                 siblings: crews.assignLanes([{ lo: 0, hi: 100 }, { lo: 0, hi: 30 }]),
                 // Apart, they share the innermost lane.
                 apart: crews.assignLanes([{ lo: 0, hi: 30 }, { lo: 40, hi: 90 }]),
                 // A chain shares a row: touching is overlapping.
                 touching: crews.assignLanes([{ lo: 0, hi: 30 }, { lo: 30, hi: 60 }]),
                 reversed: crews.assignLanes([{ lo: 50, hi: 10 }]),
-                empty: crews.assignLanes([])
+                empty: crews.assignLanes([]),
+                // However many nest, each keeps a lane: nothing collapses.
+                nested: crews.assignLanes(Array.from({ length: 9 }, (_, i) => ({ lo: 0, hi: 10 * (i + 1) })))
             });
             """
         )
-        self.assertEqual(result["siblings"], {"lanes": [1, 0], "trunk": False})
-        self.assertEqual(result["apart"], {"lanes": [0, 0], "trunk": False})
-        self.assertEqual(result["touching"], {"lanes": [0, 1], "trunk": False})
-        self.assertEqual(result["reversed"], {"lanes": [0], "trunk": False})
-        self.assertEqual(result["empty"], {"lanes": [], "trunk": False})
+        self.assertEqual(result["siblings"], {"lanes": [1, 0], "count": 2})
+        self.assertEqual(result["apart"], {"lanes": [0, 0], "count": 1})
+        self.assertEqual(result["touching"], {"lanes": [0, 1], "count": 2})
+        self.assertEqual(result["reversed"], {"lanes": [0], "count": 1})
+        self.assertEqual(result["empty"], {"lanes": [], "count": 0})
+        self.assertEqual(result["nested"]["lanes"], list(range(9)))
+        self.assertEqual(result["nested"]["count"], 9)
 
-    def test_past_four_lanes_every_wire_shares_one_trunk(self):
+    def test_a_crew_of_six_is_one_bus_with_six_branches(self):
+        """The sidebar's tight case: one orchestrator, six workers. One lane,
+        one spine and a short tick into each worker, not six curves."""
         result = self._run_node(
             """
-            const nested = n => Array.from({ length: n }, (_, i) => ({ lo: 0, hi: 10 * (i + 1) }));
-            report({ four: crews.assignLanes(nested(4)), five: crews.assignLanes(nested(5)), max: crews.MAX_LANES });
+            const wire = y => ({ requester: 'o', from: { x: 20, y: 10 }, to: { x: 20, y } });
+            const plan = crews.planBuses([50, 90, 130, 170, 210, 250].map(wire));
+            const bus = plan.buses[0];
+            report({
+                buses: plan.buses.length, lanes: plan.lanes, gutter: plan.gutter,
+                x: bus.x, top: bus.top, bottom: bus.bottom,
+                paths: crews.busPaths(bus)
+            });
             """
         )
-        self.assertEqual(result["max"], 4)
-        self.assertEqual(result["four"], {"lanes": [0, 1, 2, 3], "trunk": False})
-        self.assertEqual(result["five"], {"lanes": [0, 0, 0, 0, 0], "trunk": True})
+        self.assertEqual(result["buses"], 1)
+        self.assertEqual(result["lanes"], 1)
+        # 9 px out from the card edge, and 5 px of air beyond the line.
+        self.assertEqual(result["x"], 11)
+        self.assertEqual(result["gutter"], 14)
+        self.assertEqual((result["top"], result["bottom"]), (10, 250))
+        self.assertEqual(result["paths"]["trunk"], "M20 10 H11 M11 10 V250")
+        self.assertEqual(
+            result["paths"]["branches"],
+            [f"M11 {y} H20" for y in (50, 90, 130, 170, 210, 250)],
+        )
 
-    def test_a_lane_wire_runs_out_down_and_back_in_with_rounded_bends(self):
+    def test_overlapping_orchestrators_get_lanes_and_the_gutter_grows_with_them(self):
+        result = self._run_node(
+            """
+            const wire = (requester, fromY, y) => ({
+                requester, from: { x: 20, y: fromY }, to: { x: 20, y }
+            });
+            // `a` is both a worker of `o` and the orchestrator of its own
+            // crew: its rows sit inside `o`'s span, so they cannot share a lane.
+            const nested = crews.planBuses([wire('o', 10, 50), wire('a', 50, 90), wire('o', 10, 130)]);
+            // Two crews one above the other share the innermost lane.
+            const apart = crews.planBuses([wire('o', 10, 50), wire('p', 200, 240)]);
+            report({
+                nested: nested.buses.map(bus => [bus.requester, bus.lane, bus.x]),
+                nestedGutter: nested.gutter,
+                apart: apart.buses.map(bus => [bus.requester, bus.lane]),
+                apartGutter: apart.gutter,
+                none: crews.planBuses([]),
+                one: crews.planBuses([wire('o', 10, 50)]).gutter
+            });
+            """
+        )
+        # The shorter span is nearest the cards; the longer is a lane out.
+        self.assertEqual(result["nested"], [["o", 1, 5], ["a", 0, 11]])
+        self.assertEqual(result["nestedGutter"], 20)
+        self.assertEqual(result["apart"], [["o", 0], ["p", 0]])
+        self.assertEqual(result["apartGutter"], 14)
+        self.assertEqual(result["none"], {"buses": [], "lanes": 0, "gutter": 0})
+        self.assertEqual(result["one"], 14)
+
+    def test_a_nested_orchestrators_bus_clears_its_own_cards_indent(self):
+        """In the dialog's narrow board a deeper card sits further right, so
+        its bus sits right of the root's and the gutter is measured from the
+        leftmost card only."""
+        result = self._run_node(
+            """
+            const plan = crews.planBuses([
+                { requester: 'o', from: { x: 26, y: 10 }, to: { x: 44, y: 50 } },
+                { requester: 'a', from: { x: 44, y: 50 }, to: { x: 62, y: 90 } }
+            ]);
+            report(plan.buses.map(bus => [bus.requester, bus.lane, bus.x]).concat([[plan.gutter]]));
+            """
+        )
+        # `o` (rows 10-50) and `a` (rows 50-90) touch at row 50, so two lanes.
+        self.assertEqual(result, [["o", 0, 17], ["a", 1, 29], [14]])
+
+    def test_a_wide_boards_curve_runs_from_the_parent_to_the_child(self):
         result = self._run_node(
             """
             report({
-                down: crews.wirePath('lane', { x: 20, y: 10 }, { x: 20, y: 60 }, 1),
-                up: crews.wirePath('lane', { x: 20, y: 60 }, { x: 20, y: 10 }, 0),
-                tight: crews.wirePath('lane', { x: 20, y: 10 }, { x: 20, y: 13 }, 0),
-                fan: crews.wirePath('fan', { x: 100, y: 10 }, { x: 160, y: 50 }),
-                closeFan: crews.wirePath('fan', { x: 100, y: 10 }, { x: 110, y: 50 })
+                fan: crews.fanPath({ x: 100, y: 10 }, { x: 160, y: 50 }),
+                closeFan: crews.fanPath({ x: 100, y: 10 }, { x: 110, y: 50 })
             });
             """
         )
-        # Lane 1 sits 8 + 5 px left of the card edge.
-        self.assertEqual(result["down"], "M20 10 H11 Q7 10 7 14 V56 Q7 60 11 60 H20")
-        self.assertEqual(result["up"], "M20 60 H16 Q12 60 12 56 V14 Q12 10 16 10 H20")
-        # The bend never overshoots a span shorter than two radii.
-        self.assertEqual(result["tight"], "M20 10 H13.5 Q12 10 12 11.5 V11.5 Q12 13 13.5 13 H20")
         # Control points half the gap out, but never under 16 px.
         self.assertEqual(result["fan"], "M100 10 C130 10 130 50 160 50")
         self.assertEqual(result["closeFan"], "M100 10 C116 10 94 50 110 50")
@@ -523,7 +584,6 @@ class WireLayerTestCase(AgentCrewsNodeTestCase):
             report({
                 first, afterSame, afterRound, afterPhase: svg.writes,
                 groups: svg.groups.filter(g => g.tag === 'g').length,
-                pulses: svg.groups.filter(g => g.tag === 'circle').length,
                 ariaHidden: svg.getAttribute('aria-hidden'),
                 cls: svg.getAttribute('class'),
                 hosted: page.container.classList.contains('has-dash-wires'),
@@ -536,14 +596,18 @@ class WireLayerTestCase(AgentCrewsNodeTestCase):
         self.assertEqual(result["afterSame"], 1)
         self.assertEqual(result["afterRound"], 1)
         self.assertEqual(result["afterPhase"], 2)
-        self.assertEqual(result["groups"], 2)
-        self.assertEqual(result["pulses"], 1)
+        # One bus for the one orchestrator, whatever it handed out.
+        self.assertEqual(result["groups"], 1)
         self.assertEqual(result["ariaHidden"], "true")
         self.assertEqual(result["cls"], "dash-wires")
         self.assertTrue(result["hosted"])
         self.assertNotIn("r2", result["html"])
-        # Lane wires start at the card edge (x 20) and cross into the next card.
-        self.assertIn('d="M20 10 ', result["html"])
+        # A settled report is a still line: nothing travels along any wire.
+        self.assertNotIn("animateMotion", result["html"])
+        self.assertNotIn("dash-wire-pulse", result["html"])
+        self.assertIn("dash-wire dash-wire-bus", result["html"])
+        # The trunk starts at the card edge (x 20) and the spine is one lane out.
+        self.assertIn('d="M20 10 H11 M11 10 V90"', result["html"])
 
     def test_a_worker_without_a_row_draws_no_wire(self):
         result = self._run_node(
@@ -709,6 +773,85 @@ class WireLayerTestCase(AgentCrewsNodeTestCase):
         self.assertTrue(result["detached"])
         self.assertTrue(result["unhosted"])
 
+    def test_a_crew_of_six_draws_one_bus_coloured_per_worker(self):
+        result = self._run_node(
+            """
+            const page = makePage({
+                o: { top: 0, card: 1 }, a: { top: 40, card: 2 }, b: { top: 80, card: 3 },
+                c: { top: 120, card: 4 }, d: { top: 160, card: 5 }, e: { top: 200, card: 6 },
+                f: { top: 240, card: 7 }
+            });
+            const layer = crews.createWireLayer({ container: page.container, mode: 'lane' });
+            layer.paint({ links: [
+                link('o', 'a', { state: 'reported', status: 'done' }),
+                link('o', 'b', { state: 'reported', status: 'blocked', collected: true }),
+                link('o', 'c', { state: 'reported', status: 'failed' }),
+                link('o', 'd'), link('o', 'e', { read: false }), link('o', 'f', { state: 'ended' })
+            ] });
+            const html = svgOf(page).innerHTML;
+            report({
+                groups: svgOf(page).groups.filter(g => g.tag === 'g').length,
+                paths: (html.match(/<path /g) || []).length,
+                classes: Array.from(html.matchAll(/<path class="([^"]*)"/g)).map(m => m[1]),
+                gutter: page.container.style.getPropertyValue('--dash-wire-gutter')
+            });
+            """,
+            dom=True,
+        )
+        # Seven paths: the quiet trunk and spine, then one branch per worker.
+        self.assertEqual(result["groups"], 1)
+        self.assertEqual(result["paths"], 7)
+        self.assertEqual(result["classes"], [
+            "dash-wire dash-wire-bus",
+            "dash-wire is-done",
+            "dash-wire is-blocked",
+            "dash-wire is-failed",
+            "dash-wire is-working",
+            "dash-wire is-handed",
+            "dash-wire is-ended",
+        ])
+        # One lane is all it needs.
+        self.assertEqual(result["gutter"], "14px")
+
+    def test_the_gutter_is_what_the_lanes_need_and_goes_with_the_last_crew(self):
+        result = self._run_node(
+            """
+            const page = makePage({
+                o: { top: 0, card: 1 }, a: { top: 40, card: 1 }, c: { top: 80, card: 1 }
+            });
+            const layer = crews.createWireLayer({ container: page.container, mode: 'lane' });
+            const gutter = () => page.container.style.getPropertyValue('--dash-wire-gutter');
+            layer.paint({ links: [link('o', 'a')] });
+            const one = gutter();
+            // `a` now has a crew of its own inside `o`'s rows: two lanes.
+            layer.paint({ links: [link('o', 'a'), link('a', 'c')] });
+            const two = gutter();
+            layer.paint({ links: [] });
+            const none = gutter();
+            layer.paint({ links: [link('o', 'a')] });
+            layer.dispose();
+            report({ one, two, none, disposed: gutter() });
+            """,
+            dom=True,
+        )
+        self.assertEqual(result["one"], "14px")
+        self.assertEqual(result["two"], "20px")
+        # No crew leaves the column exactly as wide as it always was.
+        self.assertEqual(result["none"], "")
+        self.assertEqual(result["disposed"], "")
+
+    def test_a_fan_layer_asks_for_no_gutter(self):
+        result = self._run_node(
+            """
+            const page = makePage({ o: { top: 0, card: 1 }, a: { top: 40, card: 1 } });
+            const layer = crews.createWireLayer({ container: page.container, mode: 'fan' });
+            layer.paint({ links: [link('o', 'a')] });
+            report(page.container.style.getPropertyValue('--dash-wire-gutter'));
+            """,
+            dom=True,
+        )
+        self.assertEqual(result, "")
+
     def test_fan_wires_run_from_the_parents_right_edge_to_the_childs_left(self):
         result = self._run_node(
             """
@@ -743,9 +886,39 @@ class StylesheetAndPagesTestCase(unittest.TestCase):
             r"@media \(prefers-reduced-motion: reduce\) \{(.*?)\n\}", css, flags=re.S
         )
         joined = "\n".join(blocks)
-        self.assertRegex(joined, r"\.dash-wire\.is-working \{ animation: none; \}")
-        self.assertRegex(joined, r"\.dash-wire-pulse \{ display: none; \}")
+        # Every wire that moves holds still: the working flow and the settled
+        # report's pulse alike.
+        for state in ("is-working", "is-done", "is-blocked", "is-failed"):
+            with self.subTest(state=state):
+                self.assertIn(f".dash-wire.{state}", joined)
+        self.assertRegex(joined, r"\.dash-wire\.is-failed \{ animation: none; \}")
         self.assertRegex(joined, r"\.dash-state-waiting \.dash-state-dot,[^{]*\{ animation: none; \}")
+
+    def test_a_settled_report_is_a_solid_line_that_only_pulses(self):
+        section = self._wire_section()
+        for status, token in (("done", "success"), ("blocked", "warning"), ("failed", "danger")):
+            with self.subTest(status=status):
+                self.assertRegex(
+                    section,
+                    rf"\.dash-wire\.is-{status} \{{ stroke: var\(--gv-{token}\); \}}",
+                )
+                self.assertRegex(
+                    section,
+                    rf"\.dash-wire-end\.is-{status} \{{ fill: var\(--gv-{token}\); \}}",
+                )
+        settled = re.search(
+            r"\.dash-wire\.is-done,\s*\.dash-wire\.is-blocked,\s*\.dash-wire\.is-failed \{([^}]*)\}",
+            section,
+        )
+        self.assertIsNotNone(settled)
+        # Slow, and never the flow that marks work in progress; no dashes.
+        self.assertIn("animation: dash-wire-settle 3.6s", settled.group(1))
+        self.assertNotIn("dash-wire-flow", settled.group(1))
+        self.assertNotIn("stroke-dasharray", settled.group(1))
+        # Nothing travels along a wire any more, and there is no collected look.
+        self.assertNotIn("dash-wire-pulse", section)
+        self.assertNotIn("is-collected", section)
+        self.assertNotIn("is-tone-", section)
 
     def test_the_waiting_mark_is_a_dotted_accent_ring(self):
         css = DASHBOARD_CSS.read_text(encoding="utf-8")

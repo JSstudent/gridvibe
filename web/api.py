@@ -35,7 +35,6 @@ from web.agent_handoffs import (
     pane_description,
     same_machine,
     validate_task,
-    worker_description,
 )
 from web.agent_handoffs import handoffs as agent_handoffs
 from web.agent_results import ResultError, clamp_wait, validate_until
@@ -4130,11 +4129,7 @@ def split_session(session_id: str):
         # close between the take and here, and its handoffs go with it; the
         # pane is already appended, so that costs the task and not the split.
         try:
-            agent_handoffs.bind(
-                handoff_id,
-                new_session.session_id,
-                worker_agent=worker_description(new_session),
-            )
+            agent_handoffs.bind(handoff_id, new_session.session_id)
         except HandoffError:
             logger.warning(
                 "Handoff %s went before it could be bound session=%s",

@@ -65,7 +65,6 @@ from web.agent_results import (
     WAIT_GRACE_SECONDS,
     WORKING,
     ResultStore,
-    worker_agent_mapping,
 )
 from web.agent_results import results as agent_results
 
@@ -420,7 +419,6 @@ class HandoffStore:
         from_agent: str = "",
         session_id: str = "",
         requester_session_id: str = "",
-        worker_agent: Optional[Mapping[str, Any]] = None,
         now: Optional[float] = None,
     ) -> str:
         """Record one validated task. Returns its ``handoff_id``.
@@ -433,9 +431,6 @@ class HandoffStore:
         report, when that is not ``source_session_id``: a split records the
         pane being halved as its source, and the agent that asked may be
         beside it.
-
-        ``worker_agent`` is :func:`worker_description` of the pane it is bound
-        to, recorded with the assignment for the dashboard.
         """
         moment = time.monotonic() if now is None else float(now)
         handoff_id = secrets.token_hex(16)
@@ -470,7 +465,7 @@ class HandoffStore:
                 )
             self._records[handoff_id] = record
             if session_id:
-                cleanups = self._bind_locked(record, str(session_id), worker_agent)
+                cleanups = self._bind_locked(record, str(session_id))
         _run_cleanups(cleanups)
         logger.info(
             "Handoff %s created source=%s session=%s chars=%d",
@@ -518,8 +513,6 @@ class HandoffStore:
         self,
         handoff_id: str,
         session_id: str,
-        *,
-        worker_agent: Optional[Mapping[str, Any]] = None,
     ) -> None:
         """Attach a taken handoff to the pane the split just created."""
         cleanups: List[Callable[[], Any]] = []
@@ -527,7 +520,7 @@ class HandoffStore:
             record = self._records.get(str(handoff_id or ""))
             if record is None or record.phase != _TAKEN:
                 raise HandoffError("That task is no longer waiting for a pane.", 409)
-            cleanups = self._bind_locked(record, str(session_id), worker_agent)
+            cleanups = self._bind_locked(record, str(session_id))
         _run_cleanups(cleanups)
         logger.info("Handoff %s bound session=%s", handoff_id, session_id)
 
@@ -535,7 +528,6 @@ class HandoffStore:
         self,
         record: _Handoff,
         session_id: str,
-        worker_agent: Optional[Mapping[str, Any]] = None,
         continues: str = "",
     ) -> List[Callable[[], Any]]:
         """One handoff per pane: binding a new one drops whatever it held.
@@ -546,9 +538,8 @@ class HandoffStore:
         a drop landing in between would end nothing and leave the requester
         waiting on an assignment that could never be reported.
 
-        ``worker_agent`` and ``continues`` go to the assignment as they came:
-        who the worker is, and -- for a follow-up only -- the handoff whose
-        round this one continues.
+        ``continues`` goes to the assignment as it came: for a follow-up only,
+        the handoff whose round this one continues.
         """
         cleanups: List[Callable[[], Any]] = []
         for other_id, other in list(self._records.items()):
@@ -568,7 +559,6 @@ class HandoffStore:
                 record.handoff_id,
                 requester_session_id=record.requester_session_id,
                 worker_session_id=session_id,
-                worker_agent=worker_agent,
                 continues=continues,
             )
         return cleanups
@@ -667,7 +657,6 @@ class HandoffStore:
         source_session_id: str,
         from_title: str = "",
         from_agent: str = "",
-        worker_agent: Optional[Mapping[str, Any]] = None,
         now: Optional[float] = None,
     ) -> HandoffView:
         """Hand the agent already running in a pane its next task.
@@ -706,9 +695,7 @@ class HandoffStore:
             if previous is None or previous.session_id != resolved or previous.phase != READ:
                 raise HandoffError(FOLLOWUP_STALE_MESSAGE, 409)
             self._records[handoff_id] = record
-            cleanups = self._bind_locked(
-                record, resolved, worker_agent, continues=previous.handoff_id
-            )
+            cleanups = self._bind_locked(record, resolved, continues=previous.handoff_id)
             record.phase = ANNOUNCED
             record.delivery = PAGED if planned_delivery(record.chars) == FILE else INLINE
             view = record.view()
@@ -1063,20 +1050,6 @@ def pane_description(session: Any) -> Mapping[str, str]:
         "from_title": str(getattr(session, "title", "") or ""),
         "from_agent": agent,
     }
-
-
-def worker_description(session: Any) -> Mapping[str, str]:
-    """Who a pane handed a task is, as its assignment records it at bind time.
-
-    Its agent and its session, read once from the record the binding route
-    already holds. A later move or agent swap is not followed: this is what
-    the dashboard draws for a pane that has since closed.
-    """
-    return worker_agent_mapping({
-        "agent_selection": getattr(session, "agent_selection", ""),
-        "custom_agent": getattr(session, "custom_agent", ""),
-        "group_id": getattr(session, "group_id", ""),
-    })
 
 
 #: The one store every route and the startup sequence read and write.

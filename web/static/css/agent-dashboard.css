@@ -64,6 +64,15 @@
     font-size: 14px;
 }
 
+/* While a crew is on the board the dialog is as big as the window it opened in
+   (the shell's own padding is the margin): a crew is a picture, and one that
+   has to be scrolled to be seen whole is not one. Height follows, because the
+   fixed height above is a column's. */
+.dash-dialog.has-crews {
+    width: 100%;
+    height: 100%;
+}
+
 .dash-dialog:focus {
     outline: none;
 }
@@ -886,6 +895,7 @@
 @media (max-width: 500px) {
     .agent-dashboard-shell { padding: 10px; }
     .dash-dialog { height: min(88vh, 820px); }
+    .dash-dialog.has-crews { height: 100%; }
     .dash-titlebar { padding: 10px 12px; gap: 8px; }
     .dash-titlebar-right { width: 100%; justify-content: space-between; }
     .dash-body { padding: 12px; }
@@ -910,6 +920,41 @@
 
 .dash-crews-title {
     margin: 0;
+}
+
+/* Wide enough for two panes: the board on the left and the session list on the
+   right, each scrolling on its own inside a body that does not. Below it they
+   are the one stacked scroller they always were. The list keeps the column it
+   was designed for and the board takes the rest, because the board is the one
+   that wants width. */
+@media (min-width: 1000px) {
+    .dash-dialog.has-crews .dash-body {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(340px, 440px);
+        gap: 0 22px;
+        overflow: hidden;
+        padding-bottom: 18px;
+        scrollbar-gutter: auto;
+    }
+
+    .dash-dialog.has-crews .dash-crews-slot,
+    .dash-dialog.has-crews .dash-sessions-pane {
+        min-width: 0;
+        min-height: 0;
+        overflow-y: auto;
+        scrollbar-gutter: stable;
+    }
+
+    .dash-dialog.has-crews .dash-crews {
+        margin-bottom: 0;
+        padding-bottom: 0;
+        border-bottom: 0;
+    }
+
+    .dash-dialog.has-crews .dash-sessions-pane {
+        padding-left: 22px;
+        border-left: 2px solid var(--gv-dialog-border);
+    }
 }
 
 .dash-crews-board {
@@ -985,12 +1030,9 @@
 
 .dash-crew-segment.is-handed { background: color-mix(in srgb, var(--gv-accent) 35%, transparent); }
 .dash-crew-segment.is-working { background: var(--gv-accent); }
-.dash-crew-segment.is-done,
-.dash-crew-segment.is-collected { background: var(--gv-success); }
-.dash-crew-segment.is-blocked,
-.dash-crew-segment.is-collected.is-tone-blocked { background: var(--gv-warning); }
-.dash-crew-segment.is-failed,
-.dash-crew-segment.is-collected.is-tone-failed { background: var(--gv-danger); }
+.dash-crew-segment.is-done { background: var(--gv-success); }
+.dash-crew-segment.is-blocked { background: var(--gv-warning); }
+.dash-crew-segment.is-failed { background: var(--gv-danger); }
 .dash-crew-segment.is-ended { background: var(--gv-dialog-muted); }
 
 .dash-crew-grid {
@@ -1037,13 +1079,6 @@ button.dash-crew-node:focus-visible {
 
 .dash-crew-node.is-root {
     border-color: color-mix(in srgb, var(--gv-accent) 45%, transparent);
-}
-
-/* A worker whose pane has closed: drawn from what was captured when its task
-   was bound, and no control. */
-.dash-crew-node.is-ghost {
-    border-style: dashed;
-    opacity: .65;
 }
 
 .dash-crew-node-head {
@@ -1135,20 +1170,17 @@ button.dash-crew-node:focus-visible {
     color: var(--gv-accent);
 }
 
-.dash-crew-pill.is-done,
-.dash-crew-pill.is-collected {
+.dash-crew-pill.is-done {
     background: var(--gv-success-soft);
     color: var(--gv-success);
 }
 
-.dash-crew-pill.is-blocked,
-.dash-crew-pill.is-collected.is-tone-blocked {
+.dash-crew-pill.is-blocked {
     background: var(--gv-warning-soft);
     color: var(--gv-warning);
 }
 
-.dash-crew-pill.is-failed,
-.dash-crew-pill.is-collected.is-tone-failed {
+.dash-crew-pill.is-failed {
     background: var(--gv-danger-soft);
     color: var(--gv-danger);
 }
@@ -1158,8 +1190,7 @@ button.dash-crew-node:focus-visible {
     color: var(--gv-accent);
 }
 
-.dash-crew-pill.is-ended,
-.dash-crew-pill.is-closed {
+.dash-crew-pill.is-ended {
     border-color: var(--gv-dialog-border);
     color: var(--gv-dialog-muted);
 }
@@ -1173,13 +1204,15 @@ button.dash-crew-node:focus-visible {
     white-space: nowrap;
 }
 
-/* Narrow: one column, indented by depth, with the lane wires in the gutter the
-   grid's left padding leaves. Equal to `DASHBOARD_CREW_NARROW_PX`. */
+/* Narrow: one column, indented by depth, with the buses in the gutter the
+   grid's left padding leaves. The wire layer writes the width the lanes need;
+   the fallback holds the space for the first paint. Equal to
+   `DASHBOARD_CREW_NARROW_PX`. */
 @container dash-crews (max-width: 380px) {
     .dash-crew { width: auto; }
     .dash-crew-grid {
         grid-template-columns: minmax(0, 1fr);
-        padding-left: 26px;
+        padding-left: var(--dash-wire-gutter, 16px);
     }
     .dash-crew-cell {
         grid-column: 1;
@@ -1221,14 +1254,12 @@ button.dash-crew-node:focus-visible {
     stroke-linejoin: round;
 }
 
-.dash-wire-group,
-.dash-wire-pulse {
+.dash-wire-group {
     transition: opacity .2s;
 }
 
 /* Outside the highlighted crew. */
-.dash-wire-group.is-dimmed,
-.dash-wire-pulse.is-dimmed {
+.dash-wire-group.is-dimmed {
     opacity: .14;
 }
 
@@ -1250,29 +1281,26 @@ button.dash-crew-node:focus-visible {
     filter: drop-shadow(0 0 3px color-mix(in srgb, var(--gv-accent) 70%, transparent));
 }
 
-.dash-wire.is-done {
-    stroke: var(--gv-success);
-    stroke-width: 2;
-}
-
-.dash-wire.is-blocked {
-    stroke: var(--gv-warning);
-    stroke-width: 2;
-}
-
+/* A report is a settled, solid line in its status colour, and its only motion
+   is a slow, slight pulse: nothing travels along it, and it looks the same
+   whether the orchestrator has collected it or not. */
+.dash-wire.is-done,
+.dash-wire.is-blocked,
 .dash-wire.is-failed {
-    stroke: var(--gv-danger);
     stroke-width: 2;
+    animation: dash-wire-settle 3.6s ease-in-out infinite;
 }
 
-/* Collected fades back, and keeps the hue of what it reported. */
-.dash-wire.is-collected {
-    stroke: var(--gv-success);
-    stroke-opacity: .45;
-}
+.dash-wire.is-done { stroke: var(--gv-success); }
+.dash-wire.is-blocked { stroke: var(--gv-warning); }
+.dash-wire.is-failed { stroke: var(--gv-danger); }
 
-.dash-wire.is-collected.is-tone-blocked { stroke: var(--gv-warning); }
-.dash-wire.is-collected.is-tone-failed { stroke: var(--gv-danger); }
+/* The orchestrator's trunk and the crew's spine: the quiet part of a bus, so
+   the coloured branches are what is read. */
+.dash-wire.dash-wire-bus {
+    stroke: color-mix(in srgb, var(--gv-accent) 55%, transparent);
+    stroke-width: 1.5;
+}
 
 .dash-wire.is-ended {
     stroke: var(--gv-dialog-muted);
@@ -1286,23 +1314,19 @@ button.dash-crew-node:focus-visible {
     fill: var(--gv-accent);
 }
 
-.dash-wire-end.is-done,
-.dash-wire-end.is-collected { fill: var(--gv-success); }
-.dash-wire-end.is-blocked,
-.dash-wire-end.is-collected.is-tone-blocked { fill: var(--gv-warning); }
-.dash-wire-end.is-failed,
-.dash-wire-end.is-collected.is-tone-failed { fill: var(--gv-danger); }
+.dash-wire-end.is-done { fill: var(--gv-success); }
+.dash-wire-end.is-blocked { fill: var(--gv-warning); }
+.dash-wire-end.is-failed { fill: var(--gv-danger); }
 .dash-wire-end.is-ended { fill: var(--gv-dialog-muted); }
-
-/* A report on its way back to the orchestrator, until it is collected. */
-.dash-wire-pulse {
-    fill: var(--gv-success);
-    filter: drop-shadow(0 0 4px var(--gv-success));
-}
 
 @keyframes dash-wire-flow {
     from { stroke-dashoffset: 12; }
     to { stroke-dashoffset: 0; }
+}
+
+@keyframes dash-wire-settle {
+    0%, 100% { stroke-opacity: 1; }
+    50% { stroke-opacity: .62; }
 }
 
 /* The page stops polling while it is hidden, and the wires stop with it. */
@@ -1312,6 +1336,8 @@ button.dash-crew-node:focus-visible {
 
 /* Still, and still readable from colour and dash pattern alone. */
 @media (prefers-reduced-motion: reduce) {
-    .dash-wire.is-working { animation: none; }
-    .dash-wire-pulse { display: none; }
+    .dash-wire.is-working,
+    .dash-wire.is-done,
+    .dash-wire.is-blocked,
+    .dash-wire.is-failed { animation: none; }
 }

@@ -756,12 +756,18 @@
 
     /* ── The crew board ──
 
-       The dialog's answer to "how far along is this crew": one box per crew
-       above the session list, the orchestrator on the left and the agents it
-       handed tasks to in columns to its right, one column per depth, a parent
-       centred on its children and a fan of wires between them. The list below
-       is untouched, so a crew's agents are named twice, and that is the cost
-       the board was chosen with.
+       The dialog's answer to "how far along is this crew": one box per crew,
+       the orchestrator on the left and the agents it handed tasks to in
+       columns to its right, one column per depth, a parent centred on its
+       children and a fan of wires between them. The session list is untouched,
+       so a crew's agents are named twice, and that is the cost the board was
+       chosen with.
+
+         · **The dialog is as big as the window while a crew exists.** The board
+           and the list are two panes side by side, each scrolling on its own,
+           so a whole crew is in view; on a window too narrow for two they stack
+           in the one scroller, as they always did. With no crew the dialog is
+           the column it was.
 
          · **It is laid out from the crew index, never from `link_id`.** A new
            round mints a new id for the same pair, and a board keyed by it
@@ -775,12 +781,11 @@
            is written into its own slot, the way a row's reading is, so a
            report, a phase change or a new round keeps every node element, the
            caret and the scroll, and only the wires are redrawn.
-         · **A closed worker is a ghost, not a gap.** Its link stays until the
-           orchestrator collects it, so the board draws it from the
-           `worker_agent` captured when the task was bound: a dashed box that
-           says "pane closed" and is not a control, because there is no pane to
-           land on. A live node is a button with a row's own target, so it
-           lands where the row does.
+         · **Only live panes are on it.** The server stops publishing a link
+           when either pane closes, so a closed worker is gone from the board,
+           its wire and the counts at once; an agent that exits while its pane
+           stays open keeps its node, with an `ended` pill. A node is a button
+           with a row's own target, so it lands where the row does.
          · **Narrow, it is one column.** Under the session card's own
            breakpoint the grid collapses to one indented column (a container
            query on the board), and the wires switch from fans to lanes: the
@@ -791,13 +796,14 @@
        wide layout together. Kept equal to the `@container dash-crews` rule. */
     const DASHBOARD_CREW_NARROW_PX = 380;
 
+    /* A report's hover goes on to say whether the orchestrator has collected
+       it: the difference lives in words and never in a second look. */
     const DASHBOARD_CREW_PHASE_HOVERS = Object.freeze({
         handed: 'Handed a task it has not read yet',
         working: 'Working on its task',
-        done: 'Reported done; not collected yet',
-        failed: 'Reported that it failed; not collected yet',
-        blocked: 'Reported that it is blocked; not collected yet',
-        collected: 'Its report was collected',
+        done: 'Reported done',
+        failed: 'Reported that it failed',
+        blocked: 'Reported that it is blocked',
         ended: 'Ended before it reported'
     });
 
@@ -822,19 +828,6 @@
     /* The board's wire layer, with the container and mode it was made for. */
     let _agentDashboardCrewWires = null;
 
-    /* A closed worker, as far as the board can still name it: the agent and
-       the session it had when its task was bound. */
-    function dashboardCrewGhostPane(id, link) {
-        const agent = link?.worker_agent || {};
-        return {
-            session_id: id,
-            startup_mode: 'agent',
-            agent_selection: String(agent.agent_selection || ''),
-            custom_agent: String(agent.custom_agent || ''),
-            group_id: String(agent.group_id || '')
-        };
-    }
-
     /* Every crew as grid cells. A leaf takes one row and a parent spans its
        children's rows; depth is the column. `indexCrews` makes a forest, so
        the walk always ends. */
@@ -856,15 +849,15 @@
                 const at = nodes.length;
                 nodes.push(null);
                 const start = row;
-                const children = crew.crews.byRequester.get(id) || [];
+                const children = (crew.crews.byRequester.get(id) || [])
+                    .filter(child => crew.panes.has(String(child.worker_session_id || '')));
                 if (!children.length) row += 1;
                 children.forEach(child => place(String(child.worker_session_id || ''), depth + 1, child));
                 depths = Math.max(depths, depth + 1);
-                const pane = crew.panes.get(id) || null;
-                const who = pane || dashboardCrewGhostPane(id, link);
-                const groupId = String(who.group_id || '');
+                const pane = crew.panes.get(id);
+                const groupId = String(pane.group_id || '');
                 nodes[at] = {
-                    id, depth, link, pane, who, groupId,
+                    id, depth, link, pane, groupId,
                     group: groups.get(groupId) || null,
                     row: start,
                     span: Math.max(1, row - start)
@@ -880,20 +873,15 @@
     function dashboardCrewBoardKey(board) {
         if (!board.length) return '';
         return JSON.stringify(board.map(crewBox => [crewBox.root, crewBox.depths, crewBox.nodes.map(node => [
-            node.id, node.depth, node.row, node.span, node.pane ? 1 : 0,
-            dashboardAgentGlyphKey(node.who), dashboardAgentName(node.who),
-            String(node.who.workspace_id || ''), node.groupId,
+            node.id, node.depth, node.row, node.span,
+            dashboardAgentGlyphKey(node.pane), dashboardAgentName(node.pane),
+            String(node.pane.workspace_id || ''), node.groupId,
             String(node.group?.name || node.group?.group_id || '')
         ])]));
     }
 
     function dashboardCrewPhaseClasses(link) {
-        const model = dashboardCrewModel();
-        const phase = model.linkPhase(link);
-        const tone = model.linkTone(link);
-        return phase === 'collected' && tone && tone !== 'done'
-            ? `is-collected is-tone-${tone}`
-            : `is-${phase}`;
+        return `is-${dashboardCrewModel().linkPhase(link)}`;
     }
 
     /* The pill on a worker's node is its link's phase. The orchestrator's says
@@ -906,9 +894,10 @@
             if (phase === 'ended') {
                 const why = DASHBOARD_CREW_END_REASONS[String(node.link.reason || '')];
                 hover = why ? `Ended: ${why}` : hover;
-            } else if (phase === 'collected') {
-                const status = String(node.link.status || 'done');
-                hover = `Reported ${status}; the report was collected`;
+            } else if (model.isReportedPhase(phase)) {
+                hover += model.linkCollected(node.link)
+                    ? '; its orchestrator has collected the report'
+                    : '; its orchestrator has not collected the report yet';
             }
             return `<span class="dash-crew-pill ${dashboardCrewPhaseClasses(node.link)}"`
                 + ` title="${escHtml(hover)}">${escHtml(phase)}</span>`;
@@ -939,15 +928,9 @@
     function dashboardCrewNodeParts(node, crew, now) {
         const round = Number(node.link?.round) || 1;
         return {
-            line: node.pane ? dashboardPaneLine(node.pane) : dashboardAgentName(node.who),
-            hover: node.pane
-                ? dashboardPaneHover(node.pane, crew)
-                : ['Pane closed', dashboardCrewHoverLine(node.who, crew)].filter(Boolean).join('\n'),
-            reading: node.pane
-                ? dashboardActivityHtml(node.pane)
-                : '<span class="dash-activity dash-state-unknown" title="Pane closed">'
-                    + '<span class="dash-state-dot" aria-hidden="true"></span>'
-                    + '<span class="dash-state-word">Pane closed</span></span>',
+            line: dashboardPaneLine(node.pane),
+            hover: dashboardPaneHover(node.pane, crew),
+            reading: dashboardActivityHtml(node.pane),
             pill: dashboardCrewPillHtml(node, crew),
             round: node.link && round >= 2 ? `round ${round}` : '',
             age: dashboardCrewAgeHtml(node.link, now)
@@ -962,7 +945,7 @@
         const reported = workers.filter(node => model.isReportedPhase(model.linkPhase(node.link))).length;
         const root = crewBox.nodes[0];
         return {
-            line: root.pane ? dashboardPaneLine(root.pane) : dashboardAgentName(root.who),
+            line: dashboardPaneLine(root.pane),
             meta: `${reported} of ${workers.length} reported`,
             segments: workers
                 .map(node => `<i class="dash-crew-segment ${dashboardCrewPhaseClasses(node.link)}"></i>`)
@@ -980,15 +963,14 @@
         return `<span class="dash-crew-session"${style}>${escHtml(name)}</span>`;
     }
 
-    /* One node in its grid cell. Live, it is a button carrying a row's own
-       target attributes, so a press lands on its pane through
-       `openDashboardTarget`; its key is its own, so a repaint finds the caret
-       again on the node rather than on the row of the same pane. A ghost is a
-       plain box. */
+    /* One node in its grid cell: a button carrying a row's own target
+       attributes, so a press lands on its pane through `openDashboardTarget`;
+       its key is its own, so a repaint finds the caret again on the node rather
+       than on the row of the same pane. */
     function dashboardCrewNodeHtml(node, parts) {
-        const who = node.who;
+        const who = node.pane;
         const id = escHtml(node.id);
-        const classes = `dash-crew-node${node.depth === 0 ? ' is-root' : ''}${node.pane ? '' : ' is-ghost'}`;
+        const classes = `dash-crew-node${node.depth === 0 ? ' is-root' : ''}`;
         const inner = `
                 <span class="dash-crew-node-head">
                     <span class="dash-crew-reading">${parts.reading}</span>
@@ -998,16 +980,11 @@
                 <span class="dash-crew-node-meta">
                     ${dashboardCrewSessionHtml(node)}
                     <span class="dash-crew-pill-slot">${parts.pill}</span>
-                    ${node.pane ? '' : '<span class="dash-crew-pill is-closed">pane closed</span>'}
                     <span class="dash-crew-round">${escHtml(parts.round)}</span>
                     <span class="dash-crew-age">${parts.age}</span>
                 </span>`;
         const cell = `<div class="dash-crew-cell" style="--dash-crew-col:${node.depth + 1};`
             + `--dash-crew-row:${node.row};--dash-crew-span:${node.span};--dash-crew-depth:${node.depth}">`;
-        if (!node.pane) {
-            return `${cell}<div class="${classes}" data-agent="${escHtml(dashboardAgentGlyphKey(who))}"`
-                + ` data-crew-node="${id}" title="${escHtml(parts.hover)}">${inner}</div></div>`;
-        }
         return `${cell}
             <button
                 type="button"
@@ -1035,7 +1012,7 @@
         const crewsHtml = board.map(crewBox => {
             const head = dashboardCrewHeadParts(crewBox);
             heads.set(crewBox.root, head);
-            const root = crewBox.nodes[0].who;
+            const root = crewBox.nodes[0].pane;
             const cells = crewBox.nodes.map(node => {
                 const parts = dashboardCrewNodeParts(node, crew, now);
                 nodes.set(node.id, parts);
@@ -1131,7 +1108,7 @@
         return width > 0 && width <= DASHBOARD_CREW_NARROW_PX;
     }
 
-    /* A node by session id, ghost or live: a ghost carries no target. */
+    /* A node by session id. */
     function dashboardCrewEndpoint(container, id) {
         const escape = window.CSS?.escape || (value => String(value).replace(/["\\]/g, '\\$&'));
         return container.querySelector(`[data-crew-node="${escape(id)}"]`);
@@ -1213,7 +1190,17 @@
         }
         const board = draw || dashboardCrewBoardDraw(snapshot, dashboardCrewContext(snapshot));
         return `<div class="dash-crews-slot" data-dashboard-crews>${board.html}</div>`
-            + workspaces.map((workspace, index) => dashboardWorkspaceHtml(workspace, index)).join('');
+            + '<div class="dash-sessions-pane" data-dashboard-sessions>'
+            + workspaces.map((workspace, index) => dashboardWorkspaceHtml(workspace, index)).join('')
+            + '</div>';
+    }
+
+    /* The dialog is as big as the window it was opened in while a crew is on
+       it, and the column it always was when none is. A class and not a style,
+       so the stylesheet owns every size and the breakpoint that puts the board
+       and the list side by side. */
+    function paintAgentDashboardSize(hasCrews) {
+        document.getElementById(AGENT_DASHBOARD_BODY_ID)?.parentElement?.classList?.toggle?.('has-crews', Boolean(hasCrews));
     }
 
     /* The three counts always, once anything is open. The agent count leads
@@ -1350,6 +1337,7 @@
         }
         _agentDashboardStructure = structure;
         _agentDashboardRows = rows;
+        paintAgentDashboardSize(Boolean(draw.key));
         paintAgentDashboardCrewWires(snapshot, Boolean(draw.key));
     }
 
@@ -1365,10 +1353,17 @@
         const focusedKey = body.contains?.(document.activeElement)
             ? document.activeElement?.dataset?.dashboardKey || ''
             : '';
-        const scrollTop = body.scrollTop;
+        /* Side by side, the two panes scroll and the body does not; stacked,
+           it is the other way round. Each is put back wherever it is one. */
+        const scrolls = [body, ...body.querySelectorAll?.('[data-dashboard-crews], [data-dashboard-sessions]') || []]
+            .map(element => [element.hasAttribute?.('data-dashboard-crews') ? 'crews'
+                : element.hasAttribute?.('data-dashboard-sessions') ? 'sessions' : '', element.scrollTop]);
         body.innerHTML = html;
         _agentDashboardPainted = html;
-        body.scrollTop = scrollTop;
+        scrolls.forEach(([which, top]) => {
+            const element = which ? body.querySelector?.(`[data-dashboard-${which}]`) : body;
+            if (element) element.scrollTop = top;
+        });
         if (focusedKey) {
             body.querySelector?.(`[data-dashboard-key="${focusedKey}"]`)?.focus?.({ preventScroll: true });
         }
