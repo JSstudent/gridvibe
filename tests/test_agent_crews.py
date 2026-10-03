@@ -11,9 +11,10 @@ in Node:
   chip and the board pill all read. A report is its status whether or not it
   has been collected; collecting is a fact beside the phase.
 - **The chip counts workers, not assignments.**
-- **A narrow reading draws one bus per orchestrator,** in a lane of its own
-  while its rows overlap another's, and asks for exactly the gutter its lanes
-  need.
+- **A narrow reading draws one bus per orchestrator,** each in a lane of its own
+  (up to a limit; past it, lanes are shared only by crews whose rows do not
+  overlap), spaced far enough apart to read as separate lines, and asks for
+  exactly the gutter its lanes need. A branch ends on its own worker's row.
 
 The wire layer is the module's one DOM part, so it runs against a small stub
 of the elements it touches: it must rewrite its SVG only when the picture
@@ -494,14 +495,14 @@ class LaneGeometryTestCase(AgentCrewsNodeTestCase):
         )
         self.assertEqual(result["buses"], 1)
         self.assertEqual(result["lanes"], 1)
-        # 9 px out from the card edge, and 5 px of air beyond the line.
-        self.assertEqual(result["x"], 11)
-        self.assertEqual(result["gutter"], 14)
+        # 12 px out from the card edge, and 6 px of air beyond the line.
+        self.assertEqual(result["x"], 8)
+        self.assertEqual(result["gutter"], 18)
         self.assertEqual((result["top"], result["bottom"]), (10, 250))
-        self.assertEqual(result["paths"]["trunk"], "M20 10 H11 M11 10 V250")
+        self.assertEqual(result["paths"]["trunk"], "M20 10 H8 M8 10 V250")
         self.assertEqual(
             result["paths"]["branches"],
-            [f"M11 {y} H20" for y in (50, 90, 130, 170, 210, 250)],
+            [f"M8 {y} H20" for y in (50, 90, 130, 170, 210, 250)],
         )
 
     def test_overlapping_orchestrators_get_lanes_and_the_gutter_grows_with_them(self):
@@ -513,7 +514,8 @@ class LaneGeometryTestCase(AgentCrewsNodeTestCase):
             // `a` is both a worker of `o` and the orchestrator of its own
             // crew: its rows sit inside `o`'s span, so they cannot share a lane.
             const nested = crews.planBuses([wire('o', 10, 50), wire('a', 50, 90), wire('o', 10, 130)]);
-            // Two crews one above the other share the innermost lane.
+            // Two crews one above the other do not share one either: a shared
+            // lane reads as one long line down the edge.
             const apart = crews.planBuses([wire('o', 10, 50), wire('p', 200, 240)]);
             report({
                 nested: nested.buses.map(bus => [bus.requester, bus.lane, bus.x]),
@@ -526,12 +528,12 @@ class LaneGeometryTestCase(AgentCrewsNodeTestCase):
             """
         )
         # The shorter span is nearest the cards; the longer is a lane out.
-        self.assertEqual(result["nested"], [["o", 1, 5], ["a", 0, 11]])
-        self.assertEqual(result["nestedGutter"], 20)
-        self.assertEqual(result["apart"], [["o", 0], ["p", 0]])
-        self.assertEqual(result["apartGutter"], 14)
+        self.assertEqual(result["nested"], [["o", 1, 0], ["a", 0, 8]])
+        self.assertEqual(result["nestedGutter"], 26)
+        self.assertEqual(result["apart"], [["o", 0], ["p", 1]])
+        self.assertEqual(result["apartGutter"], 26)
         self.assertEqual(result["none"], {"buses": [], "lanes": 0, "gutter": 0})
-        self.assertEqual(result["one"], 14)
+        self.assertEqual(result["one"], 18)
 
     def test_a_nested_orchestrators_bus_clears_its_own_cards_indent(self):
         """In the dialog's narrow board a deeper card sits further right, so
@@ -547,7 +549,51 @@ class LaneGeometryTestCase(AgentCrewsNodeTestCase):
             """
         )
         # `o` (rows 10-50) and `a` (rows 50-90) touch at row 50, so two lanes.
-        self.assertEqual(result, [["o", 0, 17], ["a", 1, 29], [14]])
+        self.assertEqual(result, [["o", 0, 14], ["a", 1, 24], [18]])
+
+    def test_every_orchestrator_has_its_own_lane_and_the_lanes_are_well_apart(self):
+        result = self._run_node(
+            """
+            const wire = (requester, fromY, y) => ({
+                requester, from: { x: 20, y: fromY }, to: { x: 20, y }
+            });
+            // Three crews far apart on the column, as in a real session list.
+            const three = crews.planBuses([wire('a', 10, 50), wire('b', 400, 440), wire('c', 800, 840)]);
+            // One more than the limit: lanes are shared again, but only by crews
+            // whose rows do not overlap.
+            const many = Array.from({ length: crews.MAX_DISTINCT_LANES + 1 },
+                (_, i) => wire(`o${i}`, i * 100, i * 100 + 40));
+            const crowded = crews.planBuses(many);
+            // Past the limit, crews that do overlap still get different lanes.
+            const overlapping = crews.planBuses(Array.from({ length: crews.MAX_DISTINCT_LANES + 1 },
+                (_, i) => wire(`p${i}`, 10, 50 + i)));
+            report({
+                step: crews.LANE_STEP,
+                inset: crews.LANE_INSET,
+                three: three.buses.map(bus => [bus.lane, bus.x]),
+                threeLanes: three.lanes,
+                crowded: crowded.lanes,
+                overlappingLanes: new Set(overlapping.buses.map(bus => bus.lane)).size,
+                distinct: crews.assignDistinctLanes([{ lo: 0, hi: 30 }, { lo: 0, hi: 10 }, { lo: 50, hi: 80 }]),
+                limit: crews.MAX_DISTINCT_LANES
+            });
+            """
+        )
+        self.assertGreaterEqual(result["step"], 8)
+        self.assertGreaterEqual(result["inset"], 12)
+        # Never a shared lane, however far apart the crews sit.
+        self.assertEqual(result["three"], [[0, 8], [1, 0], [2, -8]])
+        self.assertEqual(result["threeLanes"], 3)
+        # Each lane is one line, `step` away from the next.
+        xs = [x for _lane, x in result["three"]]
+        self.assertTrue(all(a - b == result["step"] for a, b in zip(xs, xs[1:])))
+        self.assertEqual(result["limit"], 6)
+        # Past the limit the column packs by row overlap, so seven crews one
+        # below another need one lane, not seven.
+        self.assertEqual(result["crowded"], 1)
+        self.assertEqual(result["overlappingLanes"], result["limit"] + 1)
+        # The shortest span is nearest the cards, ties in the order given.
+        self.assertEqual(result["distinct"], {"lanes": [1, 0, 2], "count": 3})
 
     def test_a_wide_boards_curve_runs_from_the_parent_to_the_child(self):
         result = self._run_node(
@@ -606,8 +652,79 @@ class WireLayerTestCase(AgentCrewsNodeTestCase):
         self.assertNotIn("animateMotion", result["html"])
         self.assertNotIn("dash-wire-pulse", result["html"])
         self.assertIn("dash-wire dash-wire-bus", result["html"])
-        # The trunk starts at the card edge (x 20) and the spine is one lane out.
-        self.assertIn('d="M20 10 H11 M11 10 V90"', result["html"])
+        # The trunk starts at the orchestrator's own row (x 24), past its
+        # card's edge (x 20), and the spine is one lane out from the card.
+        self.assertIn('d="M24 10 H8 M8 10 V90"', result["html"])
+
+    def test_separate_crews_get_separate_lanes_and_a_smaller_reading_gives_the_room_back(self):
+        """Three crews in three cards, as in a real session list: three buses
+        in three lanes, none of them the other's trunk. Closing panes down to
+        one crew gives the gutter back, so a smaller crew never keeps the old
+        width."""
+        result = self._run_node(
+            """
+            const page = makePage({
+                o1: { top: 0, card: 1 }, w1: { top: 40, card: 1 },
+                o2: { top: 100, card: 2 }, w2: { top: 140, card: 2 }, w3: { top: 180, card: 2 },
+                o3: { top: 240, card: 3 }, w4: { top: 280, card: 3 }
+            });
+            const layer = crews.createWireLayer({ container: page.container, mode: 'lane' });
+            const gutter = () => page.container.style.getPropertyValue('--dash-wire-gutter');
+            const trunks = () => Array.from(svgOf(page).innerHTML
+                .matchAll(/dash-wire-bus" d="M(-?\\d+) (-?\\d+) H(-?\\d+) M(-?\\d+) (-?\\d+) V(-?\\d+)"/g))
+                .map(m => ({ from: Number(m[2]), x: Number(m[3]), top: Number(m[5]), bottom: Number(m[6]) }));
+            layer.paint({ links: [link('o1', 'w1'), link('o2', 'w2'), link('o2', 'w3'), link('o3', 'w4')] });
+            const three = { gutter: gutter(), trunks: trunks() };
+            layer.paint({ links: [link('o2', 'w2'), link('o2', 'w3')] });
+            const one = { gutter: gutter(), trunks: trunks() };
+            report({ three, one });
+            """,
+            dom=True,
+        )
+        three = result["three"]
+        self.assertEqual(len(three["trunks"]), 3)
+        xs = [trunk["x"] for trunk in three["trunks"]]
+        self.assertEqual(len(set(xs)), 3, "every crew has a lane of its own")
+        spread = sorted(xs)
+        self.assertTrue(all(b - a >= 8 for a, b in zip(spread, spread[1:])))
+        # Each spine spans its own crew's rows and nobody else's.
+        spans = sorted((trunk["top"], trunk["bottom"]) for trunk in three["trunks"])
+        self.assertEqual(spans, [(10, 50), (110, 190), (250, 290)])
+        # 12 + 2 * 8 px out from the card edge, plus 6 px of air.
+        self.assertEqual(three["gutter"], "34px")
+        # One crew left: one lane's gutter again, and its bus back at lane 0.
+        self.assertEqual(result["one"]["gutter"], "18px")
+        self.assertEqual([trunk["x"] for trunk in result["one"]["trunks"]], [8])
+
+    def test_a_branch_ends_on_its_own_row_and_a_nested_trunk_leaves_below_the_branch(self):
+        result = self._run_node(
+            """
+            const page = makePage({
+                o: { top: 0, card: 1 }, a: { top: 40, card: 1 }, c: { top: 80, card: 1 }
+            });
+            const layer = crews.createWireLayer({ container: page.container, mode: 'lane' });
+            layer.paint({ links: [link('o', 'a'), link('a', 'c')] });
+            const html = svgOf(page).innerHTML;
+            report({
+                paths: Array.from(html.matchAll(/<path class="([^"]*)" d="([^"]*)"/g)).map(m => [m[1], m[2]]),
+                dots: Array.from(html.matchAll(/<circle class="([^"]*)" r="2.6" cx="([^"]*)" cy="([^"]*)"/g))
+                    .map(m => [m[1], Number(m[2]), Number(m[3])])
+            });
+            """,
+            dom=True,
+        )
+        paths = dict((cls + str(i), d) for i, (cls, d) in enumerate(result["paths"]))
+        trunks = [d for cls, d in result["paths"] if "dash-wire-bus" in cls]
+        branches = [d for cls, d in result["paths"] if "dash-wire-bus" not in cls]
+        # Row `a` is 40-60 (cy 50): `o`'s branch arrives at its middle and `a`'s
+        # own trunk leaves 5 px below it, so the two are never one line.
+        self.assertIn("M0 50 H24", branches)
+        self.assertIn("M8 90 H24", branches)
+        self.assertTrue(any(d.startswith("M24 55 H8 ") for d in trunks), trunks)
+        self.assertTrue(any(d.startswith("M24 10 H0 ") for d in trunks), trunks)
+        # The end dots sit on the rows themselves (x 24), not on the card edge.
+        self.assertTrue(all(x == 24 for _cls, x, _y in result["dots"]))
+        self.assertTrue(paths)
 
     def test_a_worker_without_a_row_draws_no_wire(self):
         result = self._run_node(
@@ -811,7 +928,7 @@ class WireLayerTestCase(AgentCrewsNodeTestCase):
             "dash-wire is-ended",
         ])
         # One lane is all it needs.
-        self.assertEqual(result["gutter"], "14px")
+        self.assertEqual(result["gutter"], "18px")
 
     def test_the_gutter_is_what_the_lanes_need_and_goes_with_the_last_crew(self):
         result = self._run_node(
@@ -834,8 +951,8 @@ class WireLayerTestCase(AgentCrewsNodeTestCase):
             """,
             dom=True,
         )
-        self.assertEqual(result["one"], "14px")
-        self.assertEqual(result["two"], "20px")
+        self.assertEqual(result["one"], "18px")
+        self.assertEqual(result["two"], "26px")
         # No crew leaves the column exactly as wide as it always was.
         self.assertEqual(result["none"], "")
         self.assertEqual(result["disposed"], "")

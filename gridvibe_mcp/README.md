@@ -382,8 +382,8 @@ and `set_pane_agent` never forwards it. It follows the agent it was given to —
 kept across a save, a restore and a relaunch of the same agent, dropped when
 the tools go or the pane becomes another agent or kind, and not restored when
 the tools come back. The waiver log line says `source=mode` for the standing
-grant and `source=call` for a stated one. The pane's MCP frame and dashboard
-chip read red while it holds the grant. `whoami` does not report it yet: an
+grant and `source=call` for a stated one. The pane's MCP frame, on its header and on
+its sidebar row, reads red while it holds the grant. `whoami` does not report it yet: an
 agent in override mode learns it only from gated calls that go through.
 
 ### absent

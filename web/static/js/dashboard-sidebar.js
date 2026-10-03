@@ -19,14 +19,14 @@
          a column: it stays in the row's accessible name, out of flow, where a
          reader who is hearing the row still gets it and the title gets the
          width.
-     · **The `MCP` chip is the exception, and for the opposite reason.** It
-         survives the same width squeeze the name did not, because nothing else
-         on the row answers it: the mark says *which* agent this is, and no part
-         of a row says whether that agent can create workspaces, launch panes
-         and split the grid. Choosing which pane to instruct is the thing a
-         panel kept up *while* the reader works is for, so the three characters
-         that decide it are worth the width here even though a whole word for
-         the shell is not.
+     · **What the agent may do is drawn on its mark, not beside it.** Whether
+         it can create workspaces, launch panes and split the grid is a frame
+         around the mark (blue, red in override mode), exactly as the pane
+         header draws it and from the same rule, and auto-approval is a small
+         framed `A` pinned to the mark's corner. Neither takes a pixel of the
+         title's width, which is what the `MCP` chip used to cost. Colour is
+         never the only statement: both are in the mark's hover and in the
+         row's accessible name.
      · **It does not close when you leave.** The dialog dismisses itself on the
        reader going elsewhere, because a modal surface left standing over a
        window nobody is looking at is stale. This is chrome: it is *part* of the
@@ -152,9 +152,11 @@
                 typeof root.dashboardAgentName === 'function'
                     ? root.dashboardAgentName(pane) : ''
             ),
-            mcp: pane => (
-                typeof root.dashboardMcpTagHtml === 'function'
-                    ? root.dashboardMcpTagHtml(pane) : ''
+            /* The frame and the pin on the agent's mark: the pane header's own
+               rule, answered by the dialog. A page without it frames nothing. */
+            mark: pane => (
+                typeof root.dashboardAgentMarkState === 'function'
+                    ? root.dashboardAgentMarkState(pane) : null
             ),
             workspaceLabel: (workspace, index) => (
                 typeof root.dashboardWorkspaceLabel === 'function'
@@ -255,6 +257,8 @@
     const CREW_MEMBER_CLASS = 'is-crew-member';
     const AGENT_ROW_SELECTOR = '.dash-agent[data-session-id]';
     const CREW_SLOT_SELECTOR = '.dash-agent-crew';
+    const ICON_SELECTOR = '.dash-agent-icon';
+    const FLAGS_SLOT_SELECTOR = '.dash-agent-flags';
     const READING_SLOT_SELECTOR = '.dash-agent-reading';
     const PROGRESS_SLOT_SELECTOR = '.dash-agent-progress';
     const SIDEBAR_SCALE_MIN = 100;
@@ -310,21 +314,19 @@
        dialog's own, so `agent-dashboard.css` dresses both and this feature's
        stylesheet states only what a column changes. */
 
-    /* One pane, one line: the dot, the agent's mark, what the pane announced,
-       and whether that agent has GridVibe's own tools. `dash-agent-who` and not
+    /* One pane, one line: the dot, the agent's mark, and what the pane
+       announced. `dash-agent-who` and not
        `dash-agent-name` is the whole difference from the dialog's row, and it
        is a deliberate class of its own: the name is out of flow here, the way
        `dash-state-word` is, so a stylesheet cannot accidentally draw it back
        into the line and a reader hearing the row still learns which agent it
        is.
 
-       The `MCP` chip is drawn, and it is the one thing this row keeps that the
-       name gave up, because it is not the same kind of fact. The name is
-       answered by the mark beside it; nothing else on the row says whether this
-       agent can create workspaces, launch panes and split the grid. That is
-       what a reader is choosing between when they pick a pane to instruct, and
-       a panel meant to be up *while* they work is exactly where that choice is
-       made. Three characters, from the dialog's own builder.
+       The mark's frame (GridVibe tools) and its `A` pin (auto-approval) are not
+       in this markup. They are laid on the drawn mark after every reading
+       (`decorateMarks` below), with their words in `dash-agent-flags`, which is
+       drawn empty like the crew slot: a relaunch onto the tools changes a frame
+       and never the markup a repaint compares.
 
        `dash-agent-crew` is drawn empty. The orchestrator's crew chip is filled
        into it after every reading (`decorateCrews` below), so a report or a new
@@ -348,7 +350,7 @@
                 <span class="dash-agent-who">${esc(render.agentName(pane))}</span>
                 <span class="dash-agent-line">${esc(render.line(pane))}</span>
                 <span class="dash-agent-crew"></span>
-                ${render.mcp(pane)}
+                <span class="dash-agent-flags"></span>
                 <span class="dash-agent-progress">${render.progress(pane)}</span>
             </button>
         `;
@@ -716,6 +718,48 @@
             });
         }
 
+        /* The frame and the pin on each agent's mark, and the words for both.
+           Attributes on the mark and a sentence in `dash-agent-flags`, written
+           only when they differ from what the row holds, so a poll that says
+           the same thing touches nothing and a relaunch onto the tools changes
+           a frame and not a row. The stylesheet draws both from the attributes
+           (`data-mcp`, `data-mcp-override`, `data-auto`), the way the pane
+           header's frame is. */
+        function decorateMarks(snapshot) {
+            const panes = new Map();
+            (snapshot?.workspaces || []).forEach(workspace => {
+                (workspace?.groups || []).forEach(group => {
+                    (group?.panes || []).forEach(pane => panes.set(String(pane?.session_id || ''), pane));
+                });
+            });
+            body()?.querySelectorAll?.(AGENT_ROW_SELECTOR).forEach(row => {
+                const pane = panes.get(row.dataset?.sessionId || '');
+                const icon = row.querySelector?.(ICON_SELECTOR);
+                if (!pane || !icon) return;
+                const mark = render.mark ? render.mark(pane) : null;
+                const flags = [
+                    ['mcp', Boolean(mark?.mcp)],
+                    ['mcpOverride', Boolean(mark?.override)],
+                    ['auto', Boolean(mark?.auto)]
+                ];
+                flags.forEach(([name, on]) => {
+                    if (on === (name in icon.dataset)) return;
+                    if (on) icon.dataset[name] = 'on';
+                    else delete icon.dataset[name];
+                });
+                const words = [mark?.mcpTitle, mark?.autoTitle].filter(Boolean).join('\n');
+                if ((icon.title || '') !== words) {
+                    if (words) icon.title = words;
+                    else icon.removeAttribute('title');
+                }
+                const slot = row.querySelector?.(FLAGS_SLOT_SELECTOR);
+                if (slot && (writtenSlots.has(slot) ? writtenSlots.get(slot) : '') !== words) {
+                    slot.textContent = words.replace(/\n/g, '. ');
+                    writtenSlots.set(slot, words);
+                }
+            });
+        }
+
         function rowIdAt(target) {
             return target?.closest?.(AGENT_ROW_SELECTOR)?.dataset?.sessionId || '';
         }
@@ -769,6 +813,7 @@
             /* The same rule for the crews, and the wires last, so they measure
                the rows with their chips in. */
             decorateCrews(snapshot);
+            decorateMarks(snapshot);
             applyHighlight();
             wireLayer()?.paint(snapshot);
             return true;

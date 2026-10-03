@@ -750,7 +750,7 @@ class DashboardRouteTestCase(unittest.TestCase):
         self.assertEqual(group_row["panes"][0]["startup_mode"], "agent")
 
     def test_the_route_publishes_the_live_override_grant(self):
-        """The row paints its MCP chip red from `agent_mcp_override`, so the
+        """The row paints its MCP mark red from `agent_mcp_override`, so the
         route must carry the live record's own value -- including after a
         relaunch without the tools settled the grant away, which re-ticking
         the tools does not bring back."""

@@ -44,13 +44,23 @@
     const REPORTED_PHASES = Object.freeze(['done', 'failed', 'blocked']);
 
     /* The innermost lane's distance from the card edge, and each further
-       lane's step beyond it. */
-    const LANE_INSET = 9;
-    const LANE_STEP = 6;
+       lane's step beyond it. Wide enough that two buses side by side read as
+       two lines and not one thick one, with the branches' dots between them. */
+    const LANE_INSET = 12;
+    const LANE_STEP = 8;
+    /* Up to this many orchestrators each get a lane of their own, however far
+       apart their rows are: two crews one card apart that shared a lane read as
+       one long line down the edge, which is the trunk this replaced. Only a
+       column with more crews than this packs lanes by row overlap. */
+    const MAX_DISTINCT_LANES = 6;
+    /* An orchestrator that is itself somebody's worker has its own wire leave
+       its row this far below the middle, so the branch that arrives on the row
+       and the trunk that leaves it are two lines and not one. */
+    const NEST_OFFSET = 5;
     /* The gutter a lane layout needs is however far its outermost bus sits
        left of the cards, plus this much air; never narrower than the column's
        own padding. */
-    const GUTTER_MARGIN = 5;
+    const GUTTER_MARGIN = 6;
     const GUTTER_MIN = 10;
     /* A fan wire's control points sit half the horizontal gap out, but never
        closer than this, so two nodes almost touching still read as a curve. */
@@ -278,6 +288,19 @@
         return { lanes, count: taken.length };
     }
 
+    /* One lane per span, in order of length, shortest nearest the cards, with
+       no two spans ever sharing one. */
+    function assignDistinctLanes(spans) {
+        const list = (Array.isArray(spans) ? spans : []).map((span, index) => ({
+            index,
+            length: Math.abs(Number(span?.hi) - Number(span?.lo)) || 0
+        }));
+        list.sort((x, y) => (x.length - y.length) || (x.index - y.index));
+        const lanes = new Array(list.length).fill(0);
+        list.forEach((span, lane) => { lanes[span.index] = lane; });
+        return { lanes, count: list.length };
+    }
+
     function num(value) {
         return String(Math.round(Number(value) * 10) / 10);
     }
@@ -288,12 +311,14 @@
        into each worker, so a crew of six reads as one line with six ticks and
        not six curves on top of each other.
 
-       `wires` are `{ requester, from, to }` in the layer's coordinates, `from`
-       the orchestrator's card edge and `to` the worker's. Crews whose rows
-       overlap get different lanes, nested crews included; crews whose rows do
-       not overlap share one. `gutter` is the left padding the outermost lane
-       needs, measured from the leftmost card, so the column is exactly as wide
-       as the lanes in use. */
+       `wires` are `{ requester, from, to, edge }` in the layer's coordinates,
+       `from` the orchestrator's end and `to` the worker's, and `edge` (the
+       point itself when absent) the card edge the lanes are measured from.
+       Every orchestrator gets a lane of its own, nested crews included, up to
+       `MAX_DISTINCT_LANES`; past that, crews whose rows overlap get different
+       lanes and crews whose rows do not share one. `gutter` is the left padding
+       the outermost lane needs, measured from the leftmost card, so the column
+       is exactly as wide as the lanes in use. */
     function planBuses(wires) {
         const groups = new Map();
         (Array.isArray(wires) ? wires : []).forEach(wire => {
@@ -304,15 +329,19 @@
         const buses = Array.from(groups.values());
         buses.forEach(bus => {
             const ys = [bus.from.y].concat(bus.wires.map(wire => wire.to.y));
-            const xs = [bus.from.x].concat(bus.wires.map(wire => wire.to.x));
+            const xs = [bus.from.x].concat(bus.wires.map(wire => wire.to.x))
+                .concat(bus.wires.map(wire => (Number.isFinite(wire.edge) ? wire.edge : wire.to.x)));
             bus.top = Math.min(...ys);
             bus.bottom = Math.max(...ys);
             bus.left = Math.min(...xs);
         });
-        const packed = assignLanes(buses.map(bus => ({
+        const spans = buses.map(bus => ({
             lo: bus.top - LANE_SPAN_PAD,
             hi: bus.bottom + LANE_SPAN_PAD
-        })));
+        }));
+        const packed = buses.length <= MAX_DISTINCT_LANES
+            ? assignDistinctLanes(spans)
+            : assignLanes(spans);
         buses.forEach((bus, index) => {
             bus.lane = packed.lanes[index];
             bus.x = bus.left - LANE_INSET - bus.lane * LANE_STEP;
@@ -464,13 +493,19 @@
                 const a = locate(requester);
                 const b = locate(text(link.worker_session_id));
                 if (!a || !b) return;
+                /* A bus reaches into the row it joins, past the card's border,
+                   so a branch is seen to belong to its own row. */
+                const nested = crews.byWorker.has(requester);
                 wires.push({
                     link,
                     requester,
                     crew: crews.rootOf.get(requester) || requester,
                     awaited: awaited.has(requester),
-                    from: mode === 'fan' ? { x: a.right, y: a.cy } : { x: a.left, y: a.cy },
-                    to: mode === 'fan' ? { x: b.rowLeft, y: b.cy } : { x: b.left, y: b.cy }
+                    from: mode === 'fan'
+                        ? { x: a.right, y: a.cy }
+                        : { x: a.rowLeft, y: a.cy + (nested ? NEST_OFFSET : 0) },
+                    to: mode === 'fan' ? { x: b.rowLeft, y: b.cy } : { x: b.rowLeft, y: b.cy },
+                    edge: mode === 'fan' ? undefined : Math.min(a.left, b.left)
                 });
             });
             return wires;
@@ -577,6 +612,8 @@
         PHASES,
         LANE_INSET,
         LANE_STEP,
+        MAX_DISTINCT_LANES,
+        NEST_OFFSET,
         WAITING_WORDS,
         pairKey,
         linkPhase,
@@ -588,6 +625,7 @@
         crewSummary,
         awaitingRequesters,
         assignLanes,
+        assignDistinctLanes,
         planBuses,
         busPaths,
         fanPath,

@@ -620,6 +620,21 @@ function report(value) { process.stdout.write(JSON.stringify(value)); }
 
 @unittest.skipUnless(NODE, "Node.js is required for the dashboard dialog tests")
 class DashboardDialogTestCase(unittest.TestCase):
+    # The dialog ships with its session list switched off
+    # (`DASHBOARD_SESSION_LIST_SHOWN`), and the list's builders, row updates and
+    # their tests are kept. These tests exercise the list, so the harness turns
+    # the switch on in the source it loads; the crews-only dialog is pinned by
+    # `DashboardCrewsOnlyDialogTestCase`, which leaves it as shipped.
+    session_list_shown = True
+
+    def _dialog_source(self) -> str:
+        source = DASHBOARD_DIALOG_JS.read_text(encoding="utf-8")
+        off = "const DASHBOARD_SESSION_LIST_SHOWN = false;"
+        self.assertEqual(source.count(off), 1, "the list switch moved or was renamed")
+        if self.session_list_shown:
+            source = source.replace(off, "const DASHBOARD_SESSION_LIST_SHOWN = true;")
+        return source
+
     def _run_node(self, body: str):
         script = (
             HARNESS_STUBS
@@ -627,7 +642,7 @@ class DashboardDialogTestCase(unittest.TestCase):
             + AGENT_GLYPHS_JS.read_text(encoding="utf-8")
             + SESSION_COLOUR_JS.read_text(encoding="utf-8")
             + AGENT_CREWS_JS.read_text(encoding="utf-8")
-            + DASHBOARD_DIALOG_JS.read_text(encoding="utf-8")
+            + self._dialog_source()
             + "\n(async () => {\n"
             + body
             + "\n})().catch(error => { console.error(error); process.exit(1); });\n"
@@ -2815,7 +2830,10 @@ function crewSlot() {
             crewDom.slot = null;
         } else {
             const rest = html.slice(start + open.length);
-            crewDom.slot = makeCrewSlot(rest.slice(0, rest.search(/<\/div>\s*<div class="dash-sessions-pane"/)));
+            /* Beside the list the slot ends where the list's pane begins; with
+               the list off it is the whole body. */
+            const end = rest.search(/<\/div>\s*<div class="dash-sessions-pane"/);
+            crewDom.slot = makeCrewSlot(end < 0 ? rest.replace(/<\/div>\s*$/, '') : rest.slice(0, end));
         }
     }
     return crewDom.slot;
@@ -3027,8 +3045,9 @@ class DashboardCrewBoardTestCase(DashboardDialogTestCase):
     def test_the_dialog_is_big_while_a_crew_is_on_it_and_a_column_otherwise(self):
         result = self._run_crew(
             """
-            const dialogEl = { on: false, classList: { toggle(name, force) {
+            const dialogEl = { on: false, list: null, classList: { toggle(name, force) {
                 if (name === 'has-crews') dialogEl.on = Boolean(force);
+                if (name === 'has-session-list') dialogEl.list = Boolean(force);
             } } };
             body().parentElement = dialogEl;
             fetchAnswer = crewReading([link('s1', 's2')]);
@@ -3036,11 +3055,13 @@ class DashboardCrewBoardTestCase(DashboardDialogTestCase):
             const withCrew = dialogEl.on;
             fetchAnswer = crewReading([]);
             await refreshAgentDashboard();
-            report({ withCrew, without: dialogEl.on });
+            report({ withCrew, without: dialogEl.on, list: dialogEl.list });
             """
         )
         self.assertTrue(result["withCrew"])
         self.assertFalse(result["without"])
+        # The side-by-side layout is the list's: it is asked for by the switch.
+        self.assertTrue(result["list"])
 
     def test_both_panes_keep_their_own_scroll_across_a_render(self):
         result = self._run_crew(
@@ -3330,6 +3351,196 @@ class DashboardCrewBoardTestCase(DashboardDialogTestCase):
         self.assertEqual(result["targets"][0]["openedSoFar"], 0)
 
 
+class DashboardCrewsOnlyDialogTestCase(DashboardDialogTestCase):
+    """The dialog as it ships: the crew board, and no session list.
+
+    The docked sidebar already lists every workspace, session and agent, so the
+    dialog is the picture of who handed a task to whom. The list's builders and
+    their tests are kept (the classes above run them with the switch on); these
+    pin what the reader of the shipped dialog sees, and that everything the
+    list used to feed still works without it."""
+
+    session_list_shown = False
+
+    def _run_crew(self, body: str):
+        return self._run_node(CREW_BOARD_STUBS + "\ndashboardShown();\n" + body)
+
+    def test_the_switch_ships_off_and_is_one_named_constant(self):
+        source = DASHBOARD_DIALOG_JS.read_text(encoding="utf-8")
+        self.assertEqual(source.count("const DASHBOARD_SESSION_LIST_SHOWN = false;"), 1)
+        # The list is still built when the switch is on.
+        self.assertIn("dashboardWorkspaceHtml(workspace, index)", source)
+
+    def test_the_dialog_draws_the_board_and_none_of_the_list(self):
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([link('s1', 's2'), link('s1', 's3')]);
+            await refreshAgentDashboard();
+            const html = body().innerHTML;
+            report({
+                board: html.includes('class="dash-crews-board"'),
+                nodes: nodes(),
+                list: ['<section class="dash-workspace', '<section class="dash-session', 'dash-sessions-pane',
+                    'data-dashboard-sessions', 'class="dash-agent"', 'dash-session-close']
+                    .filter(part => html.includes(part)),
+                totals: totals().textContent,
+                empty: html.includes('No crews yet')
+            });
+            """
+        )
+        self.assertTrue(result["board"])
+        self.assertEqual(result["nodes"], ["s1", "s2", "s3"])
+        self.assertEqual(result["list"], [])
+        self.assertFalse(result["empty"])
+        # The header counts what the dialog holds, not a list it does not draw.
+        self.assertEqual(result["totals"], "1 crew · 3 agents")
+
+    def test_with_no_crew_it_says_so_in_one_line_of_its_own(self):
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([]);
+            await refreshAgentDashboard();
+            const html = body().innerHTML;
+            report({
+                html,
+                totals: totals().textContent,
+                list: ['<section class="dash-workspace', '<section class="dash-session', 'class="dash-agent"']
+                    .filter(part => html.includes(part))
+            });
+            """
+        )
+        self.assertIn("No crews yet.", result["html"])
+        self.assertIn("No agent has handed a task to another yet.", result["html"])
+        self.assertEqual(result["totals"], "No crews")
+        self.assertEqual(result["list"], [])
+
+    def test_a_dialog_with_nothing_running_says_the_same_thing(self):
+        result = self._run_crew(
+            """
+            fetchAnswer = { generated_at: 100, workspaces: [], totals: { workspaces: 0, sessions: 0, agents: 0 }, links: [] };
+            await refreshAgentDashboard();
+            report({ html: body().innerHTML, totals: totals().textContent });
+            """
+        )
+        self.assertIn("No agent has handed a task to another yet.", result["html"])
+        self.assertEqual(result["totals"], "No crews")
+
+    def test_the_empty_state_and_the_board_replace_each_other_as_crews_come_and_go(self):
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([]);
+            await refreshAgentDashboard();
+            const none = body().innerHTML.includes('No crews yet');
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            const crew = { board: crewSlot().html.includes('dash-crews-board'),
+                empty: crewSlot().html.includes('No crews yet') };
+            fetchAnswer = crewReading([]);
+            await refreshAgentDashboard();
+            const ended = { board: crewSlot().html.includes('dash-crews-board'),
+                empty: crewSlot().html.includes('No crews yet') };
+            fetchAnswer = crewReading([link('s1', 's3')]);
+            await refreshAgentDashboard();
+            report({ none, crew, ended, back: crewSlot().html.includes('dash-crews-board') });
+            """
+        )
+        self.assertTrue(result["none"])
+        self.assertEqual(result["crew"], {"board": True, "empty": False})
+        self.assertEqual(result["ended"], {"board": False, "empty": True})
+        self.assertTrue(result["back"])
+
+    def test_a_poll_that_only_changes_what_a_node_says_rewrites_nothing_else(self):
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            const before = node('s2');
+            const slotBefore = crewSlot();
+            fetchAnswer = crewReading([link('s1', 's2')], { s2: 'Review the lexer' });
+            await refreshAgentDashboard();
+            report({
+                sameNode: node('s2') === before,
+                sameSlot: crewSlot() === slotBefore,
+                rebuilds: crewSlot().rebuilds,
+                line: node('s2').slots['.dash-crew-line'].textContent
+            });
+            """
+        )
+        self.assertTrue(result["sameNode"])
+        self.assertTrue(result["sameSlot"])
+        self.assertEqual(result["rebuilds"], 0)
+        self.assertEqual(result["line"], "Review the lexer")
+
+    def test_the_size_classes_follow_the_crews_and_the_list_is_not_asked_for(self):
+        result = self._run_crew(
+            """
+            const dialogEl = { on: false, list: null, classList: { toggle(name, force) {
+                if (name === 'has-crews') dialogEl.on = Boolean(force);
+                if (name === 'has-session-list') dialogEl.list = Boolean(force);
+            } } };
+            body().parentElement = dialogEl;
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            const withCrew = dialogEl.on;
+            fetchAnswer = crewReading([]);
+            await refreshAgentDashboard();
+            report({ withCrew, without: dialogEl.on, list: dialogEl.list });
+            """
+        )
+        self.assertTrue(result["withCrew"])
+        self.assertFalse(result["without"])
+        self.assertFalse(result["list"])
+
+    def test_opening_closing_and_the_poll_do_not_need_the_list(self):
+        result = self._run_crew(
+            """
+            shell().classList.remove('visible');
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            showDashboard();
+            await settle();
+            const open = { up: dialogOpen(), armed: timers.armed, fetches: calls.fetches,
+                board: body().innerHTML.includes('dash-crews-board') };
+            press('Escape');
+            report({ open, shut: dialogOpen(), cleared: timers.cleared });
+            """
+        )
+        self.assertEqual(result["open"], {"up": True, "armed": 1, "fetches": 1, "board": True})
+        self.assertFalse(result["shut"])
+        self.assertGreaterEqual(result["cleared"], 1)
+
+    def test_a_node_press_still_opens_the_pane_it_names(self):
+        result = self._run_crew(
+            """
+            wireAgentDashboard();
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            body().fire('click', {
+                target: { closest: () => ({ dataset: node('s2').dataset }) },
+                preventDefault() {}
+            });
+            await settle();
+            report({ opened: calls.openWorkspaceWindow, targets: calls.focusTargets });
+            """
+        )
+        self.assertEqual(
+            result["opened"], [{"workspaceId": "default", "options": {"groupId": "g1"}}]
+        )
+        self.assertEqual(result["targets"][0]["options"], {"groupId": "g1", "sessionId": "s2"})
+
+    def test_a_failed_read_keeps_the_board_behind_its_notice(self):
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            fetchAnswer = null;
+            await refreshAgentDashboard();
+            report({ board: body().innerHTML.includes('dash-crews-board'), notice: notice().textContent });
+            """
+        )
+        self.assertTrue(result["board"])
+        self.assertIn("Could not refresh", result["notice"])
+
+
 class DashboardCrewBoardStylingTestCase(unittest.TestCase):
     """The board's stylesheet hooks: the narrow breakpoint is the module's own
     constant, and the board's colours are the status tokens."""
@@ -3347,26 +3558,41 @@ class DashboardCrewBoardStylingTestCase(unittest.TestCase):
         css = self.CSS.read_text(encoding="utf-8")
         rule = re.search(r"\.dash-dialog\.has-crews \{([^}]*)\}", css)
         self.assertIsNotNone(rule)
-        self.assertIn("width: 100%;", rule.group(1))
-        self.assertIn("height: 100%;", rule.group(1))
-        # The column it always was is the unqualified rule.
-        self.assertIn("width: min(520px, 100%);", css)
+        # Three quarters of the window it opened in, in each direction, and no
+        # more: the dialog never covers the page behind it.
+        self.assertIn("width: 75vw;", rule.group(1))
+        self.assertIn("height: 75vh;", rule.group(1))
+        # The column it always was is the unqualified rule, under the same cap.
+        base = re.search(r"\n\.dash-dialog \{([^}]*)\}", css)
+        self.assertIsNotNone(base)
+        self.assertIn("width: min(520px, 75vw);", base.group(1))
+        self.assertIn("height: min(75vh, 820px);", base.group(1))
+        # No narrow-window override puts it back to the whole window.
+        self.assertNotIn(".dash-dialog.has-crews { height: 100%; }", css)
 
     def test_the_board_and_the_list_sit_side_by_side_only_when_there_is_room(self):
         css = self.CSS.read_text(encoding="utf-8")
         wide = re.search(r"@media \(min-width: (\d+)px\) \{(.*?)\n\}\n", css, flags=re.S)
         self.assertIsNotNone(wide)
         block = wide.group(2)
-        self.assertIn(".dash-dialog.has-crews .dash-body", block)
+        # Only with the list on (`has-session-list`): the board alone has no
+        # second pane to sit beside.
+        self.assertIn(".dash-dialog.has-crews.has-session-list .dash-body", block)
         self.assertIn("grid-template-columns:", block)
         # Each pane scrolls on its own inside a body that does not.
-        self.assertIn(".dash-dialog.has-crews .dash-crews-slot", block)
-        self.assertIn(".dash-dialog.has-crews .dash-sessions-pane", block)
+        self.assertIn(".dash-dialog.has-crews.has-session-list .dash-crews-slot", block)
+        self.assertIn(".dash-dialog.has-crews.has-session-list .dash-sessions-pane", block)
         self.assertIn("overflow: hidden;", block)
         self.assertIn("overflow-y: auto;", block)
         # Below that width nothing is declared for the panes: they stack in
         # the one scroller, as they did.
         self.assertNotIn("dash-sessions-pane", css[:wide.start()])
+
+    def test_the_board_alone_is_not_divided_from_a_list_that_is_not_there(self):
+        css = self.CSS.read_text(encoding="utf-8")
+        rule = re.search(r"\.dash-dialog:not\(\.has-session-list\) \.dash-crews \{([^}]*)\}", css)
+        self.assertIsNotNone(rule)
+        self.assertIn("border-bottom: 0;", rule.group(1))
 
     def test_the_narrow_board_reads_its_gutter_from_the_wire_layer(self):
         css = self.CSS.read_text(encoding="utf-8")

@@ -303,9 +303,9 @@ body.agent-sidebar-right .agent-sidebar-resizer {
 /* ── The one row difference ──
 
    The agent's name is out of flow here (see `.dash-agent-who` below), so the
-   row is a dot, a mark, a title, an `MCP` chip on the panes that have the
-   tools and — on the few rows that have one — a bar, and they fit on one line
-   at this width. The dialog's narrow-card rule
+   row is a dot, a mark, a title and — on the few rows that have one — a bar,
+   and they fit on one line at this width. What an agent may do (GridVibe tools,
+   auto-approval) is drawn on the mark, below, and takes no width. The dialog's narrow-card rule
    would wrap the title onto a second line under a name this surface does not
    draw, which would cost every row a line to gain nothing. Two classes, so it
    outranks that rule wherever the two files load in. */
@@ -367,13 +367,61 @@ body.agent-sidebar-right .agent-sidebar-resizer {
     border-radius: 5px;
 }
 
-/* The one chip a row here draws, set tighter than the dialog's: at this width
-   every pixel it does not take is a pixel of chat title, and three uppercase
-   characters stay legible well below the size a word would. */
-.agent-sidebar .dash-tag {
-    padding: 0 4px;
-    font-size: .52rem;
-    letter-spacing: .04em;
+/* GridVibe tools: a frame around the agent's mark, the pane header's own
+   (`.terminal-agent-icon[data-mcp]` in terminals.css) down to the accent and the
+   override token, so the two surfaces cannot disagree. An outline, so
+   switching it on or off moves nothing. `dashboard-sidebar.js` sets the
+   attributes from the header's rule; the mark's hover carries the words. */
+.agent-sidebar .dash-agent-icon {
+    position: relative;
+}
+
+.agent-sidebar .dash-agent-icon[data-mcp] {
+    outline: 1.5px solid var(--gv-accent);
+    outline-offset: 1.5px;
+}
+
+.agent-sidebar .dash-agent-icon[data-mcp][data-mcp-override] {
+    outline-color: var(--gv-mcp-override);
+}
+
+/* Auto-approval: a small framed A pinned to the mark's corner, like a
+   notification pin, in the warning hue the dialog's `auto` chip wears. It is
+   drawn here and not in the markup, so it is a pure decoration, and the letter
+   is only the picture of it: the words are the mark's hover and the row's
+   accessible name. */
+.agent-sidebar .dash-agent-icon[data-auto]::after {
+    content: 'A';
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 10px;
+    height: 10px;
+    padding: 0 1px;
+    border: 1px solid var(--gv-warning);
+    border-radius: 3px;
+    background: var(--gv-bg-app);
+    color: var(--gv-warning);
+    font-size: 7px;
+    font-weight: 800;
+    line-height: 1;
+    pointer-events: none;
+}
+
+/* The words for the frame and the pin, kept for a reader who is hearing the row
+   and not drawn: out of flow, like the agent's name beside it. */
+.dash-agent-flags {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
 }
 
 .agent-sidebar .dash-agent-icon .dash-agent-glyph {

@@ -9,6 +9,12 @@
        and the agents inside those — what each one is announcing and whether it
        is doing anything.
 
+       **It shows the crew board, and the list is switched off.** The docked
+       sidebar lists every workspace, session and agent while the reader works,
+       so the dialog is the picture of who handed a task to whom and nothing
+       else (`DASHBOARD_SESSION_LIST_SHOWN`). What follows about the list is
+       what it does when that switch is on.
+
        **It lists every session, and it is still about the agents.** Being the
        one place all of them are named at once makes it the fastest way to
        *reach* any of them, so a session with no agent in it is a row here too.
@@ -124,6 +130,14 @@
     const AGENT_DASHBOARD_NOTICE_ID = 'agentDashboardNotice';
     const AGENT_DASHBOARD_REFRESH_BTN_ID = 'agentDashboardRefreshBtn';
     const AGENT_DASHBOARD_CLOSE_BTN_ID = 'agentDashboardCloseBtn';
+
+    /* The dialog shows the crew board and nothing else: the docked sidebar
+       already lists every workspace, session and agent. This is the one switch
+       for the list underneath it. Flip it to `true` and the dialog draws the
+       list again, beside the board, exactly as it did (the builders below, the
+       row updates, the close controls and their tests are all still here); an
+       icon that brings it up on demand would set the same thing. */
+    const DASHBOARD_SESSION_LIST_SHOWN = false;
 
     /* A dashboard that lags the thing it describes is just a screenshot. */
     const AGENT_DASHBOARD_REFRESH_MS = 2000;
@@ -283,6 +297,25 @@
             dashboardMcpTagTitle(pane),
             dashboardMcpOverride(pane) ? 'is-override' : ''
         );
+    }
+
+    /* What the docked sidebar says about a pane's agent on its mark instead of
+       in chips: the frame GridVibe tools put around it (blue, red in override
+       mode: the pane header's rule and hover, asked of the same functions) and
+       the pin for auto-approval. `mcpTitle` and `autoTitle` are the sentences
+       the mark's hover carries, and are empty when there is nothing to say. */
+    const DASHBOARD_AUTO_TITLE = 'This agent runs with auto-approval: it acts without asking first';
+
+    function dashboardAgentMarkState(pane) {
+        const mcp = Boolean(dashboardMcpTag(pane));
+        const auto = Boolean(pane?.agent_auto_mode);
+        return {
+            mcp,
+            override: mcp && dashboardMcpOverride(pane),
+            auto,
+            mcpTitle: mcp ? dashboardMcpTagTitle(pane) : '',
+            autoTitle: auto ? DASHBOARD_AUTO_TITLE : ''
+        };
     }
 
     /* Which conversation this row is, and the hover that carries what the line
@@ -759,15 +792,17 @@
        The dialog's answer to "how far along is this crew": one box per crew,
        the orchestrator on the left and the agents it handed tasks to in
        columns to its right, one column per depth, a parent centred on its
-       children and a fan of wires between them. The session list is untouched,
-       so a crew's agents are named twice, and that is the cost the board was
-       chosen with.
+       children and a fan of wires between them. The board is the dialog's
+       whole body while the session list is switched off
+       (`DASHBOARD_SESSION_LIST_SHOWN`); with the list on, the list is
+       untouched by it and a crew's agents are named twice.
 
-         · **The dialog is as big as the window while a crew exists.** The board
-           and the list are two panes side by side, each scrolling on its own,
-           so a whole crew is in view; on a window too narrow for two they stack
-           in the one scroller, as they always did. With no crew the dialog is
-           the column it was.
+         · **The dialog is three quarters of the window while a crew exists.**
+           That is the most it takes, in width and in height, and a crew larger
+           than that scrolls inside the board. With the list on, the board and
+           the list are two panes side by side, each scrolling on its own, and
+           on a window too narrow for two they stack in the one scroller. With
+           no crew the dialog is the column it was, with a line saying so.
 
          · **It is laid out from the crew index, never from `link_id`.** A new
            round mints a new id for the same pair, and a board keyed by it
@@ -1046,6 +1081,37 @@
         return dashboardCrewBoardDraw(snapshot, crew === undefined ? dashboardCrewContext(snapshot) : crew).html;
     }
 
+    /* What the dialog says while no agent has handed a task to another: the
+       only thing on it once the list is off, so it names what would appear. */
+    const DASHBOARD_CREW_EMPTY_HTML = `
+        <div class="dash-empty">
+            <p class="dash-empty-title">No crews yet.</p>
+            <p class="dash-empty-note">
+                No agent has handed a task to another yet. When one does, the
+                crew appears here as a board.
+            </p>
+        </div>`;
+
+    /* The crews slot's content: the board, or with the list off the empty
+       state in its place, so the slot is never blank. */
+    function dashboardCrewSlotHtml(draw) {
+        if (draw.html) return draw.html;
+        return DASHBOARD_SESSION_LIST_SHOWN ? '' : DASHBOARD_CREW_EMPTY_HTML;
+    }
+
+    /* The header's reading while the list is off: what the board holds, in
+       the dialog's own units, instead of the workspace and session counts of
+       a list it does not draw. */
+    function dashboardCrewTotalsText(snapshot) {
+        const board = dashboardCrewModel()
+            ? dashboardCrewBoardModel(snapshot, dashboardCrewContext(snapshot))
+            : [];
+        if (!board.length) return 'No crews';
+        const agents = board.reduce((sum, crewBox) => sum + crewBox.nodes.length, 0);
+        return `${board.length} crew${board.length === 1 ? '' : 's'} · `
+            + `${agents} agent${agents === 1 ? '' : 's'}`;
+    }
+
     function dashboardWriteSlot(element, selector, property, value, before) {
         if (before !== undefined && value === before) return;
         const slot = element.querySelector?.(selector);
@@ -1065,7 +1131,7 @@
             const active = document.activeElement;
             const focusedKey = slot.contains?.(active) ? active?.dataset?.dashboardKey || '' : '';
             const scrollLeft = slot.querySelector?.('.dash-crews-board')?.scrollLeft || 0;
-            slot.innerHTML = draw.html;
+            slot.innerHTML = dashboardCrewSlotHtml(draw);
             if (scrollLeft) {
                 const board = slot.querySelector?.('.dash-crews-board');
                 if (board) board.scrollLeft = scrollLeft;
@@ -1177,6 +1243,11 @@
        into it without touching the list. */
     function dashboardBodyHtml(snapshot, draw) {
         const workspaces = Array.isArray(snapshot?.workspaces) ? snapshot.workspaces : [];
+        if (!DASHBOARD_SESSION_LIST_SHOWN) {
+            return `<div class="dash-crews-slot" data-dashboard-crews>${dashboardCrewSlotHtml(
+                draw || dashboardCrewBoardDraw(snapshot, dashboardCrewContext(snapshot))
+            )}</div>`;
+        }
         if (!workspaces.length) {
             return `
                 <div class="dash-empty">
@@ -1195,12 +1266,15 @@
             + '</div>';
     }
 
-    /* The dialog is as big as the window it was opened in while a crew is on
-       it, and the column it always was when none is. A class and not a style,
-       so the stylesheet owns every size and the breakpoint that puts the board
-       and the list side by side. */
+    /* While a crew is on it the dialog is as big as it gets (three quarters of
+       the window it was opened in, in each direction), and the column it always
+       was when none is. Classes and not styles, so the stylesheet owns every
+       size and the breakpoint that puts the board and, when the list is shown,
+       the list side by side. */
     function paintAgentDashboardSize(hasCrews) {
-        document.getElementById(AGENT_DASHBOARD_BODY_ID)?.parentElement?.classList?.toggle?.('has-crews', Boolean(hasCrews));
+        const dialog = document.getElementById(AGENT_DASHBOARD_BODY_ID)?.parentElement;
+        dialog?.classList?.toggle?.('has-crews', Boolean(hasCrews));
+        dialog?.classList?.toggle?.('has-session-list', DASHBOARD_SESSION_LIST_SHOWN);
     }
 
     /* The three counts always, once anything is open. The agent count leads
@@ -1418,7 +1492,9 @@
         }
         const totals = document.getElementById(AGENT_DASHBOARD_TOTALS_ID);
         if (totals) {
-            totals.textContent = dashboardTotalsText(snapshot);
+            totals.textContent = DASHBOARD_SESSION_LIST_SHOWN
+                ? dashboardTotalsText(snapshot)
+                : dashboardCrewTotalsText(snapshot);
         }
         paintAgentDashboardSnapshot(snapshot);
     }

@@ -51,8 +51,8 @@
 .dash-dialog {
     display: flex;
     flex-direction: column;
-    width: min(520px, 100%);
-    height: min(78vh, 820px);
+    width: min(520px, 75vw);
+    height: min(75vh, 820px);
     max-height: 100%;
     overflow: hidden;
     border: 1px solid var(--gv-dialog-border);
@@ -64,13 +64,14 @@
     font-size: 14px;
 }
 
-/* While a crew is on the board the dialog is as big as the window it opened in
-   (the shell's own padding is the margin): a crew is a picture, and one that
-   has to be scrolled to be seen whole is not one. Height follows, because the
-   fixed height above is a column's. */
+/* While a crew is on the board the dialog grows to three quarters of the window
+   it opened in, in width and in height, and no further: a crew is a picture,
+   and one that has to be scrolled to be seen whole is not one, but a dialog
+   that covers the whole window is more than the picture needs. The board
+   scrolls inside it for a crew that is still larger. */
 .dash-dialog.has-crews {
-    width: 100%;
-    height: 100%;
+    width: 75vw;
+    height: 75vh;
 }
 
 .dash-dialog:focus {
@@ -894,8 +895,6 @@
 
 @media (max-width: 500px) {
     .agent-dashboard-shell { padding: 10px; }
-    .dash-dialog { height: min(88vh, 820px); }
-    .dash-dialog.has-crews { height: 100%; }
     .dash-titlebar { padding: 10px 12px; gap: 8px; }
     .dash-titlebar-right { width: 100%; justify-content: space-between; }
     .dash-body { padding: 12px; }
@@ -922,13 +921,22 @@
     margin: 0;
 }
 
-/* Wide enough for two panes: the board on the left and the session list on the
-   right, each scrolling on its own inside a body that does not. Below it they
-   are the one stacked scroller they always were. The list keeps the column it
-   was designed for and the board takes the rest, because the board is the one
-   that wants width. */
+/* The dialog shows the board alone (`DASHBOARD_SESSION_LIST_SHOWN` in
+   `dashboard-dialog.js`), so there is no list for the board to be divided
+   from. */
+.dash-dialog:not(.has-session-list) .dash-crews {
+    margin-bottom: 0;
+    padding-bottom: 0;
+    border-bottom: 0;
+}
+
+/* With the list shown (`has-session-list`) and wide enough for two panes: the
+   board on the left and the session list on the right, each scrolling on its
+   own inside a body that does not. Below it they are the one stacked scroller
+   they always were. The list keeps the column it was designed for and the
+   board takes the rest, because the board is the one that wants width. */
 @media (min-width: 1000px) {
-    .dash-dialog.has-crews .dash-body {
+    .dash-dialog.has-crews.has-session-list .dash-body {
         display: grid;
         grid-template-columns: minmax(0, 1fr) minmax(340px, 440px);
         gap: 0 22px;
@@ -937,21 +945,21 @@
         scrollbar-gutter: auto;
     }
 
-    .dash-dialog.has-crews .dash-crews-slot,
-    .dash-dialog.has-crews .dash-sessions-pane {
+    .dash-dialog.has-crews.has-session-list .dash-crews-slot,
+    .dash-dialog.has-crews.has-session-list .dash-sessions-pane {
         min-width: 0;
         min-height: 0;
         overflow-y: auto;
         scrollbar-gutter: stable;
     }
 
-    .dash-dialog.has-crews .dash-crews {
+    .dash-dialog.has-crews.has-session-list .dash-crews {
         margin-bottom: 0;
         padding-bottom: 0;
         border-bottom: 0;
     }
 
-    .dash-dialog.has-crews .dash-sessions-pane {
+    .dash-dialog.has-crews.has-session-list .dash-sessions-pane {
         padding-left: 22px;
         border-left: 2px solid var(--gv-dialog-border);
     }

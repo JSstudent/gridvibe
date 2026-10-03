@@ -281,7 +281,7 @@ const sidebar = GridVibeDashboardSidebar.create({
         line: dashboardPaneLine,
         hover: dashboardPaneHover,
         agentName: dashboardAgentName,
-        mcp: dashboardMcpTagHtml,
+        mark: dashboardAgentMarkState,
         crewContext: dashboardCrewContext,
         crewChip: dashboardCrewChipHtml,
         workspaceLabel: dashboardWorkspaceLabel,
@@ -536,10 +536,33 @@ function drawnAgentRows() {
                    in-place write is told apart from a rebuilt row. */
                 element.readingSlot = fakeSlot();
                 element.progressSlot = fakeSlot();
+                /* The agent's mark and the words kept beside it, as the markup
+                   drew them: empty of flags, with every write counted, so a
+                   frame turned on in place is told apart from a rebuilt row. */
+                element.icon = {
+                    dataset: {},
+                    title: '',
+                    writes: 0,
+                    removeAttribute(name) { if (name === 'title') this.title = ''; this.writes += 1; }
+                };
+                let iconTitle = '';
+                Object.defineProperty(element.icon, 'title', {
+                    get: () => iconTitle,
+                    set: value => { iconTitle = String(value); element.icon.writes += 1; },
+                    enumerable: true
+                });
+                element.flagsSlot = { writes: 0 };
+                let flagWords = '';
+                Object.defineProperty(element.flagsSlot, 'textContent', {
+                    get: () => flagWords,
+                    set: value => { flagWords = String(value); element.flagsSlot.writes += 1; }
+                });
                 element.querySelector = selector => ({
                     '.dash-agent-crew': element.crewSlot,
                     '.dash-agent-reading': element.readingSlot,
-                    '.dash-agent-progress': element.progressSlot
+                    '.dash-agent-progress': element.progressSlot,
+                    '.dash-agent-icon': element.icon,
+                    '.dash-agent-flags': element.flagsSlot
                 }[selector] || null);
                 element.closest = selector => (
                     selector === '.dash-agent[data-session-id]' ? element : null
@@ -660,18 +683,33 @@ class DashboardSidebarRowTestCase(DashboardSidebarNodeTestCase):
             ],
         )
 
-    def test_the_pane_running_with_gridvibe_tools_says_so_here_too(self):
-        """The one chip this row keeps, and the reason it is not the name.
-
-        The mark already answers which agent a row is; nothing else on it
-        answers whether that agent can create workspaces, launch panes and
-        split the grid — which is what a reader picking a pane to instruct is
-        deciding, and picking one *while* working is what this panel is for.
-        """
+    def test_the_row_draws_no_mcp_chip_and_no_tag_at_all(self):
+        """What a row may do is on its mark, not beside the title: the chip is
+        gone from the markup whatever the pane has, so the title keeps the
+        width."""
         result = self._run_node(
             """
             sidebarShown();
             fetchAnswer = snapshot([group([
+                pane({ agent_mcp: true, agent_mcp_override: true, agent_auto_mode: true }),
+                pane({ session_id: 's2', index: 1, agent_mcp: true })
+            ])]);
+            await sidebar.refresh();
+            report({ html: body().innerHTML, tags: parseAgentRows().map(row => row.tags) });
+            """
+        )
+        self.assertEqual(result["tags"], [[], []])
+        self.assertNotIn("dash-tag", result["html"])
+        self.assertNotIn(">MCP<", result["html"])
+
+    def test_the_pane_running_with_gridvibe_tools_wears_the_headers_frame(self):
+        """The mark of a pane with GridVibe's tools is framed, by the rule the
+        pane header uses (`paneAgentMcpTag`): an agent, and the flag, whatever
+        the transport -- and never a pane that is no longer an agent."""
+        result = self._run_node(
+            """
+            sidebarShown();
+            const panes = [
                 pane({ agent_mcp: true }),
                 pane({ session_id: 's2', index: 1 }),
                 pane({
@@ -682,56 +720,165 @@ class DashboardSidebarRowTestCase(DashboardSidebarNodeTestCase):
                     session_id: 's4', index: 3, startup_mode: 'terminal',
                     agent_selection: '', agent_mcp: true
                 })
-            ])]);
+            ];
+            fetchAnswer = snapshot([group(panes)]);
             await sidebar.refresh();
-            report(parseAgentRows().map(row => ({
-                key: row.key, tags: row.tags, columns: row.columns
-            })));
+            report({
+                marks: panes.map(entry => {
+                    const icon = drawnRow(entry.session_id).icon;
+                    return {
+                        id: entry.session_id,
+                        framed: 'mcp' in icon.dataset,
+                        override: 'mcpOverride' in icon.dataset,
+                        rule: Boolean(GridVibeAgentIdentity.paneAgentMcpTag(entry)),
+                        title: icon.title,
+                        headerTitle: GridVibeAgentIdentity.paneAgentMcpTagTitle(entry)
+                    };
+                })
+            });
             """
         )
-        tags = {row["key"]: row["tags"] for row in result}
-        self.assertEqual(tags["pane:s1"], ["MCP"])
-        self.assertEqual(tags["pane:s2"], [])
-        # A remote pane's tools ride its own transport home, so it wears the
-        # chip exactly as a local one does.
-        self.assertEqual(tags["pane:s3"], ["MCP"])
-        # And a flag left behind on a pane that is no longer running an agent
-        # paints nothing, the same rule the pane header and the dialog apply.
-        self.assertEqual(tags["pane:s4"], [])
-        # The chip sits after the title and before the bar, so the four columns
-        # the eye runs along are still in the order they were.
-        self.assertEqual(
-            [row["columns"] for row in result][0][:4],
-            [
-                "dash-agent-reading",
-                "dash-agent-icon",
-                "dash-agent-who",
-                "dash-agent-line",
-            ],
-        )
+        by_id = {mark["id"]: mark for mark in result["marks"]}
+        self.assertTrue(by_id["s1"]["framed"])
+        self.assertFalse(by_id["s2"]["framed"])
+        # A remote pane's tools ride its own transport home: framed alike.
+        self.assertTrue(by_id["s3"]["framed"])
+        # A flag left behind on a pane that is no longer an agent frames nothing.
+        self.assertFalse(by_id["s4"]["framed"])
+        for mark in result["marks"]:
+            with self.subTest(pane=mark["id"]):
+                self.assertEqual(mark["framed"], mark["rule"])
+                self.assertFalse(mark["override"])
+                # The hover is the header's own sentence, word for word.
+                self.assertEqual(mark["title"], mark["headerTitle"])
+        self.assertIn("GridVibe tools", by_id["s1"]["title"])
 
-    def test_an_override_mode_pane_wears_the_dialogs_red_chip(self):
-        """The sidebar draws the dialog's chip, so override mode reaches it
-        with no reading of its own: same `MCP`, same `is-override`."""
+    def test_override_mode_turns_the_frame_red_and_the_hover_says_why(self):
         result = self._run_node(
             """
             sidebarShown();
             const red = pane({ agent_mcp: true, agent_mcp_override: true });
-            const plain = pane({ session_id: 's2', index: 1, agent_mcp: true });
-            fetchAnswer = snapshot([group([red, plain])]);
+            const blue = pane({ session_id: 's2', index: 1, agent_mcp: true });
+            const stray = pane({ session_id: 's3', index: 2, agent_mcp_override: true });
+            fetchAnswer = snapshot([group([red, blue, stray])]);
             await sidebar.refresh();
-            const rows = parseAgentRows();
+            const state = id => {
+                const icon = drawnRow(id).icon;
+                return { framed: 'mcp' in icon.dataset, override: 'mcpOverride' in icon.dataset, title: icon.title };
+            };
             report({
-                rows: rows.map(row => ({ tags: row.tags, classes: row.tagClasses })),
-                dialog: dashboardMcpTagHtml(red)
+                red: state('s1'), blue: state('s2'), stray: state('s3'),
+                headerRed: GridVibeAgentIdentity.paneAgentMcpTagTitle(red)
             });
             """
         )
-        self.assertEqual(result["rows"], [
-            {"tags": ["MCP"], "classes": [["dash-tag", "dash-tag-mcp", "is-override"]]},
-            {"tags": ["MCP"], "classes": [["dash-tag", "dash-tag-mcp"]]},
-        ])
-        self.assertIn('class="dash-tag dash-tag-mcp is-override"', result["dialog"])
+        self.assertTrue(result["red"]["framed"])
+        self.assertTrue(result["red"]["override"])
+        self.assertEqual(result["red"]["title"], result["headerRed"])
+        self.assertIn("override mode", result["red"]["title"])
+        self.assertTrue(result["blue"]["framed"])
+        self.assertFalse(result["blue"]["override"])
+        # The grant means nothing without the tools, as in the header.
+        self.assertFalse(result["stray"]["framed"])
+        self.assertFalse(result["stray"]["override"])
+
+    def test_auto_approval_is_a_pin_on_the_mark_and_says_so_in_words(self):
+        result = self._run_node(
+            """
+            sidebarShown();
+            fetchAnswer = snapshot([group([
+                pane({ agent_auto_mode: true }),
+                pane({ session_id: 's2', index: 1, agent_auto_mode: true, agent_mcp: true }),
+                pane({ session_id: 's3', index: 2 })
+            ])]);
+            await sidebar.refresh();
+            const state = id => {
+                const row = drawnRow(id);
+                return {
+                    auto: 'auto' in row.icon.dataset,
+                    framed: 'mcp' in row.icon.dataset,
+                    title: row.icon.title,
+                    words: row.flagsSlot.textContent
+                };
+            };
+            report({ plain: state('s1'), both: state('s2'), none: state('s3') });
+            """
+        )
+        self.assertTrue(result["plain"]["auto"])
+        self.assertFalse(result["plain"]["framed"])
+        self.assertIn("auto-approval", result["plain"]["title"])
+        self.assertIn("auto-approval", result["plain"]["words"])
+        # Both, on one mark: the frame and the pin, and a hover for each.
+        self.assertTrue(result["both"]["auto"])
+        self.assertTrue(result["both"]["framed"])
+        self.assertIn("GridVibe tools", result["both"]["title"])
+        self.assertIn("auto-approval", result["both"]["title"])
+        self.assertIn("GridVibe tools", result["both"]["words"])
+        self.assertIn("auto-approval", result["both"]["words"])
+        # Neither: nothing drawn and nothing said.
+        self.assertEqual(result["none"], {"auto": False, "framed": False, "title": "", "words": ""})
+
+    def test_colour_is_never_the_only_statement_of_the_frame(self):
+        """Blue and red are carried by the hover and the row's accessible name
+        too: the words are on the row, out of flow, for a reader who is hearing
+        it."""
+        result = self._run_node(
+            """
+            sidebarShown();
+            fetchAnswer = snapshot([group([
+                pane({ agent_mcp: true, agent_mcp_override: true })
+            ])]);
+            await sidebar.refresh();
+            report({ words: drawnRow('s1').flagsSlot.textContent, html: body().innerHTML });
+            """
+        )
+        self.assertIn("override mode", result["words"])
+        self.assertIn('<span class="dash-agent-flags"></span>', result["html"])
+
+    def test_a_frame_or_pin_changing_is_written_in_place_and_never_rebuilds_the_row(self):
+        result = self._run_node(
+            """
+            sidebarShown();
+            fetchAnswer = snapshot([group([pane(), pane({ session_id: 's2', index: 1 })])]);
+            await sidebar.refresh();
+            const row = drawnRow('s1');
+            const before = { html: body().innerHTML, writes: row.icon.writes, words: row.flagsSlot.writes };
+            fetchAnswer = snapshot([group([
+                pane({ agent_mcp: true, agent_auto_mode: true }), pane({ session_id: 's2', index: 1 })
+            ])]);
+            await sidebar.refresh();
+            const turnedOn = {
+                same: drawnRow('s1') === row,
+                framed: 'mcp' in row.icon.dataset,
+                auto: 'auto' in row.icon.dataset,
+                writes: row.icon.writes,
+                words: row.flagsSlot.writes
+            };
+            /* The same reading again writes nothing at all. */
+            await sidebar.refresh();
+            const quiet = { writes: row.icon.writes, words: row.flagsSlot.writes };
+            fetchAnswer = snapshot([group([
+                pane({ agent_mcp: true, agent_mcp_override: true }), pane({ session_id: 's2', index: 1 })
+            ])]);
+            await sidebar.refresh();
+            report({
+                before, turnedOn, quiet,
+                red: 'mcpOverride' in row.icon.dataset,
+                autoGone: 'auto' in row.icon.dataset,
+                sameAfter: drawnRow('s1') === row
+            });
+            """
+        )
+        self.assertEqual(result["before"]["writes"], 0)
+        self.assertTrue(result["turnedOn"]["same"])
+        self.assertTrue(result["turnedOn"]["framed"])
+        self.assertTrue(result["turnedOn"]["auto"])
+        self.assertGreater(result["turnedOn"]["writes"], 0)
+        self.assertEqual(result["quiet"], {"writes": result["turnedOn"]["writes"],
+                                           "words": result["turnedOn"]["words"]})
+        self.assertTrue(result["red"])
+        self.assertFalse(result["autoGone"])
+        self.assertTrue(result["sameAfter"])
 
     def test_every_other_field_is_the_dialogs_own_answer(self):
         """The naming rule, the transport tag, the state word, the hue and the
@@ -3323,6 +3470,36 @@ class DashboardSidebarPageTestCase(unittest.TestCase):
         self.assertIsNotNone(width)
         self.assertIn("15%", width.group(1))
         self.assertIn("clamp(", width.group(1))
+
+    def test_the_mark_wears_the_headers_frame_and_the_auto_pin_from_tokens(self):
+        """The frame is the pane header's, down to its two colours: the same
+        accent and the same override token, so the surfaces cannot disagree. The
+        pin is drawn from an attribute, so it is a decoration and never markup."""
+        css = self._static("css/agent-dashboard-sidebar.css")
+        header = self._static("css/terminals.css")
+
+        def rule(source, selector):
+            found = re.search(re.escape(selector) + r" \{([^}]*)\}", source)
+            self.assertIsNotNone(found, selector)
+            return found.group(1)
+
+        frame = rule(css, ".agent-sidebar .dash-agent-icon[data-mcp]")
+        header_frame = rule(header, ".terminal-agent-icon[data-mcp]")
+        self.assertIn("outline: 1.5px solid var(--gv-accent);", frame)
+        # `--t-accent` is `--gv-accent`: the header's own spelling of the same token.
+        self.assertIn("outline: 1.5px solid var(--t-accent);", header_frame)
+        self.assertIn("outline-offset: 1.5px;", frame)
+        self.assertIn("outline-offset: 1.5px;", header_frame)
+        self.assertIn(
+            "outline-color: var(--gv-mcp-override);",
+            rule(css, ".agent-sidebar .dash-agent-icon[data-mcp][data-mcp-override]"),
+        )
+        pin = rule(css, ".agent-sidebar .dash-agent-icon[data-auto]::after")
+        self.assertIn("content: 'A';", pin)
+        self.assertIn("position: absolute;", pin)
+        self.assertIn("border: 1px solid var(--gv-warning);", pin)
+        # The chip is gone from the column's stylesheet.
+        self.assertNotIn(".agent-sidebar .dash-tag", css)
 
     def test_the_column_states_no_palette_of_its_own(self):
         """Guardrail 7: every colour is a shared token, the same ones the dialog

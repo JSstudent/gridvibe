@@ -810,12 +810,22 @@ class DashboardCloseControlsTestCase(DashboardCloseNodeTestCase):
             + DASHBOARD_CLOSE_JS.read_text(encoding="utf-8")
             + AGENT_IDENTITY_JS.read_text(encoding="utf-8")
             + AGENT_GLYPHS_JS.read_text(encoding="utf-8")
-            + DASHBOARD_DIALOG_JS.read_text(encoding="utf-8")
+            + self._dialog_with_list()
             + "\n(async () => {\n"
             + body
             + "\n})().catch(error => { console.error(error); process.exit(1); });\n"
         )
         return self._execute(script, [])
+
+    @staticmethod
+    def _dialog_with_list() -> str:
+        """The dialog ships with its session list switched off
+        (`DASHBOARD_SESSION_LIST_SHOWN`); the list is where these controls live,
+        so the switch is turned on in the source this harness loads."""
+        source = DASHBOARD_DIALOG_JS.read_text(encoding="utf-8")
+        off = "const DASHBOARD_SESSION_LIST_SHOWN = false;"
+        assert source.count(off) == 1, "the list switch moved or was renamed"
+        return source.replace(off, "const DASHBOARD_SESSION_LIST_SHOWN = true;")
 
     def test_the_session_close_is_a_control_beside_the_heading_never_inside_it(self):
         """A button inside a button is not a control, and the heading already

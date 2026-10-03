@@ -33,7 +33,7 @@
                 <img class="dash-logo" src="/docs/images/active_ws.ico" alt="" aria-hidden="true">
                 <div class="dash-titlebar-text">
                     <h2 class="dash-title" id="agentDashboardTitle">Agent Dashboard</h2>
-                    <p class="dash-titlebar-sub">Every agent running, in every workspace</p>
+                    <p class="dash-titlebar-sub">Which agent handed a task to which</p>
                 </div>
             </div>
             <div class="dash-titlebar-right">
@@ -68,7 +68,9 @@
            dialog that is still telling you something true four seconds ago. #}
         <p class="dash-notice" id="agentDashboardNotice" role="status" hidden></p>
 
-        {# The one scroller. dashboard-dialog.js owns everything inside it. #}
+        {# The one scroller. dashboard-dialog.js owns everything inside it: the
+           crew board, or a line saying there is none. The session list the
+           dialog used to carry is the docked sidebar's now. #}
         <main class="dash-body" id="agentDashboardBody">
             <div class="dash-empty"><p class="dash-empty-title">Reading…</p></div>
         </main>
