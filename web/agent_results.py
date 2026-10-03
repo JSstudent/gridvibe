@@ -113,6 +113,7 @@ LINK_FIELDS = (
     "reported_at",
     "reason",
     "round",
+    "label",
 )
 
 #: Bytes of entropy behind one ``link_id``. It names an assignment on the
@@ -308,6 +309,8 @@ class _Assignment:
     link_id: str = ""
     #: 1 for a task that started the agent, +1 for each follow-up to it.
     round: int = 1
+    #: Public board line belonging to this round only.
+    label: str = ""
     #: Whether a report may still be written: true until the handoff goes.
     #: Separate from ``state`` because a reported assignment keeps its report
     #: after that -- it just stops taking new ones.
@@ -345,6 +348,7 @@ class ResultStore:
         *,
         requester_session_id: str,
         worker_session_id: str,
+        label: str = "",
         continues: str = "",
         now: Optional[float] = None,
     ) -> bool:
@@ -399,13 +403,15 @@ class ResultStore:
                 created_mono=moment,
                 link_id=secrets.token_hex(_LINK_ID_BYTES),
                 round=round_number,
+                label=label,
             )
             self._changed.notify_all()
         logger.info(
-            "Handoff result expected handoff=%s requester=%s worker=%s",
+            "Handoff result expected handoff=%s requester=%s worker=%s label_chars=%d",
             resolved,
             requester,
             worker,
+            len(label),
         )
         return True
 

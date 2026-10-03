@@ -35,6 +35,7 @@ from web.agent_handoffs import (
     pane_description,
     same_machine,
     validate_task,
+    validate_task_label,
 )
 from web.agent_handoffs import handoffs as agent_handoffs
 from web.agent_results import ResultError, clamp_wait, validate_until
@@ -3777,7 +3778,7 @@ def _creator_stamp(value: Any, *, nothing_happened: str) -> str:
     return stamped
 
 
-def _validated_split_task(source, data: Dict[str, Any]) -> str:
+def _validated_split_task(source, data: Dict[str, Any]) -> Tuple[str, str]:
     """A split's task, validated, or a refusal naming why.
 
     Decided before anything is recorded: the text itself, then whether the new
@@ -3789,6 +3790,7 @@ def _validated_split_task(source, data: Dict[str, Any]) -> str:
     started there a task is not.
     """
     task_text = validate_task(data.get("task"))
+    task_label = validate_task_label(data.get("task_label"), task_text)
     refusal = task_refusal(data.get("kind"), data.get("agent"), data.get("mcp"))
     if refusal:
         raise HandoffError(refusal)
@@ -3809,7 +3811,7 @@ def _validated_split_task(source, data: Dict[str, Any]) -> str:
             403,
             {"gate": MACHINE_GATE, "waivable": False},
         )
-    return task_text
+    return task_text, task_label
 
 
 #: The two axes a split button offers. The server never computes a rectangle
@@ -3864,11 +3866,13 @@ def open_split_intent(session_id: str):
             return jsonify({"error": f"{exc} No split was recorded."}), 500
 
     task_text = None
-    if data.get("task") is not None:
-        try:
-            task_text = _validated_split_task(source, data)
-        except HandoffError as exc:
-            return jsonify({"error": exc.message, **exc.details}), exc.status_code
+    try:
+        if data.get("task") is not None:
+            task_text, task_label = _validated_split_task(source, data)
+        else:
+            task_label = validate_task_label(data.get("task_label"))
+    except HandoffError as exc:
+        return jsonify({"error": exc.message, **exc.details}), exc.status_code
 
     # The body the claiming page posts back, built here rather than by the page:
     # the creator stamp is read off the live registry in this process, so a
@@ -3902,6 +3906,7 @@ def open_split_intent(session_id: str):
         try:
             handoff_id = agent_handoffs.create(
                 task_text,
+                label=task_label,
                 source_session_id=session_id,
                 # The agent that asked waits for the report, and it need not
                 # be in the pane being halved.

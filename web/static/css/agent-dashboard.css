@@ -1030,14 +1030,23 @@ button.dash-crew-node:focus-visible {
     border-radius: 5px;
 }
 
+.dash-crew-name,
 .dash-crew-line {
     flex: 1 1 auto;
     min-width: 0;
     overflow: hidden;
     font-size: .78rem;
-    font-weight: 500;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+.dash-crew-name {
+    flex: 0 1 auto;
+    font-weight: 600;
+}
+
+.dash-crew-line {
+    font-weight: 400;
 }
 
 .dash-crew-node-meta {

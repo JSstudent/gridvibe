@@ -710,7 +710,8 @@
     function dashboardCrewNodeParts(node, crew, now) {
         const round = Number(node.link?.round) || 1;
         return {
-            line: dashboardPaneLine(node.pane),
+            name: dashboardPaneTitle(node.pane),
+            line: node.link?.label || dashboardPaneLine(node.pane),
             hover: dashboardPaneHover(node.pane, crew),
             reading: dashboardActivityHtml(node.pane),
             pill: dashboardCrewPillHtml(node, crew),
@@ -757,8 +758,9 @@
                 <span class="dash-crew-node-head">
                     <span class="dash-crew-reading">${parts.reading}</span>
                     <span class="dash-agent-icon" aria-hidden="true">${dashboardAgentGlyphHtml(who)}</span>
-                    <span class="dash-crew-line">${escHtml(parts.line)}</span>
+                    <span class="dash-crew-name">${escHtml(parts.name)}</span>
                 </span>
+                <span class="dash-crew-line">${escHtml(parts.line)}</span>
                 <span class="dash-crew-node-meta">
                     ${dashboardCrewSessionHtml(node)}
                     <span class="dash-crew-pill-slot">${parts.pill}</span>
@@ -871,6 +873,7 @@
                 const was = previous.nodes.get(id);
                 if (!next) return;
                 if (!was || next.hover !== was.hover) element.title = next.hover;
+                dashboardWriteSlot(element, '.dash-crew-name', 'textContent', next.name, was?.name);
                 dashboardWriteSlot(element, '.dash-crew-line', 'textContent', next.line, was?.line);
                 dashboardWriteSlot(element, '.dash-crew-reading', 'innerHTML', next.reading, was?.reading);
                 dashboardWriteSlot(element, '.dash-crew-pill-slot', 'innerHTML', next.pill, was?.pill);

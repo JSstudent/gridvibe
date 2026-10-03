@@ -349,6 +349,28 @@ class _FollowupRouteCase(_ResultRouteCase):
 
 
 class GuessingGameTestCase(_FollowupRouteCase):
+    def test_followup_labels_belong_to_their_round_and_are_never_inherited(self):
+        caller = self._agent_pane()
+        worker, connection, receipt = self._start_worker(caller)
+        self._report_with(worker, "First done.", receipt)
+        label = "€" * 60
+        response = self._send(caller.session_id, worker, task_label=label)
+        self.assertEqual(response.status_code, 200, response.get_json())
+        second = self._next(worker).get_json()
+        links = [row for row in result_store.links_snapshot() if row["worker_session_id"] == worker]
+        self.assertEqual([(row["round"], row["label"]) for row in links], [(1, ""), (2, label)])
+        self.assertNotIn(label, json.dumps(response.get_json(), ensure_ascii=False))
+        self.assertNotIn(label, json.dumps(second, ensure_ascii=False))
+        self._report_with(worker, "Second done.", second["receipt"])
+        response = self._send(caller.session_id, worker)
+        self.assertEqual(response.status_code, 200, response.get_json())
+        third = self._next(worker).get_json()
+        links = [row for row in result_store.links_snapshot() if row["worker_session_id"] == worker]
+        self.assertEqual([(row["round"], row["label"]) for row in links],
+                         [(1, ""), (2, label), (3, "")])
+        self.assertNotEqual(third["receipt"], second["receipt"])
+        self.assertEqual(connection["handoff_id"], result_store.live_assignment(worker)["handoff_id"])
+
     def test_the_same_agent_guesses_until_it_is_right(self):
         """The game from the report: guess, hear "wrong", guess again -- one
         worker, one connection, every round."""
@@ -460,6 +482,25 @@ class GuessingGameTestCase(_FollowupRouteCase):
 
 
 class FollowupRefusalTestCase(_FollowupRouteCase):
+    def test_invalid_labels_are_refused_before_followup_gates_and_binding(self):
+        caller = self._agent_pane()
+        worker, connection, _receipt = self._start_worker(caller)
+        before = dict(connection)
+        for label in (42, True, [], {}, "", "  ", "x" * 61, "€" * 61, "🚀" * 61, "a\nb", "a\r\nb", "a\tb",
+                      "a\x00b", "a\x1bb", "a\x7fb", "a\u200bb", "a\u2028b",
+                      "a\u00a0b", "a\ud800b"):
+            with self.subTest(label=repr(label)):
+                response = self._send("missing-caller", worker, task_label=label)
+                self.assertEqual(response.status_code, 400, response.get_json())
+                self.assertIn("task_label", response.get_json()["error"])
+                self.assertEqual(connection, before)
+                self.assertEqual(handoff_store.count(), 1)
+        response = self._send(caller.session_id, worker, task=None, task_label="Review")
+        self.assertEqual(response.status_code, 400)
+        # A follow-up always needs a task; its missing-task refusal precedes the label.
+        self.assertEqual(response.get_json()["error"], "'task' must be text.")
+        self.assertEqual(connection, before)
+
     def _reported_worker(self):
         caller = self._agent_pane()
         worker, connection, receipt = self._start_worker(caller)
@@ -678,7 +719,7 @@ class FollowupToolSurfaceTestCase(unittest.TestCase):
         send = _spec("send_task")["inputSchema"]
         wait = _spec("wait_for_task")["inputSchema"]
 
-        self.assertEqual(set(send["properties"]), {"pane_id", "task"})
+        self.assertEqual(set(send["properties"]), {"pane_id", "task", "task_label"})
         self.assertEqual(send["required"], ["pane_id", "task"])
         self.assertEqual(set(wait["properties"]), {"wait_seconds"})
         self.assertEqual(wait["properties"]["wait_seconds"]["maximum"], MAX_WAIT_SECONDS)

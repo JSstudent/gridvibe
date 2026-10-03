@@ -44,6 +44,7 @@ from web.agent_handoffs import (
     pane_description,
     same_machine,
     validate_task,
+    validate_task_label,
 )
 from web.agent_handoffs import handoffs as agent_handoffs
 from web.mcp_launch import LOCAL_PANE_MODE
@@ -1009,7 +1010,7 @@ def _prepare_launch_sessions(
     return prepared_sessions
 
 
-def _pop_pane_tasks(sessions_config: List[Any]) -> Tuple[List[Any], Dict[int, str]]:
+def _pop_pane_tasks(sessions_config: List[Any]) -> Tuple[List[Any], Dict[int, Tuple[str, str]]]:
     """Take each pane's ``task`` off its config, validated, before anything reads it.
 
     Popped first so the text never reaches the pane normalizer, a saved preset
@@ -1022,23 +1023,26 @@ def _pop_pane_tasks(sessions_config: List[Any]) -> Tuple[List[Any], Dict[int, st
     from web.agents import task_capable_agents, task_refusal
 
     cleaned: List[Any] = []
-    tasks: Dict[int, str] = {}
+    tasks: Dict[int, Tuple[str, str]] = {}
     # Every pane whose agent cannot take a task, named together: a launch that
     # tasked five agents and learned of one refusal at a time would take five
     # attempts to find which of them can be tasked at all.
     refused: List[str] = []
     for index, config in enumerate(sessions_config):
-        if not isinstance(config, dict) or config.get("task") is None:
-            if isinstance(config, dict) and "task" in config:
-                config = {key: value for key, value in config.items() if key != "task"}
+        if not isinstance(config, dict):
             cleaned.append(config)
             continue
         config = dict(config)
-        raw_task = config.pop("task")
+        raw_task = config.pop("task", None)
+        raw_label = config.pop("task_label", None)
         try:
-            text = validate_task(raw_task)
+            text = validate_task(raw_task) if raw_task is not None else None
+            label = validate_task_label(raw_label, text)
         except HandoffError as exc:
             raise HandoffError(f"Pane {index + 1}: {exc.message}", exc.status_code) from exc
+        if text is None:
+            cleaned.append(config)
+            continue
         mode = str(config.get("startup_mode") or config.get("initial_command_mode") or "")
         refusal = task_refusal(
             "agent" if mode == "agent" else (mode or "terminal"),
@@ -1049,7 +1053,7 @@ def _pop_pane_tasks(sessions_config: List[Any]) -> Tuple[List[Any], Dict[int, st
             refused.append(f"Pane {index + 1}: {refusal}")
             continue
         config["agent_mcp"] = True
-        tasks[index] = text
+        tasks[index] = (text, label)
         cleaned.append(config)
     if len(refused) == 1:
         raise HandoffError(refused[0])
@@ -1064,7 +1068,7 @@ def _pop_pane_tasks(sessions_config: List[Any]) -> Tuple[List[Any], Dict[int, st
 
 
 def _refuse_tasks_for_another_machine(
-    tasks: Dict[int, str],
+    tasks: Dict[int, Tuple[str, str]],
     sessions_config: List[Any],
     connection_mode: str,
     creator: Any,
@@ -1101,7 +1105,7 @@ def _refuse_tasks_for_another_machine(
 
 
 def _bind_pane_tasks(
-    tasks: Dict[int, str],
+    tasks: Dict[int, Tuple[str, str]],
     created_sessions: List[Any],
     creator_session_id: str,
     creator: Any,
@@ -1117,7 +1121,7 @@ def _bind_pane_tasks(
 
     warnings: List[str] = []
     origin = pane_description(creator)
-    for index, text in sorted(tasks.items()):
+    for index, (text, label) in sorted(tasks.items()):
         if index >= len(created_sessions):
             continue
         session = created_sessions[index]
@@ -1137,6 +1141,7 @@ def _bind_pane_tasks(
             continue
         agent_handoffs.create(
             text,
+            label=label,
             source_session_id=creator_session_id,
             session_id=session.session_id,
             **origin,

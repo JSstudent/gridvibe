@@ -2625,6 +2625,8 @@ function parseBoard(slot) {
     slot.nodes = segments(html, /<(button|div)\b([^>]*\bdata-crew-node="[^"]*"[^>]*)>/g).map(part => {
         const attributes = attributesOf(part.match[2]);
         const slots = {
+            '.dash-crew-name': countedSlot('textContent',
+                first(/<span class="dash-crew-name">([^<]*)<\/span>/, part.html)),
             '.dash-crew-line': countedSlot('textContent',
                 first(/<span class="dash-crew-line">([^<]*)<\/span>/, part.html)),
             '.dash-crew-reading': countedSlot('innerHTML',
@@ -2740,6 +2742,68 @@ class DashboardCrewBoardTestCase(DashboardDialogTestCase):
     reading, phase pill, round and age -- is written in place, so a report or a
     follow-up round never replaces a node element. The list below is never
     touched by any of it."""
+
+    def test_a_task_label_is_board_only_safe_text_and_updates_without_replacing_nodes(self):
+        result = self._run_crew(r"""
+            const firstLabel = '<img src=x onerror=evil()> & "review"';
+            fetchAnswer = crewReading([link('s1', 's2', { label: firstLabel })]);
+            fetchAnswer.workspaces[0].groups[0].panes[1].title = '<b>Parser worker</b>';
+            await refreshAgentDashboard();
+            const before = node('s2');
+            const initialName = before.slots['.dash-crew-name'].textContent;
+            const rootName = node('s1').slots['.dash-crew-name'].textContent;
+            const initial = before.slots['.dash-crew-line'].textContent;
+            const initialHtml = crewSlot().html;
+            const nodeHead = first(/<span class="dash-crew-node-head">([\s\S]*?)<\/span>\s*<span class="dash-crew-line">/, before.html);
+            const listHtml = body().innerHTML;
+            const header = head('s1').slots['.dash-crew-title-line'].textContent;
+            fetchAnswer = crewReading([link('s1', 's2', {
+                label: '<script>evil()</script>', round: 2, link_id: 'round-two'
+            })]);
+            fetchAnswer.workspaces[0].groups[0].panes[1].title = '<b>Parser worker</b>';
+            await refreshAgentDashboard();
+            const second = node('s2').slots['.dash-crew-line'].textContent;
+            const secondName = node('s2').slots['.dash-crew-name'].textContent;
+            fetchAnswer = crewReading([link('s1', 's2', { round: 3, link_id: 'round-three' })]);
+            fetchAnswer.workspaces[0].groups[0].panes[1].title = '<b>Parser worker</b>';
+            await refreshAgentDashboard();
+            const fallback = node('s2').slots['.dash-crew-line'].textContent;
+            const fallbackName = node('s2').slots['.dash-crew-name'].textContent;
+            const listUnchanged = body().innerHTML === listHtml;
+            fetchAnswer.workspaces[0].groups[0].panes[1].title = '<script>Renamed worker</script>';
+            await refreshAgentDashboard();
+            report({ initial, initialHtml, second, initialName, rootName, secondName, fallbackName,
+                nodeHead, fallback,
+                renamed: node('s2').slots['.dash-crew-name'].textContent,
+                fallbackAfterRename: node('s2').slots['.dash-crew-line'].textContent,
+                same: before === node('s2'), rebuilds: crewSlot().rebuilds,
+                listUnchanged,
+                headerUnchanged: head('s1').slots['.dash-crew-title-line'].textContent === header,
+                listHasLabel: listHtml.includes(firstLabel) || listHtml.includes('&lt;img')
+            });
+        """)
+        # The small HTML parser keeps entities; a browser decodes them into text.
+        self.assertEqual(result["initial"], '&lt;img src=x onerror=evil()&gt; &amp; &quot;review&quot;')
+        self.assertNotIn('<img src=x', result["initialHtml"])
+        self.assertIn('&lt;img src=x onerror=evil()&gt;', result["initialHtml"])
+        self.assertEqual(result["initialName"], '&lt;b&gt;Parser worker&lt;/b&gt;')
+        self.assertEqual(result["rootName"], "Claude Code")
+        self.assertIn('class="dash-agent-icon"', result["nodeHead"])
+        self.assertIn('class="dash-crew-name"', result["nodeHead"])
+        self.assertNotIn('dash-crew-line', result["nodeHead"])
+        self.assertNotIn('&lt;img', result["nodeHead"])
+        self.assertNotIn('<b>Parser worker</b>', result["initialHtml"])
+        self.assertEqual(result["secondName"], result["initialName"])
+        self.assertEqual(result["fallbackName"], result["initialName"])
+        self.assertEqual(result["renamed"], '<script>Renamed worker</script>')
+        self.assertEqual(result["second"], '<script>evil()</script>')
+        self.assertEqual(result["fallback"], "Review the parser")
+        self.assertEqual(result["fallbackAfterRename"], result["fallback"])
+        self.assertTrue(result["same"])
+        self.assertEqual(result["rebuilds"], 0)
+        self.assertTrue(result["listUnchanged"])
+        self.assertTrue(result["headerUnchanged"])
+        self.assertFalse(result["listHasLabel"])
 
     def _run_crew(self, body: str):
         return self._run_node(CREW_BOARD_STUBS + r"""

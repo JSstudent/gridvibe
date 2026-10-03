@@ -1471,7 +1471,8 @@ unless the task explicitly changes this contract.
   never the `handoff_id`, which is a capability), requester and worker
   session ids, `state`, `read`, `status`, `collected`, `handed_at`,
   `reported_at`, the end-reason *key* (never the requester-facing sentence)
-  and `round`. The task text, the receipt and the handoff id never reach it.
+  and `round`, plus the round's public `label` (an empty string when omitted).
+  The task text, the receipt and the handoff id never reach it.
   **Only links between two composed agent panes are published**
   (`compose_dashboard()`, the one place that decides it): a pane that closes,
   or stops being an agent pane, takes its links out of the next reading, so
@@ -1548,14 +1549,28 @@ unless the task explicitly changes this contract.
   never touches. Only selected roots are drawn, in selection order.
   Its key holds membership and layout — never the phase and never `link_id` —
   so a new member or a closed pane rewrites only the board slot, keeping the
-  focused node and the sideways scroll, while pills, rounds, ages, readings and
-  the crew header are written in place. List rebuilds never replace the board
-  slot, so its node focus and scroll survive changes elsewhere. Both scrollers
-  keep their positions. Every node is a `data-dashboard-action="pane"` button
+  focused node and the sideways scroll, while terminal titles, task labels,
+  pills, rounds, ages, readings and the crew header are written in place.
+  A terminal title or label change never enters this key. List rebuilds never
+  replace the board slot, so its node focus and scroll survive changes
+  elsewhere. Both scrollers keep their positions. Every node is a
+  `data-dashboard-action="pane"` button
   with its row's target attributes; only listed panes appear. The board header
   counts every member, including nested workers; a row's chip counts direct
   workers. Only selected crews' links reach the board's wire layer. Below
   `DASHBOARD_CREW_NARROW_PX` the board becomes one indented column with buses.
+- **A crew card names its pane and task on separate rows.** Its top row holds
+  the activity mark, agent icon and terminal title, using `dashboardPaneTitle()`
+  and the same display-title rule as the pane header. The title uses the agent
+  colour and contrast treatment from `agent-brand.css`, keeping exact brand
+  foregrounds legible in both themes. The second row is the worker link's
+  `label`, or `dashboardPaneLine()` when no label was supplied; an orchestrator
+  without an incoming link also uses its chat line. Both rows ellipsise within
+  the card. Task labels belong to their current round and are never inherited
+  by an unlabelled follow-up. Only this board row displays them: sidebar and
+  dialog list rows, crew headers and existing hover text keep their naming
+  rules. Initial terminal titles and labels are HTML-escaped; in-place changes
+  use `textContent`, preserving the node, focus, selection and scroll.
 - Dashboard layout must remain usable without horizontal overflow at narrow
   widths. A polling update that changes only a row's title, hover, status,
   progress, or idle age updates that row in place, each field on its own
@@ -1845,16 +1860,37 @@ in `README.md`; state the rules a change has to keep.
   Every polling page is shown a split intent's request, so the split route
   `take`s an opaque `handoff_id` once, for its own source pane, after every other
   refusal and before the append, and binds it before the connector starts. A
-  launch pops each pane's `task` before anything reads the config, so no preset,
-  snapshot or saved-session normalizer ever sees one. A task needs a live calling
-  pane on the same machine (`same_machine`: both local, or the same SSH host, user
-  and port); nothing waives that. A launch reads it off where each tasked pane is
+  launch pops each pane's `task` and `task_label` before anything reads the
+  config, so no preset, snapshot or saved-session normalizer ever sees either.
+  A task needs a live calling pane on the same machine (`same_machine`: both
+  local, or the same SSH host, user and port); nothing waives that. A launch
+  reads it off where each tasked pane is
   about to open, after the origin's connection is applied — a local origin
   supplies none, so the body's own `connection_mode` and host are what is
   checked — and refuses before the destination is resolved. A gated relaunch validates its task before any
   gate and binds it through `ShellTransitionEffects.before_start` — after every
   refusal, after the old connection closed, before the new one starts — so a
   refused relaunch leaves nothing in the store and nothing on disk.
+- **A task's optional label is public metadata for one round.** `task_label`
+  is optional on `split_pane`, `set_pane_agent`, `send_task`, and each tasked
+  `launch_panes` entry. The sending agent supplies it explicitly; GridVibe
+  neither generates one nor inherits a parent or previous round's label.
+  The sidecar's `_task_label` and the shared HTTP `validate_task_label()` in
+  `web/agent_handoffs.py` enforce one printable line, at most
+  `MAX_TASK_LABEL_CHARS = 60` Unicode code points including any surrounding
+  spaces, and at least one non-whitespace character. Wrong types, blank or
+  overlong strings, nonprintable characters (including newline and tab), and
+  a label without a task are refused before any pane or assignment changes.
+  Accepted text is kept exactly; no trimming, stripping or truncation.
+  The HTTP check sits beside task validation in the split, launch, relaunch
+  and follow-up entry points; malformed labels are checked before relaunch
+  and follow-up gates. `HandoffStore.create()` and `create_followup()` carry
+  `label` through the bind into `ResultStore.expect()` and `LINK_FIELDS`.
+  Omission, or `null` at the validation boundary, records an empty label for
+  that round; the public tool schema declares an optional string. An unlabelled
+  follow-up falls back to the chat line on the board. The label is not a field in
+  `read_handoff` or `wait_for_task`, never reaches the startup command or split
+  intent request, and is not persisted in a preset or runtime snapshot.
 - **A handoff is one brief for one agent, in memory, and logged by size.** The
   store is capped for the unbound kind and TTL-bounded above a split's worst case;
   a bound handoff waits for a connection that starts its pane's agent, is
@@ -1872,8 +1908,9 @@ in `README.md`; state the rules a change has to keep.
   still waiting (`drop_bound`), a closed pane forgets its own, and nothing is
   persisted. A pane whose agent starts without the tools is marked
   `undeliverable` and told so on its output, never its input. Log lines carry ids,
-  a character count and a delivery — never the text, never a file path — and
-  `list_panes` publishes the state from a field list, never the text or path.
+  task and label character counts and a delivery — never either text, never a
+  file path — and `list_panes` publishes the state from a field list, never the
+  text or path.
 - **A report goes back only to the agent that asked, and nobody waits for one
   that cannot come.** Every bound handoff is an assignment in
   `web/agent_results.py`, recorded by `HandoffStore` under its own lock (the

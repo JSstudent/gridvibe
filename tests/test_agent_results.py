@@ -85,6 +85,58 @@ def _rows(payload):
     return {row["session_id"]: row for row in payload["agents"]}
 
 
+class TaskLabelRoundTestCase(unittest.TestCase):
+    def test_labels_survive_binding_reporting_and_collection_but_stay_out_of_private_reads(self):
+        results = ResultStore()
+        handoffs = HandoffStore(results=results)
+        label = "Review the parser"
+        task = "Private brief: inspect token handling."
+        report = "Private result: two issues."
+        with self.assertLogs("web", level="INFO") as logs:
+            first = handoffs.create(task, label=label, source_session_id=REQUESTER)
+            handoffs.take(first, REQUESTER)
+            handoffs.bind(first, "worker")
+            handoffs.announce(first, delivery=INLINE)
+            read = handoffs.read("worker")
+            receipt = read["receipt"]
+            results.report("worker", report, None, receipt)
+            collected = results.collect(REQUESTER)
+            self.assertEqual(results.links_snapshot()[0]["label"], label)
+            handoffs.create_followup("Next task.", label="Second review", session_id="worker",
+                                     previous_handoff_id=first, source_session_id=REQUESTER)
+        joined = "\n".join(logs.output)
+        for private in (label, "Second review", task, report, receipt):
+            self.assertNotIn(private, joined)
+        self.assertIn(f"label_chars={len(label)}", joined)
+        self.assertIn(f"label_chars={len('Second review')}", joined)
+        for payload in (handoffs.public_state("worker"), read, collected):
+            self.assertNotIn(label, json.dumps(payload))
+            self.assertNotIn('"label"', json.dumps(payload))
+        link = results.links_snapshot()[0]
+        self.assertEqual((link["round"], link["label"]), (2, "Second review"))
+        self.assertEqual(set(link), set(LINK_FIELDS))
+        for private in (task, report, receipt, first):
+            self.assertNotIn(private, json.dumps(link))
+
+    def test_a_followup_does_not_inherit_a_collected_or_evicted_rounds_label(self):
+        for capacity in (1, 256):
+            with self.subTest(capacity=capacity):
+                results = ResultStore(max_assignments=capacity)
+                handoffs = HandoffStore(results=results)
+                first = handoffs.create("First.", label="First label", source_session_id=REQUESTER,
+                                        session_id="worker")
+                handoffs.announce(first, delivery=INLINE)
+                receipt = handoffs.read("worker")["receipt"]
+                results.report("worker", "Done.", None, receipt)
+                results.collect(REQUESTER)
+                if capacity == 1:
+                    results.expect("other", requester_session_id="another", worker_session_id="other")
+                handoffs.create_followup("Next.", session_id="worker", previous_handoff_id=first,
+                                         source_session_id=REQUESTER)
+                link = next(row for row in results.links_snapshot() if row["worker_session_id"] == "worker")
+                self.assertEqual((link["round"], link["label"]), (2, ""))
+
+
 class ReportAndCollectTestCase(unittest.TestCase):
     def test_a_report_is_returned_whole_once_and_then_bookmarked(self):
         store = _store_with("worker-a")

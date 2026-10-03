@@ -92,6 +92,9 @@ INLINE_TASK_MAX_CHARS = 8000
 #: it, so the filter never decides.
 MAX_TASK_BYTES = 512 * 1024
 
+#: A public dashboard line for one task round, never shortened to fit.
+MAX_TASK_LABEL_CHARS = 60
+
 #: How long a handoff recorded for a split intent waits for its split. Longer
 #: than the intent's own worst case (15 s to claim plus 20 s to report), so a
 #: slow page never finds its handle expired. Pinned by test.
@@ -226,6 +229,31 @@ def validate_task(value: Any) -> str:
     return text
 
 
+def validate_task_label(value: Any, task: Optional[str] = None) -> str:
+    """An optional public line for this task round, refused rather than repaired."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise HandoffError("'task_label' must be text.")
+    if task is None:
+        raise HandoffError("'task_label' is allowed only alongside a 'task'.")
+    if len(value) > MAX_TASK_LABEL_CHARS:
+        raise HandoffError(
+            f"'task_label' is {len(value)} characters; the maximum is "
+            f"{MAX_TASK_LABEL_CHARS}. Nothing was truncated."
+        )
+    if not value.strip():
+        raise HandoffError("'task_label' is empty. State a label, or leave 'task_label' out.")
+    for index, character in enumerate(value):
+        if not character.isprintable():
+            raise HandoffError(
+                f"'task_label' contains a nonprintable character "
+                f"({_describe_character(character)}) at character {index}. "
+                "A label must be one printable line. Nothing was removed."
+            )
+    return value
+
+
 def planned_delivery(chars: int) -> str:
     """How a task of this size is meant to travel, before any file is tried."""
     return INLINE if int(chars) <= INLINE_TASK_MAX_CHARS else FILE
@@ -338,6 +366,7 @@ class _Handoff:
     created_at: str
     created_mono: float
     phase: str
+    label: str = ""
     requester_session_id: str = ""
     session_id: str = ""
     delivery: str = ""
@@ -414,6 +443,7 @@ class HandoffStore:
         self,
         text: str,
         *,
+        label: str = "",
         source_session_id: str,
         from_title: str = "",
         from_agent: str = "",
@@ -437,6 +467,7 @@ class HandoffStore:
         record = _Handoff(
             handoff_id=handoff_id,
             text=str(text),
+            label=label,
             source_session_id=str(source_session_id or ""),
             from_title=str(from_title or ""),
             from_agent=str(from_agent or ""),
@@ -468,11 +499,12 @@ class HandoffStore:
                 cleanups = self._bind_locked(record, str(session_id))
         _run_cleanups(cleanups)
         logger.info(
-            "Handoff %s created source=%s session=%s chars=%d",
+            "Handoff %s created source=%s session=%s chars=%d label_chars=%d",
             handoff_id,
             record.source_session_id or "-",
             session_id or "-",
             record.chars,
+            len(record.label),
         )
         return handoff_id
 
@@ -560,6 +592,7 @@ class HandoffStore:
                 requester_session_id=record.requester_session_id,
                 worker_session_id=session_id,
                 continues=continues,
+                label=record.label,
             )
         return cleanups
 
@@ -652,6 +685,7 @@ class HandoffStore:
         self,
         text: str,
         *,
+        label: str = "",
         session_id: str,
         previous_handoff_id: str,
         source_session_id: str,
@@ -679,6 +713,7 @@ class HandoffStore:
         record = _Handoff(
             handoff_id=handoff_id,
             text=str(text),
+            label=label,
             source_session_id=str(source_session_id or ""),
             from_title=str(from_title or ""),
             from_agent=str(from_agent or ""),
@@ -703,11 +738,12 @@ class HandoffStore:
             self._lock.notify_all()
         _run_cleanups(cleanups)
         logger.info(
-            "Handoff %s follow-up source=%s session=%s chars=%d delivery=%s",
+            "Handoff %s follow-up source=%s session=%s chars=%d label_chars=%d delivery=%s",
             handoff_id,
             record.source_session_id or "-",
             resolved,
             record.chars,
+            len(record.label),
             delivery,
         )
         return view
