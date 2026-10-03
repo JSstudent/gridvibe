@@ -1391,6 +1391,7 @@ TERMINAL_FOCUS_SOURCE = "\n".join(
             "resetFocusedTerminal",
             "focusPaneForArrival",
             "cacheVisibleGroupView",
+            "gridLayoutClass",
             "replaceSessionPaneMode",
             "firstAttachedPlainTerminalIndex",
             "focusActiveOrDefaultTerminal",

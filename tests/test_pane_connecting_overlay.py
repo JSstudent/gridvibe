@@ -64,6 +64,8 @@ TERMINALS_SOURCE = "\n\n".join(
         "isRetryableDisconnect",
         "syncPanePlaceholder",
         "attachTerminal",
+        "gridLayoutClass",
+        "hasPaneCards",
         "initialLoad",
         "refreshStatuses",
     )
@@ -236,6 +238,8 @@ function scheduleFit() {}
 
 /* ── One pane, and whatever it is wearing ── */
 function makePane(index, { attached = true, overlay = '' } = {}) {
+    const card = element(`tc-${index}`);
+    if (!card.parentNode) element('terminalsGrid').appendChild(card);
     element(`tw-${index}`);
     element(`tcanvas-${index}`);
     terminals[index] = {
@@ -277,10 +281,13 @@ function report(value) { process.stdout.write(JSON.stringify(value)); }
 
 @unittest.skipUnless(NODE, "Node.js is required for pane overlay tests")
 class PaneOverlayTestCase(unittest.TestCase):
+    harness_stubs = HARNESS_STUBS
+    terminals_source = TERMINALS_SOURCE
+
     def _run_node(self, body: str):
         script = (
-            HARNESS_STUBS
-            + TERMINALS_SOURCE
+            self.harness_stubs
+            + self.terminals_source
             + "\n(async () => {\n"
             + body
             + "\n})().catch(error => { console.error(error); process.exit(1); });\n"

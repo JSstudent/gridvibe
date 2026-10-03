@@ -97,6 +97,14 @@ Regression history and audit narratives do not belong in this reference.
   Update the captured pane's own state even when cached; resolve its current slot
   before painting. Release captured busy DOM nodes, never replacement nodes found
   by id. A grid index alone is never identity.
+- A session view belongs either to the visible grid or to its detached cache.
+  Restoring transfers the pane cards and instances and removes the cache entry
+  without disposal or leaving session rooms; departure creates a fresh entry.
+  Reject empty or inconsistent fragments before clearing the grid. Reconciliation
+  checks that the model's cards are mounted and reloads if they are missing.
+  Compare layout classes independently of focus and broadcast decorations in
+  load, refresh, cached geometry and presentation capture; an unchanged view
+  keeps its nodes, input focus and session rooms when background tabs arrive.
 - A completed Git action on a replaced/cached pane marks its model stale without
   blanking it; restore performs the fresh load. A still-visible pane whose scope
   changed paints and loads its current scope immediately. Already-sent shell/Git

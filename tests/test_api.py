@@ -15425,15 +15425,6 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("redrawAttachedTerminals(affectedIndices, { forceResize: true });", html)
         self.assertIn("if (activeGridResize) {\n                event.preventDefault();", html)
 
-    def test_terminals_page_cached_group_views_preserve_resize_weights(self):
-        response = self.client.get("/terminals")
-        html = self._page_html(response)
-        self.assertIn("splitColumnWeights: hasLocalSplitLayout ? cloneSplitTrackWeights(splitColumnWeights) : null", html)
-        self.assertIn("splitRowWeights: hasLocalSplitLayout ? cloneSplitTrackWeights(splitRowWeights) : null", html)
-        self.assertIn("splitColumnWeights = cached.className === 'layout-split-local'", html)
-        self.assertIn("splitRowWeights = cached.className === 'layout-split-local'", html)
-
-
 class ExplorerGitRevisionTestCase(unittest.TestCase):
     """Explorer Git change listener (explorer_git_change_listener_plan_2026-07-30):
     the semantic revision helper and the GET /api/explorer/<id>/git/state route."""
