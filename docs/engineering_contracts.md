@@ -791,8 +791,17 @@ unless the task explicitly changes this contract.
 
 - The five policy modules (`explorer-git-{active,menu,search,graph,pin}.js`) stay
   DOM-free and Node-tested. Search/active/card changes paint existing controls;
-  structural graph expansion may rebuild rows. Defer watcher rebuild while focus
-  is inside the panel and preserve commit-message caret on Alt-collapse.
+  structural graph expansion may rebuild rows. The watcher defers its quiet panel
+  rebuild only during genuine interaction — active typing/IME composition, an
+  active selection, an open menu/modal/commit card, a pointer-down gesture, or
+  reading a hovered scrolled panel — never on idle retained DOM focus, so a
+  visible but unfocused workspace still applies the newest pending state while a
+  `pointercancel`/window blur/hidden page reconciles pointer and edit state, and
+  the wake on focus/visibility return performs one immediate check without
+  replaying hidden intervals. The quiet apply preserves the commit-message draft,
+  caret, selection (including `selectionDirection`) and scroll, restores caret
+  without stealing foreground focus after a blur, and preserves the
+  commit-message caret on Alt-collapse.
 - Active rows match diff identity, not path. History requires its commit, changes
   require their diff mode without a commit, and non-file views mark nothing.
   Reveal an open diff's commit once per pane/commit when loaded; later manual

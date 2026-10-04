@@ -53,9 +53,12 @@
     const EXPLORER_GIT_WATCH_BACKOFF_MS = [10000, 20000, 30000];
     const EXPLORER_GIT_WATCH_MAX_FAILURES = 5;        // then suspend
     const EXPLORER_GIT_WATCH_CHURN_LIMIT = 3;         // consecutive changes
+    const EXPLORER_GIT_WATCH_EDIT_SETTLE_MS = 800;    // bounded typing settle window
     let explorerGitWatchTimer = null;
     let explorerGitWatchRunning = false;
     let explorerGitWatchPointerDown = false;
+    let explorerGitWatchEditUntil = 0;                // genuine-edit deadline (Date.now ms)
+    let explorerGitWatchInteractionResumed = true;
 
     function explorerGitWatchBaseMs(pane) {
         return pane?._session?.mode === 'ssh'
@@ -260,6 +263,9 @@
        to (or decides about) a row that must not move, and a pointer that is
        down is a drag, a selection, or a click in progress. */
     function explorerWatchInteractionActive() {
+        if (document.visibilityState !== 'visible') {
+            return true;
+        }
         if (document.getElementById('explorer-ctx-menu')) {
             return true;
         }
@@ -282,26 +288,63 @@
         return explorerGitWatchPointerDown;
     }
 
+    /* A genuine, bounded edit in the panel: an editable control the user is
+       typing into, composing in, or holding an active selection in. Idle focus
+       — a button they tabbed to, or an input they stopped typing in — is NOT
+       editing and must not hold a pending update. The settle deadline is armed
+       only by actual input/keyboard/selection events, so it is bounded and
+       cannot be re-armed simply because focus returns to a control that stays
+       inside the panel. */
+    function explorerGitWatchTextEditingActive(panel) {
+        const active = document.activeElement;
+        if (!active || !panel.contains(active)) {
+            return false;
+        }
+        if (!active.matches || !active.matches('input, textarea, [contenteditable]')) {
+            return false;
+        }
+        if (Date.now() < explorerGitWatchEditUntil) {
+            return true;
+        }
+        // A selection the user is still making (the page has focus) is an edit;
+        // a remembered selection is not, and must not re-arm the gate when
+        // focus returns to the retained input.
+        if (explorerGitWatchInteractionResumed && document.hasFocus?.()) {
+            return typeof active.selectionStart === 'number'
+                && active.selectionStart !== active.selectionEnd;
+        }
+        return false;
+    }
+
     /* Deferral gates (plan §6.2) — postpone the apply, never drop it. A panel
        re-render replaces innerHTML wholesale, so it must not happen while the
        user is typing, composing, choosing from a menu/modal, dragging, or
-       reading a scrolled panel. */
+       reading a scrolled panel. Retained DOM focus alone is not interaction:
+       a focused persistent button (or a text control left idle between
+       keystrokes) must not hold a pending update while the page is otherwise
+       visible but not interacted with. */
     function explorerGitWatchDeferralActive(index, pane) {
         const panel = document.getElementById(`explorer-git-panel-${index}`);
         if (!panel) {
             return false;
         }
-        const active = document.activeElement;
-        if (active && panel.contains(active)) {
+        if (pane._explorerGitComposing) {
             return true;
         }
-        if (pane._explorerGitComposing) {
+        if (explorerGitWatchTextEditingActive(panel)) {
             return true;
         }
         if (explorerWatchInteractionActive()) {
             return true;
         }
-        return panel.matches(':hover') && panel.scrollTop > 0;
+        const selection = window.getSelection?.();
+        if (explorerGitWatchInteractionResumed && document.hasFocus?.()
+            && selection && !selection.isCollapsed
+            && (panel.contains(selection.anchorNode) || panel.contains(selection.focusNode))) {
+            return true;
+        }
+        return explorerGitWatchInteractionResumed && document.hasFocus?.()
+            && panel.matches(':hover') && panel.scrollTop > 0;
     }
 
     /* Viewer deferral gates. Scroll position, view mode and the search query
@@ -403,14 +446,29 @@
     }
 
     function explorerGitWatchFlushPending(index) {
+        if (document.visibilityState !== 'visible') {
+            return;
+        }
         const pane = terminals[index];
         if (!pane || !pane._explorerGitWatchPending) {
+            return;
+        }
+        const { data, scopePath, scopeKind } = pane._explorerGitWatchPending;
+        /* A deferral outlives a navigation: the pending payload belongs to the
+           scope it was fetched under, never whatever the pane is asking about by
+           the time a deferred flush runs. Under another scope it is dropped, not
+           applied — labelling old data with the new scope would make the pane
+           look loaded for a scope it has never asked the server about. */
+        if (
+            scopePath !== explorerGitRequestedScope(pane)
+            || scopeKind !== explorerGitRequestedScopeKind(pane)
+        ) {
+            pane._explorerGitWatchPending = null;
             return;
         }
         if (explorerGitWatchDeferralActive(index, pane)) {
             return;
         }
-        const { data, scopePath, scopeKind } = pane._explorerGitWatchPending;
         pane._explorerGitWatchPending = null;
         // A GridVibe Git action may have applied this exact state meanwhile.
         if (data.revision && data.revision === pane._explorerGitRevision) {
@@ -532,6 +590,9 @@
     }
 
     function explorerGitWatchFlushAllPending() {
+        if (document.visibilityState !== 'visible') {
+            return;
+        }
         for (let index = 0; index < terminals.length; index += 1) {
             explorerGitWatchFlushPending(index);
             explorerFileWatchFlushPending(index);
@@ -540,10 +601,22 @@
     }
 
     async function explorerGitWatchApplyRefresh(index, pane, sessionId) {
+        if (document.visibilityState !== 'visible') {
+            return;
+        }
         const scopePath = explorerGitRequestedScope(pane);
         const scopeKind = explorerGitRequestedScopeKind(pane);
         const data = await refreshExplorerGitRepoQuiet(index);
         if (terminals[index] !== pane || sessionIds[index] !== sessionId) {
+            return;
+        }
+        // The quiet refetch already re-checks its own scope, but a scope can
+        // move again between that check and this guard; a payload fetched under
+        // an abandoned scope must never be queued for apply.
+        if (
+            scopePath !== explorerGitRequestedScope(pane)
+            || scopeKind !== explorerGitRequestedScopeKind(pane)
+        ) {
             return;
         }
         if (!data) {
@@ -772,25 +845,85 @@
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') {
             explorerGitWatchWake();
+        } else {
+            /* A hidden page drops gesture delivery and suspends polling, so a
+               pointer-down flag or an edit deadline left set would hold a
+               pending update through the whole hidden interval and still be set
+               on return. Reconcile both as the page goes away; the wake on
+               return then only has to flush, never guess which half-finished
+               gesture was real. */
+            explorerGitWatchDeactivate();
         }
     });
     window.addEventListener('focus', explorerGitWatchWake);
     window.addEventListener('pageshow', explorerGitWatchWake);
+    /* Window deactivation is the event a retained-DOM-focus switch away fires
+       (an element keeps its focus, so no element blur). Reconcile there too:
+       the page is visible but unfocused, and a pending update must apply rather
+       than wait out a gesture the page never saw released. */
+    window.addEventListener('blur', () => {
+        explorerGitWatchDeactivate();
+        explorerGitWatchFlushAllPending();
+    });
+
+    function explorerGitWatchDeactivate() {
+        explorerGitWatchPointerDown = false;
+        explorerGitWatchEditUntil = 0;
+        // Focus return alone does not make remembered selections or hover a
+        // new interaction. Actual input resumes their protection.
+        explorerGitWatchInteractionResumed = false;
+        terminals.forEach(pane => {
+            if (pane) {
+                pane._explorerGitComposing = false;
+            }
+        });
+    }
+
+    /* Genuine editing arms a bounded settle window: an actual value change, a
+       keystroke (cursor/selection movement that changes no value), or a
+       selection change inside an editable control. Re-rendering the panel
+       takes the caret and the selection, so the apply stays deferred only while
+       the user is demonstrably still editing — never merely because focus sits
+       in a control. */
+    function explorerGitWatchNoteEdit(event) {
+        const target = event?.target;
+        if (target?.matches?.('input, textarea, [contenteditable]')) {
+            explorerGitWatchInteractionResumed = true;
+            explorerGitWatchEditUntil = Date.now() + EXPLORER_GIT_WATCH_EDIT_SETTLE_MS;
+        }
+    }
 
     /* Deferred applies flush when the gate that held them clears: pointer
        release (splitter drag, selection, click-in-progress, modal clicks),
-       focus leaving the panel, IME composition end. */
+       the edit settle elapsing, IME composition end, or window deactivation. */
     document.addEventListener('pointerdown', () => {
+        explorerGitWatchInteractionResumed = true;
         explorerGitWatchPointerDown = true;
     }, true);
     document.addEventListener('pointerup', () => {
         explorerGitWatchPointerDown = false;
         explorerGitWatchFlushAllPending();
     }, true);
-    document.addEventListener('blur', () => {
+    document.addEventListener('pointercancel', () => {
+        explorerGitWatchPointerDown = false;
         explorerGitWatchFlushAllPending();
     }, true);
+    document.addEventListener('blur', () => {
+        // An element can blur during pointerdown's default focus change. Keep
+        // that gesture intact until pointerup/cancel or actual window blur.
+        explorerGitWatchEditUntil = 0;
+        explorerGitWatchFlushAllPending();
+    }, true);
+    document.addEventListener('input', explorerGitWatchNoteEdit, true);
+    document.addEventListener('keydown', explorerGitWatchNoteEdit, true);
+    document.addEventListener('select', explorerGitWatchNoteEdit, true);
+    for (const type of ['pointermove', 'wheel']) {
+        document.addEventListener(type, () => {
+            explorerGitWatchInteractionResumed = true;
+        }, { capture: true, passive: true });
+    }
     document.addEventListener('compositionstart', event => {
+        explorerGitWatchInteractionResumed = true;
         const pane = explorerGitWatchPaneForTextarea(event.target);
         if (pane) {
             pane._explorerGitComposing = true;
@@ -805,12 +938,16 @@
     }, true);
 
     function explorerGitWatchPaneForTextarea(target) {
-        const id = typeof target?.id === 'string' ? target.id : '';
-        const match = id.match(/^explorer-git-commit-message-(\d+)$/);
-        if (!match) {
+        if (!target?.matches?.('input, textarea, [contenteditable]')) {
             return null;
         }
-        return terminals[Number(match[1])] || null;
+        for (let index = 0; index < terminals.length; index += 1) {
+            const panel = document.getElementById(`explorer-git-panel-${index}`);
+            if (panel?.contains(target)) {
+                return terminals[index] || null;
+            }
+        }
+        return null;
     }
 
     scheduleExplorerGitWatch(EXPLORER_GIT_WATCH_BASE_MS);

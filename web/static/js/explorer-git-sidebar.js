@@ -1555,6 +1555,7 @@ ${explorerGitRequestedScopeKind(pane)}`;
                 <div class="explorer-git-commit-search" ${commitSearch.open ? '' : 'hidden'}>
                     <input
                         type="search"
+                        id="explorer-git-commit-search-${index}"
                         class="explorer-search-input"
                         data-explorer-git-commit-search-input
                         placeholder="Search commits"
@@ -2084,9 +2085,21 @@ ${explorerGitRequestedScopeKind(pane)}`;
         }
         const scrollTop = panel.scrollTop;
         const active = document.activeElement;
+        const documentFocused = typeof document.hasFocus !== 'function' || document.hasFocus();
         const focusState = active && panel.contains(active) && typeof active.selectionStart === 'number'
-            ? { id: active.id, start: active.selectionStart, end: active.selectionEnd }
-            : null;
+            ? {
+                id: active.id,
+                start: active.selectionStart,
+                end: active.selectionEnd,
+                direction: typeof active.selectionDirection === 'string'
+                    ? active.selectionDirection
+                    : 'none',
+                documentFocused
+            }
+            : (!documentFocused ? pane._explorerGitQuietCaret : null);
+        // Further background updates can arrive after the focused node has
+        // been replaced. Keep its caret until the document becomes active.
+        pane._explorerGitQuietCaret = documentFocused ? null : focusState;
         pane._explorerGitRepo = data;
         pane._explorerGitRepoLoaded = true;
         explorerGitNoteLoadedScope(
@@ -2105,9 +2118,21 @@ ${explorerGitRequestedScopeKind(pane)}`;
         if (focusState && focusState.id) {
             const target = panel.querySelector(`#${CSS.escape(focusState.id)}`);
             if (target) {
-                target.focus();
+                /* Re-rendering the panel replaces the node the caret lived in,
+                   so the caret is restored on the replacement. That is a DOM
+                   selection restoration, not a focus grant: after the window
+                   has blurred, a quiet apply still lands, but re-focusing the
+                   control would steal foreground focus into a window the user
+                   has left. Only an element that was focused while the document
+                   still is gets actual focus; the caret position is set either
+                   way so nothing is lost when focus returns. */
+                if (focusState.documentFocused) {
+                    target.focus({ preventScroll: true });
+                }
                 try {
-                    target.setSelectionRange(focusState.start, focusState.end);
+                    target.setSelectionRange(
+                        focusState.start, focusState.end, focusState.direction
+                    );
                 } catch (error) {
                     /* The replacement node is not selectable; focus is enough. */
                 }
