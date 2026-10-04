@@ -244,6 +244,7 @@ const closeActions = dashboardClose.create({
     refresh: () => { closeCalls.refreshes += 1; }
 });
 const sidebar = GridVibeDashboardSidebar.create({
+    crewHighlight: GridVibeAgentCrews.highlightState,
     getCloseActions: () => closeActions,
     onBridgeReady: handler => windowListeners.addEventListener('pywebviewready', handler),
     addWindowListener: (type, handler) => windowListeners.addEventListener(type, handler),
@@ -1688,7 +1689,7 @@ class DashboardSidebarCrewTestCase(DashboardSidebarNodeTestCase):
 
     Everything a crew adds is laid on rows already drawn: the lane gutter is a
     class on the panel, the orchestrator's chip is written into its row's own
-    slot, a worker's hover gains one line, and hovering or focusing a crew's
+    slot, a worker's hover gains one line, and hovering a crew's
     row highlights it. None of it is in the markup a reading is compared by, so
     a report, a phase change or a new round never rebuilds a row. Four panes:
     an orchestrator (`s1`), two agents (`s2`, `s3`) and one more (`s4`)."""
@@ -1712,6 +1713,76 @@ class DashboardSidebarCrewTestCase(DashboardSidebarNodeTestCase):
                 .map(row => row.dataset.sessionId);
         }
     """
+
+    def test_removed_hover_element_clears_even_when_its_crew_survives(self):
+        result = self._run_node(self.READING + """
+            sidebarShown(); sidebar.wireRows();
+            fetchAnswer = crewReading([link('s1', 's2'), link('s1', 's3')]);
+            await sidebar.refresh();
+            body().fire('pointerover', { target: drawnRow('s2') });
+            const before = members();
+            fetchAnswer.workspaces[0].groups[0].panes.splice(1, 1);
+            fetchAnswer.links.splice(0, 1);
+            await sidebar.refresh(); // no pointerleave from the removed element
+            const removed = members();
+            fetchAnswer = crewReading([link('s1', 's2'), link('s1', 's3')]);
+            await sidebar.refresh();
+            report({ before, removed, returned: members() });
+        """)
+        self.assertEqual(result["before"], ["s1", "s2", "s3"])
+        self.assertEqual(result["removed"], [])
+        self.assertEqual(result["returned"], [])
+
+    def test_focus_does_not_highlight_a_crew_and_pointer_out_clears_it(self):
+        result = self._run_node(self.READING + """
+            sidebarShown(); sidebar.wireRows();
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await sidebar.refresh();
+            body().fire('focusin', { target: drawnRow('s2') });
+            const before = members();
+            focusIsInside = true;
+            body().fire('focusout', { relatedTarget: { closest: () => null } });
+            const heading = members();
+            body().fire('pointerover', { target: drawnRow('s1') });
+            body().fire('pointerout', { relatedTarget: null });
+            report({ before, heading, out: members() });
+        """)
+        self.assertEqual(result["before"], [])
+        self.assertEqual(result["heading"], [])
+        self.assertEqual(result["out"], [])
+
+    def test_shared_board_click_highlights_docked_rows_and_close_clears_it(self):
+        result = self._run_node(self.READING + """
+            sidebarShown(); sidebar.wireRows();
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            await sidebar.refresh();
+            GridVibeAgentCrews.highlightState.set('board-click', 's3', 'click', 's4');
+            const click = members();
+            body().fire('pointerover', { target: drawnRow('s2') });
+            const hovered = GridVibeAgentCrews.highlightState.get();
+            body().fire('pointerleave', {});
+            const left = members();
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await sidebar.refresh();
+            report({ click, hovered, left, closed: members(), state: GridVibeAgentCrews.highlightState.get() });
+        """)
+        self.assertEqual(result["click"], ["s3", "s4"])
+        self.assertEqual(result["hovered"], "s1")
+        self.assertEqual(result["left"], ["s3", "s4"])
+        self.assertEqual(result["closed"], [])
+        self.assertEqual(result["state"], "")
+
+    def test_new_wire_layer_inherits_an_existing_board_click(self):
+        result = self._run_node(self.READING + """
+            sidebarShown();
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            GridVibeAgentCrews.highlightState.set('board-click', 's3', 'click', 's4');
+            await sidebar.refresh();
+            report({ state: GridVibeAgentCrews.highlightState.get(), members: members(), wire: wireCalls.highlights.at(-1) });
+        """)
+        self.assertEqual(result["state"], "s3")
+        self.assertEqual(result["members"], ["s3", "s4"])
+        self.assertEqual(result["wire"], "s3")
 
     def test_the_gutter_opens_only_while_there_is_a_crew(self):
         result = self._run_node(
@@ -1857,7 +1928,7 @@ class DashboardSidebarCrewTestCase(DashboardSidebarNodeTestCase):
         # The orchestrator's own line is read again on every reading.
         self.assertIn("Working for Claude Code · Ship it · round 2", result["renamed"])
 
-    def test_hover_or_focus_highlights_one_crew_and_the_input_ring_stays(self):
+    def test_only_hover_highlights_a_crew_and_the_input_ring_stays(self):
         """Two crews. The highlighted one's rows are members, the panel says a
         crew is highlighted, the wires are told which, and the row being typed
         into keeps its ring whichever crew is lit. A reading that rebuilds the
@@ -1903,10 +1974,10 @@ class DashboardSidebarCrewTestCase(DashboardSidebarNodeTestCase):
         self.assertFalse(result["left"]["panel"])
         self.assertEqual(result["left"]["members"], [])
         self.assertEqual(result["left"]["wires"], "")
-        self.assertEqual(result["focused"]["members"], ["s3", "s4"])
-        self.assertEqual(result["focused"]["wires"], "s3")
+        self.assertEqual(result["focused"]["members"], [])
+        self.assertEqual(result["focused"]["wires"], "")
         self.assertEqual(result["pointerWins"], ["s1", "s2"])
-        self.assertEqual(result["backToFocus"], ["s3", "s4"])
+        self.assertEqual(result["backToFocus"], [])
         self.assertFalse(result["cleared"]["panel"])
         self.assertEqual(result["cleared"]["members"], [])
         self.assertFalse(result["inMarkup"])

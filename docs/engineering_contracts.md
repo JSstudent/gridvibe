@@ -1260,7 +1260,7 @@ unless the task explicitly changes this contract.
   later element wins.
 - **The dialog uses the docked sidebar's list with an optional crew window.**
   `dashboard-sidebar.js` supplies a second controller instance with its own
-  body and shell, but the same renderer, in-place decorations, hover/focus
+  body and shell, but the same renderer, in-place decorations, shared crew
   highlight and lane wire layer. The dialog supplies the snapshot from its
   existing poll; the list instance neither polls nor persists sidebar state.
   The list shows workspace bands, session cards, agent rows and close actions;
@@ -1269,17 +1269,20 @@ unless the task explicitly changes this contract.
 - **Crew selection is a dialog-only gesture.** Right-clicking an orchestrator
   or worker row toggles its root crew in the board window. ContextMenu and
   Shift+F10 on a focused crew row do the same; only crew rows suppress the
-  native context menu. The hover and accessible text explain the gesture and
-  whether the crew is shown, and selected rows carry `is-crew-selected` in
+  native context menu. Each diagram's × hides that crew through the same set;
+  its agents remain running. The hover and accessible text explain the gesture
+  and whether the crew is shown, and selected rows carry `is-crew-selected` in
   place. Selection is an insertion-ordered, in-memory set for the page's dialog
   lifetime, retained across dismissal and reopen. A root absent from the next
   reading is removed automatically; returning links do not reselect it.
   The first selection shows the crew window and the last removal hides it.
   The docked sidebar keeps its ordinary context menu and has no crew toggle.
 - **The dialog is capped at 75% of its window in both dimensions.** With no
-  selected crew it is a compact list column. With selections it grows to the
-  cap; from 1000px window width the list is on the left and the crew window
-  takes the remaining width on the right. Below that width the crew window
+  selected crew it is a compact list column. From 1000px window width the list
+  is on the left and the crew window is on the right; the dialog width follows
+  the deepest open diagram, including frame padding, borders and scrollbar
+  allowance, up to the cap. Each diagram fits its own live depth, so removing
+  the deepest branch reduces its width. Below that window width the crew window
   stacks under the list; both scroll within the cap without page overflow.
   Its button and header mark use `/docs/images/crew.ico`, compensating for its
   114px ink width on a 128px canvas. The docked logo and handle marks are unchanged.
@@ -1571,6 +1574,27 @@ unless the task explicitly changes this contract.
   dialog list rows, crew headers and existing hover text keep their naming
   rules. Initial terminal titles and labels are HTML-escaped; in-place changes
   use `textContent`, preserving the node, focus, selection and scroll.
+  Session, phase pill, round and age share one non-wrapping metadata row; the
+  session name ellipsises with its full name in a hover, leaving the other
+  values visible. The frame's coloured status bars sit below its heading,
+  aligned on the left, with its hide button at the upper right.
+- **Crew highlighting belongs to the page, shared by both lists and the board.**
+  `agent-crews.js` owns `highlightState`. Hovering a pane row highlights its
+  root crew; pointer leave clears that temporary source and restores any
+  retained graph highlight. Row focus never selects a crew. Clicking empty
+  space in a diagram toggles its retained highlight; Enter or Space on the
+  frame itself does the same. Tile hover and focus affect only that tile, and
+  tile clicks retain their pane-navigation behavior. Opening another diagram
+  clears the prior graph highlight without hiding either diagram. Hiding the
+  highlighted diagram clears its highlight, including when focus returns to
+  its sidebar row; dismissing the dialog retains a selected graph's highlight.
+  Highlighted crews share their row and wire decorations; other drawn frames
+  dim only when the highlighted root is present on the board. Pane navigation
+  from a list, or clicking empty dashboard-body space outside a frame, clears
+  the retained graph highlight. Rebuilding a list clears its transient pointer
+  source before replacing rows; window blur or document hiding clears transient
+  sources. Snapshot reconciliation
+  drops removed roots and pane anchors; an older snapshot cannot revive them.
 - Dashboard layout must remain usable without horizontal overflow at narrow
   widths. A polling update that changes only a row's title, hover, status,
   progress, or idle age updates that row in place, each field on its own

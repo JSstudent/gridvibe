@@ -2644,11 +2644,13 @@ function parseBoard(slot) {
             dataset: datasetOf(attributes),
             title: attributes.title || '',
             html: part.html,
+            classList: fakeClassList(),
+            closest(selector) { return selector === '[data-crew-node]' || selector === '[data-dashboard-action]' ? this : null; },
             slots,
             querySelector: selector => slots[selector] || null
         };
     });
-    slot.heads = segments(html, /<div class="dash-crew" data-crew-root="([^"]*)">/g).map(part => {
+    slot.heads = segments(html, /<div class="dash-crew" data-crew-root="([^"]*)"[^>]*>/g).map(part => {
         const slots = {
             '.dash-crew-title-line': countedSlot('textContent',
                 first(/<span class="dash-crew-title-line">([^<]*)<\/span>/, part.html)),
@@ -2657,14 +2659,17 @@ function parseBoard(slot) {
             '.dash-crew-segments': countedSlot('innerHTML',
                 first(/<span class="dash-crew-segments" aria-hidden="true">([\s\S]*?)<\/span>/, part.html))
         };
-        return { dataset: { crewRoot: part.match[1] }, slots, querySelector: selector => slots[selector] || null };
+        return { dataset: { crewRoot: part.match[1], dashboardKey: 'crew-frame:' + part.match[1] },
+            classList: fakeClassList(), slots,
+            closest(selector) { return selector === '[data-crew-root]' ? this : null; },
+            querySelector: selector => slots[selector] || null };
     });
 }
 
 /* The slot the module writes the board into. A full render makes a new one; a
    board-only rebuild writes this one's `innerHTML`. */
 function makeCrewSlot(html) {
-    const slot = { html, rebuilds: 0, scrollTop: 0, contains: () => false };
+    const slot = { html, rebuilds: 0, scrollTop: 0, classList: fakeClassList(), contains: () => false };
     let populated = Boolean(html.trim());
     Object.defineProperty(slot, 'innerHTML', {
         get() { return this.html; },
@@ -3278,6 +3283,268 @@ class DashboardSelectedCrewsTestCase(DashboardDialogTestCase):
     def _run_crew(self, body: str):
         return self._run_node(CREW_BOARD_STUBS + "\ndashboardShown();\n" + body)
 
+    def test_opening_a_crew_clears_the_sidebar_hover_and_focus_highlight(self):
+        result = self._run_crew("""
+            wireAgentDashboard();
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            listBody.fire('pointerover', { target: listRow('s2') });
+            listBody.fire('focusin', { target: listRow('s2') });
+            const before = GridVibeAgentCrews.highlightState.get();
+            listBody.fire('contextmenu', { target: listRow('s2'), preventDefault() {} });
+            const opened = { state: GridVibeAgentCrews.highlightState.get(),
+                frame: head('s1').classList.contains('is-crew-member'),
+                list: listRow('s2').classList.contains('is-crew-member') };
+            fetchAnswer = crewReading([link('s1', 's2', { round: 2 })]);
+            await refreshAgentDashboard();
+            const refreshed = GridVibeAgentCrews.highlightState.get();
+            body().fire('click', { target: head('s1'), preventDefault() {} });
+            report({ before, opened, refreshed, clicked: GridVibeAgentCrews.highlightState.get() });
+        """)
+        self.assertEqual(result["before"], "s1")
+        self.assertEqual(result["opened"], {"state": "", "frame": False, "list": False})
+        self.assertEqual(result["refreshed"], "")
+        self.assertEqual(result["clicked"], "s1")
+
+    def test_dialog_width_tracks_the_deepest_open_crew(self):
+        result = self._run_crew("""
+            const values = {};
+            body().parentElement = { classList: fakeClassList(),
+                style: { setProperty(name, value) { values[name] = value; } } };
+            const depth = () => values['--dash-crew-depths'];
+            fetchAnswer = crewReading([link('s1', 's2'), link('s2', 's5'), link('s3', 's4')]);
+            await refreshAgentDashboard();
+            toggleAgentDashboardCrew('s3');
+            const shallow = depth();
+            toggleAgentDashboardCrew('s1');
+            const deep = depth();
+            toggleAgentDashboardCrew('s1');
+            const afterHide = depth();
+            toggleAgentDashboardCrew('s1');
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            await refreshAgentDashboard();
+            report({ shallow, deep, afterHide, afterRemoval: depth() });
+        """)
+        self.assertEqual(result, {"shallow": "2", "deep": "3", "afterHide": "2", "afterRemoval": "2"})
+
+    def test_opening_another_graph_clears_the_existing_highlight_and_keeps_both_open(self):
+        result = self._run_crew("""
+            wireAgentDashboard();
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            await refreshAgentDashboard(); toggleAgentDashboardCrew('s1');
+            body().fire('click', { target: head('s1'), preventDefault() {} });
+            const before = GridVibeAgentCrews.highlightState.get();
+            listBody.fire('contextmenu', { target: listRow('s4'), preventDefault() {} });
+            const cleared = { state: GridVibeAgentCrews.highlightState.get(),
+                highlighted: crewSlot().heads.filter(frame => frame.classList.contains('is-crew-member')).map(frame => frame.dataset.crewRoot),
+                members: listBody.querySelectorAll().filter(row => row.classList.contains('is-crew-member')).map(row => row.dataset.sessionId) };
+            await refreshAgentDashboard();
+            listBody.fire('pointerleave', {});
+            report({ before, cleared, roots: crewSlot().heads.map(frame => frame.dataset.crewRoot),
+                afterPoll: GridVibeAgentCrews.highlightState.get() });
+        """)
+        self.assertEqual(result["before"], "s1")
+        self.assertEqual(result["cleared"], {"state": "", "highlighted": [], "members": []})
+        self.assertEqual(result["roots"], ["s1", "s3"])
+        self.assertEqual(result["afterPoll"], "")
+
+    def test_removing_the_deepest_branch_shrinks_the_diagram_depth(self):
+        result = self._run_crew(r"""
+            fetchAnswer = crewReading([link('s1', 's2'), link('s2', 's3')]);
+            await refreshAgentDashboard(); toggleAgentDashboardCrew('s1');
+            const depth = () => Number(/--dash-crew-depths:(\d+)/.exec(crewSlot().html)[1]);
+            const nested = depth();
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            fetchAnswer.workspaces[0].groups[0].panes = fetchAnswer.workspaces[0].groups[0].panes.filter(pane => pane.session_id !== 's3');
+            await refreshAgentDashboard();
+            report({ nested, compact: depth(), nodes: nodes(), heads: crewSlot().heads.length,
+                barsBelowTitle: crewSlot().html.indexOf('dash-crew-segments') > crewSlot().html.indexOf('dash-crew-title-line'),
+                controls: [...crewSlot().html.matchAll(/data-dashboard-action="([^"]*)"/g)].map(match => match[1]) });
+        """)
+        self.assertEqual(result["nested"], 3)
+        self.assertEqual(result["compact"], 2)
+        self.assertEqual(result["nodes"], ["s1", "s2"])
+        self.assertEqual(result["heads"], 1)
+        self.assertTrue(result["barsBelowTitle"])
+        self.assertEqual(result["controls"], ["hide-crew", "pane", "pane"])
+
+    def test_an_unshown_crew_does_not_dim_every_board_and_list_navigation_clears_click(self):
+        result = self._run_crew("""
+            wireAgentDashboard();
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            await refreshAgentDashboard(); toggleAgentDashboardCrew('s3');
+            listBody.fire('pointerover', { target: listRow('s2') });
+            const unshown = crewSlot().classList.contains('is-crew-highlight');
+            listBody.fire('pointerleave', {});
+            body().fire('click', { target: head('s3'), preventDefault() {} });
+            await settle();
+            const clicked = GridVibeAgentCrews.highlightState.get();
+            listBody.fire('click', { target: listRow('s2'), preventDefault() {} });
+            await settle();
+            listBody.fire('pointerleave', {});
+            report({ unshown, clicked, cleared: GridVibeAgentCrews.highlightState.get() });
+        """)
+        self.assertFalse(result["unshown"])
+        self.assertEqual(result["clicked"], "s3")
+        self.assertEqual(result["cleared"], "")
+
+    def test_refocusing_a_row_after_rebuild_does_not_select_its_crew(self):
+        result = self._run_crew("""
+            fetchAnswer = crewReading([]);
+            await refreshAgentDashboard();
+            focusIsInside = true;
+            focusTarget = listRow('s2');
+            focusTarget.focus = function () { document.activeElement = this; };
+            document.activeElement = focusTarget;
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            fetchAnswer.workspaces[0].groups[0].name = 'Renamed session';
+            await refreshAgentDashboard();
+            report({ state: GridVibeAgentCrews.highlightState.get(), focused: listRow('s2').classList.contains('is-crew-member') });
+        """)
+        self.assertEqual(result["state"], "")
+        self.assertFalse(result["focused"])
+
+    def test_frame_click_selects_the_crew_and_tile_hover_keeps_that_selection(self):
+        result = self._run_crew("""
+            wireAgentDashboard();
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            await refreshAgentDashboard();
+            toggleAgentDashboardCrew('s1'); toggleAgentDashboardCrew('s3');
+            const members = () => listBody.querySelectorAll().filter(row => row.classList.contains('is-crew-member')).map(row => row.dataset.sessionId);
+            listBody.fire('pointerover', { target: listRow('s2') });
+            const listToBoard = head('s1').classList.contains('is-crew-member');
+            listBody.fire('pointerleave', {});
+            body().fire('pointerover', { target: node('s4') });
+            const beforeClick = members();
+            body().fire('click', { target: head('s3'), preventDefault() {} });
+            const boardToList = members();
+            for (const id of ['s1', 's2', 's3', 's4']) {
+                body().fire('pointerover', { target: node(id) });
+                body().fire('focusin', { target: node(id) });
+                body().fire('pointerout', { target: node(id), relatedTarget: null });
+            }
+            const afterMoving = members();
+            body().fire('click', { target: head('s3'), preventDefault() {} });
+            report({ listToBoard, beforeClick, boardToList, afterMoving, toggled: members(), opened: calls.openWorkspaceWindow });
+        """)
+        self.assertTrue(result["listToBoard"])
+        self.assertEqual(result["beforeClick"], [])
+        self.assertEqual(result["boardToList"], ["s3", "s4"])
+        self.assertEqual(result["afterMoving"], ["s3", "s4"])
+        self.assertEqual(result["toggled"], [])
+        self.assertEqual(result["opened"], [])
+
+    def test_frame_highlight_survives_dialog_dismissal_and_clears_when_crew_disappears(self):
+        result = self._run_crew("""
+            wireAgentDashboard();
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard(); toggleAgentDashboardCrew('s1');
+            body().fire('click', { target: head('s1'), preventDefault() {} });
+            closeAgentDashboardDialog();
+            const clicked = GridVibeAgentCrews.highlightState.get();
+            dashboardShown();
+            fetchAnswer = crewReading([]);
+            await refreshAgentDashboard();
+            report({ clicked, closed: GridVibeAgentCrews.highlightState.get(), nodes: nodes() });
+        """)
+        self.assertEqual(result["clicked"], "s1")
+        self.assertEqual(result["closed"], "")
+        self.assertEqual(result["nodes"], [])
+
+    def test_tile_click_still_navigates_without_selecting_its_crew(self):
+        result = self._run_crew("""
+            wireAgentDashboard();
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            await refreshAgentDashboard();
+            toggleAgentDashboardCrew('s1'); toggleAgentDashboardCrew('s3');
+            body().fire('click', { target: head('s3'), preventDefault() {} });
+            body().fire('click', { target: node('s2'), preventDefault() {} });
+            await settle();
+            report({ selected: GridVibeAgentCrews.highlightState.get(), targets: calls.focusTargets });
+        """)
+        self.assertEqual(result["selected"], "s3")
+        self.assertEqual(result["targets"][0]["options"], {"groupId": "g1", "sessionId": "s2"})
+
+    def test_board_close_hides_only_its_crew_without_closing_agents_or_navigating(self):
+        result = self._run_crew("""
+            wireAgentDashboard();
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            await refreshAgentDashboard();
+            toggleAgentDashboardCrew('s1'); toggleAgentDashboardCrew('s3');
+            body().fire('click', { target: head('s1'), preventDefault() {} });
+            const match = /<button[^>]*class="dash-session-close dash-crew-close"([^>]*data-crew-id="s1"[^>]*)>/.exec(crewSlot().html);
+            const attrs = attributesOf(match[1]);
+            const close = { dataset: datasetOf(attrs) };
+            close.closest = selector => selector === '[data-dashboard-action]' ? close : null;
+            const ran = [];
+            window.GridVibeDashboardClose = { handles: () => true, run: (...args) => ran.push(args) };
+            body().fire('click', { target: close, preventDefault() {} });
+            await settle();
+            const afterOne = { nodes: nodes(), state: GridVibeAgentCrews.highlightState.get(), agents: sectionCounts().agents };
+            body().fire('click', { target: { closest: () => ({ dataset: { dashboardAction: 'hide-crew', crewId: 's3' } }) }, preventDefault() {} });
+            const empty = crewSlot().hidden;
+            toggleAgentDashboardCrew('s1');
+            report({ ran, opened: calls.openWorkspaceWindow, up: dialogOpen(), label: attrs['aria-label'], afterOne, empty, reopened: nodes() });
+        """)
+        self.assertEqual(result["ran"], [])
+        self.assertEqual(result["opened"], [])
+        self.assertTrue(result["up"])
+        self.assertEqual(result["label"], "Hide this crew diagram")
+        self.assertEqual(result["afterOne"], {"nodes": ["s3", "s4"], "state": "", "agents": 5})
+        self.assertTrue(result["empty"])
+        self.assertEqual(result["reopened"], ["s1", "s2"])
+
+    def test_closing_a_focused_graph_clears_its_sidebar_highlight(self):
+        result = self._run_crew("""
+            wireAgentDashboard();
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            await refreshAgentDashboard();
+            toggleAgentDashboardCrew('s1'); toggleAgentDashboardCrew('s3');
+            const members = () => listBody.querySelectorAll().filter(row => row.classList.contains('is-crew-member')).map(row => row.dataset.sessionId);
+            body().fire('click', { target: head('s1'), preventDefault() {} });
+            const before = members();
+            const row = listRow('s1');
+            row.focus = function () {
+                document.activeElement = this;
+                listBody.fire('focusin', { target: this });
+            };
+            const close = { dataset: { dashboardAction: 'hide-crew', crewId: 's1',
+                sessionId: 's1', dashboardKey: 'hide-crew:s1' } };
+            close.closest = selector => selector === '[data-dashboard-action]' ? close : null;
+            crewSlot().contains = element => element === close;
+            document.activeElement = close;
+            body().fire('click', { target: close, preventDefault() {} });
+            const afterClose = members();
+            const focusReturned = document.activeElement === row;
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            await refreshAgentDashboard();
+            const afterPoll = members();
+            listBody.fire('pointerover', { target: row });
+            const hovered = members();
+            listBody.fire('pointerleave', {});
+            report({ before, afterClose, focusReturned, afterPoll, hovered, left: members() });
+        """)
+        self.assertEqual(result["before"], ["s1", "s2"])
+        self.assertTrue(result["focusReturned"])
+        self.assertEqual(result["afterClose"], [])
+        self.assertEqual(result["afterPoll"], [])
+        self.assertEqual(result["hovered"], ["s1", "s2"])
+        self.assertEqual(result["left"], [])
+
+    def test_crew_frame_keyboard_selects_without_activating_nested_tiles(self):
+        result = self._run_crew("""
+            wireAgentDashboard();
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard(); toggleAgentDashboardCrew('s1');
+            let prevented = 0;
+            body().fire('keydown', { target: head('s1'), key: 'Enter', preventDefault() { prevented++; } });
+            const selected = GridVibeAgentCrews.highlightState.get();
+            body().fire('keydown', { target: node('s2'), key: 'Enter', preventDefault() { prevented++; } });
+            body().fire('keydown', { target: head('s1'), key: ' ', preventDefault() { prevented++; } });
+            report({ selected, cleared: GridVibeAgentCrews.highlightState.get(), prevented });
+        """)
+        self.assertEqual(result, {"selected": "s1", "cleared": "", "prevented": 2})
+
     def test_list_click_routes_once_and_list_wires_pause_with_the_dialog(self):
         result = self._run_crew("""
             wireAgentDashboard();
@@ -3484,6 +3751,10 @@ class DashboardCrewBoardStylingTestCase(unittest.TestCase):
         wide = re.search(r"@media \(min-width: (\d+)px\) \{(.*?)\n\}\n", css, flags=re.S)
         self.assertIsNotNone(wide)
         block = wide.group(2)
+        self.assertIn("width: min(75vw, calc(", block)
+        self.assertIn("var(--dash-crew-depths, 2)", block)
+        self.assertIn("var(--dash-crew-column)", block)
+        self.assertIn("var(--dash-crew-column-gap)", block)
         # The list stays on the left; the selected boards take the remainder.
         self.assertIn(".dash-dialog.has-crews > .dash-body", block)
         self.assertIn("grid-template-columns:", block)

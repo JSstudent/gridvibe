@@ -49,6 +49,8 @@
    `max-height: 100%` is what keeps that fixed height inside the shell's own
    padding on a very short window. */
 .dash-dialog {
+    --dash-crew-column: 180px;
+    --dash-crew-column-gap: 36px;
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
@@ -67,11 +69,8 @@
     font-size: 14px;
 }
 
-/* While a crew is on the board the dialog grows to three quarters of the window
-   it opened in, in width and in height, and no further: a crew is a picture,
-   and one that has to be scrolled to be seen whole is not one, but a dialog
-   that covers the whole window is more than the picture needs. The board
-   scrolls inside it for a crew that is still larger. */
+/* Crew boards stay within three quarters of their window. Wide windows size
+   the dialog to the deepest open diagram instead of leaving empty columns. */
 .dash-dialog.has-crews {
     width: 75vw;
     height: 75vh;
@@ -875,6 +874,12 @@
 .dash-crews-title { margin: 0; }
 
 @media (min-width: 1000px) {
+    .dash-dialog.has-crews {
+        /* List, frame padding, borders and scrollbars plus the diagram. */
+        width: min(75vw, calc(402px + var(--dash-crew-depths, 2) * var(--dash-crew-column)
+            + (var(--dash-crew-depths, 2) - 1) * var(--dash-crew-column-gap)));
+    }
+
     .dash-dialog.has-crews > .dash-body {
         grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
         grid-template-rows: minmax(0, 1fr);
@@ -903,10 +908,14 @@
     flex-direction: column;
     gap: 10px;
     width: max-content;
-    min-width: 100%;
+    max-width: calc(26px + var(--dash-crew-depths, 1) * var(--dash-crew-column)
+        + (var(--dash-crew-depths, 1) - 1) * var(--dash-crew-column-gap));
+    min-width: 0;
+    align-self: flex-start;
+    position: relative;
     padding: 10px 12px 14px;
     border: 1px solid var(--gv-dialog-border);
-    border-radius: 12px;
+    border-radius: var(--gv-radius-m);
     background: var(--gv-dialog-panel-soft);
 }
 
@@ -921,6 +930,7 @@
     gap: 10px;
     flex-wrap: wrap;
     min-width: 0;
+    padding-right: 24px;
 }
 
 .dash-crew-title {
@@ -948,7 +958,8 @@
 .dash-crew-segments {
     display: flex;
     gap: 3px;
-    margin-left: auto;
+    margin-left: 28px;
+    flex-wrap: wrap;
 }
 
 .dash-crew-segment {
@@ -967,9 +978,9 @@
 
 .dash-crew-grid {
     display: grid;
-    grid-template-columns: repeat(var(--dash-crew-depths, 1), 196px);
-    column-gap: 52px;
-    row-gap: 8px;
+    grid-template-columns: repeat(var(--dash-crew-depths, 1), var(--dash-crew-column));
+    column-gap: var(--dash-crew-column-gap);
+    row-gap: 6px;
 }
 
 /* A parent spans its children's rows and sits at their centre. */
@@ -981,14 +992,37 @@
     min-width: 0;
 }
 
+.dash-crew-close {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 24px;
+    height: 24px;
+    border-radius: var(--gv-radius-s);
+}
+
+.dash-crews-slot.is-crew-highlight .dash-crew:not(.is-crew-member) {
+    opacity: .35;
+}
+
+.dash-crews-slot.is-crew-highlight .dash-crew.is-crew-member {
+    border-color: var(--gv-accent);
+    box-shadow: inset 0 0 0 1px var(--gv-accent);
+}
+
+.dash-crew:focus-visible {
+    outline: 2px solid var(--gv-accent);
+    outline-offset: -2px;
+}
+
 .dash-crew-node {
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
     flex: 1 1 auto;
     min-width: 0;
-    padding: 7px 9px;
+    padding: 6px 8px;
     border: 1px solid var(--gv-dialog-border);
     border-radius: 9px;
     background: var(--gv-bg-app);
@@ -1052,13 +1086,15 @@ button.dash-crew-node:focus-visible {
 .dash-crew-node-meta {
     display: flex;
     align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
+    gap: 4px;
+    flex-wrap: nowrap;
     min-width: 0;
 }
 
 /* The session, as the tab strip colours it: a square of its hue and its name. */
 .dash-crew-session {
+    flex: 1 1 auto;
+    min-width: 0;
     max-width: 100%;
     overflow: hidden;
     color: color-mix(in srgb, var(--dash-session-color, var(--gv-dialog-muted)) 70%, var(--gv-dialog-text));
@@ -1148,7 +1184,7 @@ button.dash-crew-node:focus-visible {
    the fallback holds the space for the first paint. Equal to
    `DASHBOARD_CREW_NARROW_PX`. */
 @container dash-crews (max-width: 380px) {
-    .dash-crew { width: auto; }
+    .dash-crew { width: 100%; max-width: none; align-self: stretch; }
     .dash-crew-grid {
         grid-template-columns: minmax(0, 1fr);
         padding-left: var(--dash-wire-gutter, 16px);

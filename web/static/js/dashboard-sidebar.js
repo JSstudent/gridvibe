@@ -219,6 +219,7 @@
         createWireLayer: options => (
             root.GridVibeAgentCrews?.createWireLayer?.(options) || null
         ),
+        crewHighlight: root.GridVibeAgentCrews?.highlightState,
         logError: (message, error) => console.error(message, error)
     };
     const controller = api.create(runtime);
@@ -253,7 +254,7 @@
     const INPUT_TARGET_CLASS = 'is-input-target';
     /* Crews. `has-crews` opens the lane gutter on the panel, and only while the
        reading holds a crew, so a column with no crews is exactly as wide
-       inside as it always was. The other two are the hover/focus highlight: one on
+       inside as it always was. The other two are the crew highlight: one on
        the panel, one on each row of the highlighted crew. */
     const CREWS_CLASS = 'has-crews';
     const CREW_HIGHLIGHT_CLASS = 'is-crew-highlight';
@@ -544,6 +545,7 @@
             ids = {},
             onCrewToggle = null,
             crewSelected = () => false,
+            crewHighlight = null,
             notice: externalNotice = null,
             refresh: externalRefresh = null,
             targetOwnsNotice = false
@@ -565,13 +567,11 @@
         let actionNotice = '';
         let actionTone = 'error';
         let readNotice = '';
-        /* The last reading's crews (`dashboardCrewContext`), the wire layer,
-           and the rows the pointer and the caret are on, which pick the crew
-           to highlight. */
+        /* The last reading's crews, the wire layer and the hovered pane. */
         let crewContext = null;
         let wires = null;
         let pointerRow = '';
-        let focusRow = '';
+        const pointerSource = {};
         /* What each decorated slot (chip, reading, bar) last had written into
            it, so an unchanged one is not rewritten every four seconds. Keyed
            by the slot element, so a rebuilt row starts from its markup. */
@@ -627,6 +627,8 @@
                 ? focused?.dataset?.dashboardKey || ''
                 : '';
             const scrollTop = panel.scrollTop;
+            // Removed elements need not dispatch pointerleave.
+            clearHighlight();
             panel.innerHTML = html;
             painted = html;
             panel.scrollTop = scrollTop;
@@ -680,11 +682,10 @@
             return (id && crewContext?.crews?.rootOf?.get(id)) || '';
         }
 
-        /* The pointer's row wins over the caret's, as on the mockup: hovering
-           another crew moves the highlight, and leaving the panel hands it
-           back to the row that has focus. A row outside every crew clears it. */
+        /* Highlight only a hovered pane's crew or an explicitly selected graph.
+           Keyboard focus keeps its own row indicator without selecting a crew. */
         function applyHighlight() {
-            const crew = crewOf(pointerRow || focusRow);
+            const crew = crewHighlight?.get() || (!crewHighlight ? crewOf(pointerRow) : '');
             shell()?.classList?.toggle(CREW_HIGHLIGHT_CLASS, Boolean(crew));
             body()?.querySelectorAll?.(AGENT_ROW_SELECTOR).forEach(row => {
                 row.classList?.toggle(
@@ -696,6 +697,14 @@
             return crew;
         }
 
+        const unsubscribeHighlight = crewHighlight?.subscribe(applyHighlight);
+
+        function clearHighlight() {
+            pointerRow = '';
+            crewHighlight?.clear(pointerSource);
+            applyHighlight();
+        }
+
         /* Compare against the drawn slot once, then remember each reading. */
         function writeSlot(slot, html) {
             if (!slot) return;
@@ -705,7 +714,6 @@
         }
 
         function decorateCrews(snapshot) {
-            crewContext = render.crewContext ? render.crewContext(snapshot) : null;
             const crews = crewContext?.crews || null;
             shell()?.classList?.toggle(CREWS_CLASS, Boolean(crews?.edges?.length));
             if (!crewContext) return;
@@ -831,6 +839,10 @@
         }
 
         function paintSnapshot(snapshot) {
+            // Restored focus must resolve against this reading, including a
+            // pane that just joined or changed crews while the list rebuilt.
+            crewContext = render.crewContext ? render.crewContext(snapshot) : null;
+            crewHighlight?.reconcile(crewContext?.crews, snapshot?.generated_at);
             const nextStructure = JSON.stringify((snapshot?.workspaces || []).map(workspace => ({
                 ...workspace,
                 groups: workspace.groups.map(group => ({
@@ -867,8 +879,9 @@
                the rows with their chips in. */
             decorateCrews(snapshot);
             decorateMarks(snapshot);
-            applyHighlight();
+            if (!crewOf(pointerRow)) pointerRow = '';
             wireLayer()?.paint(snapshot);
+            applyHighlight();
             return true;
         }
 
@@ -903,6 +916,7 @@
         function apply(open, { persist = false, report: shouldReport = false, scale: nextScale } = {}) {
             cancelDrag?.();
             const shouldShow = Boolean(open);
+            if (!shouldShow) clearHighlight();
             const widthChanged = nextScale !== undefined && clampScale(nextScale) !== scale;
             const changed = shouldShow !== isOpen() || widthChanged;
             if (nextScale !== undefined) writeScale(nextScale);
@@ -1018,6 +1032,7 @@
                     refresh: externalRefresh || refresh });
             }
             let landed = false;
+            crewHighlight?.clearClicks();
             try {
                 landed = Boolean(await openTarget({
                     workspaceId: dataset.workspaceId,
@@ -1041,27 +1056,25 @@
                a listener on a row would not outlive the reading that drew it. */
             panel.addEventListener('click', event => {
                 const row = event.target?.closest?.('[data-dashboard-action]');
-                if (!row) return;
+                if (!row) { crewHighlight?.clearClicks(); return; }
                 event.preventDefault();
                 handleRow(row.dataset, row);
             });
-            /* Hovering or focusing a crew's row highlights that crew. Also
+            /* Hovering a crew's row highlights that crew. Also
                delegated, for the same reason, and both only toggle classes. */
             panel.addEventListener('pointerover', event => {
                 pointerRow = rowIdAt(event.target);
+                crewHighlight?.set(pointerSource, crewOf(pointerRow), 'pointer', pointerRow);
+                applyHighlight();
+            });
+            panel.addEventListener('pointerout', event => {
+                pointerRow = rowIdAt(event.relatedTarget);
+                crewHighlight?.set(pointerSource, crewOf(pointerRow), 'pointer', pointerRow);
                 applyHighlight();
             });
             panel.addEventListener('pointerleave', () => {
                 pointerRow = '';
-                applyHighlight();
-            });
-            panel.addEventListener('focusin', event => {
-                focusRow = rowIdAt(event.target);
-                applyHighlight();
-            });
-            panel.addEventListener('focusout', event => {
-                if (panel.contains?.(event.relatedTarget)) return;
-                focusRow = '';
+                crewHighlight?.clear(pointerSource);
                 applyHighlight();
             });
             if (onCrewToggle) {
@@ -1120,7 +1133,8 @@
             wire, apply, toggle, isOpen, refresh, schedule, handleRow, setNotice, syncToggle,
             wireRows, paintSnapshot,
             pause: paused => wires?.setPaused(Boolean(paused)),
-            dispose: () => { wires?.dispose(); wires = null; },
+            clearHighlight,
+            dispose: () => { clearHighlight(); unsubscribeHighlight?.(); wires?.dispose(); wires = null; },
             invalidate: () => { structure = ''; painted = ''; },
             setSide, markInputTarget,
             getSide: () => side,

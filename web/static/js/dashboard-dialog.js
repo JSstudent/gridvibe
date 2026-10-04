@@ -743,7 +743,7 @@
         const style = colour && node.groupId
             ? ` style="--dash-session-color:${escHtml(colour.sessionColour(node.groupId))}"`
             : '';
-        return `<span class="dash-crew-session"${style}>${escHtml(name)}</span>`;
+        return `<span class="dash-crew-session"${style} title="${escHtml(name)}">${escHtml(name)}</span>`;
     }
 
     /* One node in its grid cell: a button carrying a row's own target
@@ -790,7 +790,7 @@
         const board = dashboardCrewModel() ? dashboardCrewBoardModel(snapshot, crew) : [];
         const nodes = new Map();
         const heads = new Map();
-        if (!board.length) return { key: '', html: '', nodes, heads };
+        if (!board.length) return { key: '', html: '', nodes, heads, depths: 0 };
         const generated = Number(snapshot?.generated_at);
         const now = Number.isFinite(generated) && generated > 0 ? generated : Date.now() / 1000;
         const crewsHtml = board.map(crewBox => {
@@ -803,15 +803,27 @@
                 return dashboardCrewNodeHtml(node, parts);
             }).join('');
             return `
-                <div class="dash-crew" data-crew-root="${escHtml(crewBox.root)}">
+                <div class="dash-crew" data-crew-root="${escHtml(crewBox.root)}"
+                    style="--dash-crew-depths:${crewBox.depths}"
+                    data-dashboard-key="crew-frame:${escHtml(crewBox.root)}"
+                    data-session-id="${escHtml(crewBox.root)}"
+                    role="group" tabindex="0" aria-label="Crew diagram"
+                    title="Click empty space to highlight this crew. Click again to clear.">
+                    <button type="button" class="dash-session-close dash-crew-close"
+                        data-dashboard-action="hide-crew" data-crew-id="${escHtml(crewBox.root)}"
+                        data-session-id="${escHtml(crewBox.root)}"
+                        data-dashboard-key="hide-crew:${escHtml(crewBox.root)}"
+                        title="Hide this crew diagram" aria-label="Hide this crew diagram">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M18 6 6 18M6 6l12 12"/></svg>
+                    </button>
                     <div class="dash-crew-head" data-agent="${escHtml(dashboardAgentGlyphKey(root))}">
                         <span class="dash-agent-icon" aria-hidden="true">${dashboardAgentGlyphHtml(root)}</span>
                         <span class="dash-crew-title"><span class="dash-crew-agent">${escHtml(dashboardAgentName(root))}</span>`
                 + ` · <span class="dash-crew-title-line">${escHtml(head.line)}</span></span>
                         <span class="dash-crew-meta">${escHtml(head.meta)}</span>
-                        <span class="dash-crew-segments" aria-hidden="true">${head.segments}</span>
                     </div>
-                    <div class="dash-crew-grid" style="--dash-crew-depths:${crewBox.depths}">${cells}</div>
+                    <span class="dash-crew-segments" aria-hidden="true">${head.segments}</span>
+                    <div class="dash-crew-grid">${cells}</div>
                 </div>`;
         }).join('');
         const html = `
@@ -821,7 +833,8 @@
                 </header>
                 <div class="dash-crews-board">${crewsHtml}</div>
             </section>`;
-        return { key: dashboardCrewBoardKey(board), html, nodes, heads };
+        return { key: dashboardCrewBoardKey(board), html, nodes, heads,
+            depths: Math.max(...board.map(crewBox => crewBox.depths)) };
     }
 
     /* The "Crews" section, or nothing while no agent has handed a task out.
@@ -959,6 +972,7 @@
         }
         wires.snapshot = snapshot;
         wires.layer.paint(snapshot);
+        paintAgentDashboardCrewHighlight();
     }
 
     /* Permanent sibling slots: a list rebuild cannot replace the crew board. */
@@ -977,7 +991,8 @@
                 refresh: refreshAgentDashboard,
                 targetOwnsNotice: true,
                 crewSelected: root => _agentDashboardSelectedCrews.has(root),
-                onCrewToggle: toggleAgentDashboardCrew
+                onCrewToggle: toggleAgentDashboardCrew,
+                crewHighlight: dashboardCrewModel()?.highlightState
             });
             _agentDashboardList.wireRows();
         }
@@ -987,15 +1002,42 @@
     function toggleAgentDashboardCrew(root) {
         const context = dashboardCrewContext(_agentDashboardSnapshot);
         if (!context?.crews?.roots.includes(root)) return false;
-        if (_agentDashboardSelectedCrews.has(root)) _agentDashboardSelectedCrews.delete(root);
-        else _agentDashboardSelectedCrews.add(root);
+        if (_agentDashboardSelectedCrews.has(root)) {
+            _agentDashboardSelectedCrews.delete(root);
+            dashboardCrewModel()?.highlightState?.clearRoot(root);
+        } else {
+            _agentDashboardSelectedCrews.add(root);
+            dashboardDialogList()?.clearHighlight();
+            dashboardCrewModel()?.highlightState?.clearClicks();
+            dashboardCrewModel()?.highlightState?.clearRoot(root);
+        }
         paintAgentDashboardSnapshot(_agentDashboardSnapshot);
         return true;
     }
 
-    function paintAgentDashboardSize(hasCrews) {
+    function paintAgentDashboardCrewHighlight() {
+        const root = dashboardCrewModel()?.highlightState?.get() || '';
+        const slot = document.getElementById(AGENT_DASHBOARD_BODY_ID)?.querySelector?.('[data-dashboard-crews]');
+        const crews = [...(slot?.querySelectorAll?.('[data-crew-root]') || [])];
+        const visible = crews.some(element => element.dataset?.crewRoot === root);
+        slot?.classList?.toggle('is-crew-highlight', visible);
+        crews.forEach(element => {
+            element.classList?.toggle('is-crew-member', element.dataset?.crewRoot === root);
+        });
+        _agentDashboardCrewWires?.layer.highlight(visible ? root : '');
+    }
+
+    function selectAgentDashboardCrewFrame(frame) {
+        const root = frame?.dataset?.crewRoot || '';
+        if (!_agentDashboardSelectedCrews.has(root)) return false;
+        dashboardCrewModel()?.highlightState?.toggleClick('board-click', root, root);
+        return true;
+    }
+
+    function paintAgentDashboardSize(draw) {
         const dialog = document.getElementById(AGENT_DASHBOARD_BODY_ID)?.parentElement;
-        dialog?.classList?.toggle?.('has-crews', Boolean(hasCrews));
+        dialog?.style?.setProperty('--dash-crew-depths', String(draw.depths || 1));
+        dialog?.classList?.toggle?.('has-crews', Boolean(draw.key));
     }
 
     /* The three counts always, once anything is open. The agent count leads
@@ -1065,6 +1107,7 @@
         if (!_agentDashboardPainted) renderAgentDashboard(dashboardBodyHtml());
         const context = dashboardCrewContext(snapshot);
         const roots = context?.crews?.roots || [];
+        dashboardCrewModel()?.highlightState?.reconcile(context?.crews, snapshot?.generated_at);
         for (const root of _agentDashboardSelectedCrews) {
             if (!roots.includes(root)) _agentDashboardSelectedCrews.delete(root);
         }
@@ -1075,11 +1118,12 @@
         paintAgentDashboardCrewBoard(body, snapshot, draw);
         const slot = body.querySelector?.('[data-dashboard-crews]');
         if (slot) slot.hidden = !draw.key;
-        paintAgentDashboardSize(Boolean(draw.key));
+        paintAgentDashboardSize(draw);
         // Measure only the selected crews; unrelated links have no endpoints here.
         const selectedSnapshot = { ...snapshot, links: (snapshot.links || []).filter(link =>
             _agentDashboardSelectedCrews.has(context?.crews?.rootOf?.get(String(link.requester_session_id || '')))) };
         paintAgentDashboardCrewWires(selectedSnapshot, Boolean(draw.key));
+        paintAgentDashboardCrewHighlight();
         _agentDashboardList?.pause(agentDashboardWiresPaused());
         _agentDashboardStructure = 'ready';
     }
@@ -1395,6 +1439,7 @@
         const heldFocus = Boolean(shell.contains?.(document.activeElement))
             && agentDashboardWindowHasFocus();
         shell.classList.remove('visible');
+        _agentDashboardList?.clearHighlight();
         shell.setAttribute('aria-hidden', 'true');
         /* An action's confirmation belongs to the pass that provoked it; a
            reopened dialog reporting a close from four minutes ago would be
@@ -1570,16 +1615,31 @@
             return;
         }
         _agentDashboardWired = true;
+        dashboardCrewModel()?.highlightState?.subscribe(paintAgentDashboardCrewHighlight);
+        body.addEventListener('keydown', event => {
+            const frame = event.target?.closest?.('[data-crew-root]');
+            if (event.target !== frame || (event.key !== 'Enter' && event.key !== ' ')) return;
+            event.preventDefault();
+            selectAgentDashboardCrewFrame(frame);
+        });
         /* Delegated: every row is rebuilt whenever the reading changes, so a
            listener on a row would not outlive the reading that drew it. */
         body.addEventListener('click', event => {
             const row = event.target?.closest?.('[data-dashboard-action]');
-            if (document.getElementById('agentDashboardListBody')?.contains?.(row)) return;
+            if (document.getElementById('agentDashboardListBody')?.contains?.(event.target)) return;
             if (!row) {
+                const frame = event.target?.closest?.('[data-crew-root]');
+                if (frame && selectAgentDashboardCrewFrame(frame)) return;
+                dashboardCrewModel()?.highlightState?.clearClicks();
                 return;
             }
             event.preventDefault();
             const action = row.dataset.dashboardAction || '';
+            if (action === 'hide-crew') {
+                const root = row.dataset.crewId || '';
+                if (_agentDashboardSelectedCrews.has(root)) toggleAgentDashboardCrew(root);
+                return;
+            }
             const actions = dashboardCloseActions();
             /* The close verbs and the open verbs share one listener because
                they share one set of rows; what separates them is the action

@@ -213,6 +213,91 @@ class AgentCrewsNodeTestCase(unittest.TestCase):
         return json.loads(completed.stdout)
 
 
+class CrewHighlightStateTestCase(AgentCrewsNodeTestCase):
+    def test_hiding_a_crew_clears_its_sources_without_disturbing_another_crew(self):
+        result = self._run_node("""
+            const state = crews.createHighlightState();
+            state.set('frame', 'a', 'click', 'a');
+            state.set('list', 'b', 'pointer', 'b2');
+            state.clearRoot('a');
+            const other = state.get();
+            state.clear('list');
+            report({ other, hiddenDoesNotReturn: state.get() });
+        """)
+        self.assertEqual(result, {"other": "b", "hiddenDoesNotReturn": ""})
+
+    def test_stale_surface_cannot_restore_removed_crews_or_members(self):
+        result = self._run_node("""
+            const state = crews.createHighlightState();
+            state.reconcile({ roots: ['a'], rootOf: new Map([['a2', 'a']]) }, 10);
+            state.set('pointer', 'a', 'pointer', 'a2');
+            state.reconcile({ roots: [], rootOf: new Map() }, 20);
+            state.set('stale-list', 'a', 'pointer', 'a2');
+            const goneCrew = state.get();
+            state.reconcile({ roots: ['a'], rootOf: new Map([['a3', 'a']]) }, 21);
+            state.set('stale-list', 'a', 'pointer', 'a2');
+            report({ goneCrew, goneMember: state.get() });
+        """)
+        self.assertEqual(result, {"goneCrew": "", "goneMember": ""})
+
+    def test_click_can_toggle_off_and_clear_without_es2023_array_methods(self):
+        result = self._run_node("""
+            Array.prototype.findLast = undefined;
+            const state = crews.createHighlightState();
+            state.toggleClick('board', 'a', 'a2');
+            const clicked = state.get();
+            state.toggleClick('board', 'a', 'a3'); // another node still selects its crew
+            const sibling = state.get();
+            state.set('focus', 'a', 'focus', 'a2');
+            state.toggleClick('board', 'a', 'a3');
+            const toggled = state.get();
+            state.toggleClick('board', 'b', 'b2');
+            state.clearClicks();
+            report({ clicked, sibling, toggled, cleared: state.get() });
+        """)
+        self.assertEqual(result, {"clicked": "a", "sibling": "a", "toggled": "", "cleared": ""})
+
+    def test_sources_share_one_value_and_transient_sources_cannot_resurrect(self):
+        result = self._run_node("""
+            const state = crews.createHighlightState();
+            const first = [], second = [];
+            state.subscribe(value => first.push(value));
+            const unsubscribe = state.subscribe(value => second.push(value));
+            state.set('list-focus', 'a', 'focus', 'a2');
+            state.set('list-pointer', 'b', 'pointer', 'b2');
+            state.set('board-pointer', 'a', 'pointer', 'a2');
+            state.clear('board-pointer'); // the older list hover is gone
+            const afterLeave = state.get();
+            state.set('board-click', 'b', 'click', 'b2');
+            state.clearTransient();
+            const afterDismiss = state.get();
+            unsubscribe();
+            state.reconcile({ roots: ['b'], rootOf: new Map([['b', 'b']]) });
+            const afterPaneClose = state.get();
+            state.reconcile({ roots: ['b'], rootOf: new Map([['b2', 'b']]) });
+            report({ first, second, afterLeave, afterDismiss, afterPaneClose, returned: state.get() });
+        """)
+        self.assertEqual(result["afterLeave"], "a")
+        self.assertEqual(result["afterDismiss"], "b")
+        self.assertEqual(result["afterPaneClose"], "")
+        self.assertEqual(result["returned"], "")
+        self.assertEqual(result["first"], ["a", "b", "a", "b", ""])
+        self.assertEqual(result["second"], ["a", "b", "a", "b"])
+
+    def test_older_poll_does_not_clear_a_newer_shared_reading(self):
+        result = self._run_node("""
+            const state = crews.createHighlightState();
+            const live = { roots: ['a'], rootOf: new Map([['a2', 'a']]) };
+            state.reconcile(live, 20);
+            state.set('board', 'a', 'click', 'a2');
+            state.reconcile({ roots: [], rootOf: new Map() }, 19);
+            const older = state.get();
+            state.reconcile({ roots: [], rootOf: new Map() }, 21);
+            report({ older, closed: state.get() });
+        """)
+        self.assertEqual(result, {"older": "a", "closed": ""})
+
+
 class IndexCrewsTestCase(AgentCrewsNodeTestCase):
     def test_a_nested_crew_is_one_tree_under_its_orchestrator(self):
         result = self._run_node(
@@ -988,9 +1073,30 @@ class WireLayerTestCase(AgentCrewsNodeTestCase):
 class StylesheetAndPagesTestCase(unittest.TestCase):
     WIRE_TOKENS = {"--gv-accent", "--gv-success", "--gv-warning", "--gv-danger", "--gv-dialog-muted"}
 
+    def test_crew_frames_fit_their_diagram_and_status_bars_sit_on_the_left(self):
+        css = DASHBOARD_CSS.read_text(encoding="utf-8")
+        frame = re.search(r"\.dash-crew \{([^}]*)\}", css).group(1)
+        self.assertIn("width: max-content", frame)
+        self.assertIn("min-width: 0", frame)
+        self.assertIn("align-self: flex-start", frame)
+        bars = re.search(r"\.dash-crew-segments \{([^}]*)\}", css).group(1)
+        self.assertNotIn("margin-left: auto", bars)
+        self.assertIn("margin-left: 28px", bars)
+        self.assertIn("button.dash-crew-node:hover", css)
+        narrow = re.search(r"@container dash-crews[^}]+\}", css).group(0)
+        self.assertIn("width: 100%", narrow)
+
     def _wire_section(self) -> str:
         css = DASHBOARD_CSS.read_text(encoding="utf-8")
         return css[css.index("/* ── Crew wires ──"):]
+
+    def test_tile_metadata_stays_on_one_line_with_a_flexible_session_name(self):
+        css = DASHBOARD_CSS.read_text(encoding="utf-8")
+        metadata = re.search(r"\.dash-crew-node-meta \{([^}]*)\}", css).group(1)
+        self.assertIn("flex-wrap: nowrap", metadata)
+        session = re.search(r"\.dash-crew-session \{([^}]*)\}", css).group(1)
+        for declaration in ("flex: 1 1 auto", "min-width: 0", "text-overflow: ellipsis"):
+            self.assertIn(declaration, session)
 
     def test_wires_are_drawn_in_the_status_tokens_only(self):
         section = self._wire_section()

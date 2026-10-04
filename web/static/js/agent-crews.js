@@ -37,6 +37,10 @@
     const api = factory();
     if (typeof module === 'object' && module.exports) module.exports = api;
     if (root) root.GridVibeAgentCrews = api;
+    root?.addEventListener?.('blur', () => api.highlightState.clearTransient());
+    root?.document?.addEventListener?.('visibilitychange', () => {
+        if (root.document.hidden) api.highlightState.clearTransient();
+    });
 }(typeof globalThis !== 'undefined' ? globalThis : this, function () {
     'use strict';
 
@@ -608,7 +612,85 @@
         return { paint, highlight, setPaused, dispose };
     }
 
+    /* One page-wide reading shared by the two lists and the board. Transient
+       sources belong to their surface; a click survives navigation, but never
+       the pane or crew that was clicked. */
+    function createHighlightState() {
+        const sources = new Map();
+        const listeners = new Set();
+        let current = '';
+        let lastReading = 0;
+        let latestCrews = null;
+        function publish() {
+            const entries = [...sources.values()].reverse();
+            const next = entries.find(entry => entry.kind === 'pointer')
+                || entries.find(entry => entry.kind === 'focus')
+                || entries.find(entry => entry.kind === 'click');
+            const root = next?.root || '';
+            if (root === current) return;
+            current = root;
+            listeners.forEach(listener => listener(current));
+        }
+        return {
+            get: () => current,
+            set(source, root, kind, pane = '') {
+                // An older list may still draw a pane removed in a newer read.
+                if (latestCrews && (!latestCrews.roots.includes(root)
+                    || (pane && latestCrews.rootOf.get(pane) !== root))) root = '';
+                // There is only one pointer and one keyboard focus per page.
+                if (root || kind === 'click') for (const [key, entry] of sources) {
+                    if (entry.kind === kind || kind === 'click') sources.delete(key);
+                }
+                sources.delete(source);
+                if (root) sources.set(source, { root, kind, pane });
+                publish();
+            },
+            clear(source) { sources.delete(source); publish(); },
+            clearRoot(root) {
+                for (const [source, entry] of sources) {
+                    if (entry.root === root) sources.delete(source);
+                }
+                publish();
+            },
+            toggleClick(source, root, pane) {
+                const held = sources.get(source);
+                const selected = held?.root === root && held?.pane === pane;
+                this.set(source, selected ? '' : root, 'click', pane);
+            },
+            clearClicks() {
+                for (const [source, entry] of sources) {
+                    if (entry.kind === 'click') sources.delete(source);
+                }
+                publish();
+            },
+            clearTransient() {
+                for (const [source, entry] of sources) {
+                    if (entry.kind !== 'click') sources.delete(source);
+                }
+                publish();
+            },
+            reconcile(crews, generatedAt = 0) {
+                if (generatedAt && generatedAt < lastReading) return;
+                lastReading = Math.max(lastReading, Number(generatedAt) || 0);
+                latestCrews = crews || { roots: [], rootOf: new Map() };
+                for (const [source, entry] of sources) {
+                    if (!crews?.roots?.includes(entry.root)
+                        || (entry.pane && crews.rootOf.get(entry.pane) !== entry.root)) {
+                        sources.delete(source);
+                    }
+                }
+                publish();
+            },
+            subscribe(listener) {
+                listeners.add(listener);
+                return () => listeners.delete(listener);
+            }
+        };
+    }
+
     return {
+        createHighlightState,
+        highlightState: createHighlightState(),
         PHASES,
         LANE_INSET,
         LANE_STEP,
