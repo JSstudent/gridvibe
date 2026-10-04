@@ -1690,14 +1690,22 @@
             refreshAgentDashboard();
         });
         /* Not a dismissal: the page itself is going away, so this runs
-           whatever the dialog's state, and it is the abort that matters. */
-        window.addEventListener?.('pagehide', () => {
+           whatever the dialog's state, and it is the abort that matters. A page
+           going into the back/forward cache comes back with these same objects
+           and nothing re-creates the list, so the list is only suspended there
+           and keeps its subscription to the shared crew highlight. */
+        window.addEventListener?.('pagehide', event => {
             clearInterval(_agentDashboardTimer);
             _agentDashboardTimer = null;
             ++_agentDashboardRequestId;
             _agentDashboardController?.abort();
             _agentDashboardController = null;
-            _agentDashboardList?.dispose();
+            if (event?.persisted) {
+                _agentDashboardList?.clearHighlight();
+                _agentDashboardList?.pause(true);
+            } else {
+                _agentDashboardList?.dispose();
+            }
             disposeAgentDashboardCrewWires();
         });
         window.addEventListener?.('pageshow', event => {

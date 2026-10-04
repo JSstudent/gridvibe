@@ -1595,6 +1595,9 @@ unless the task explicitly changes this contract.
   source before replacing rows; window blur or document hiding clears transient
   sources. Snapshot reconciliation
   drops removed roots and pane anchors; an older snapshot cannot revive them.
+  A page entering the back/forward cache suspends the dialog's list and keeps
+  its highlight subscription, because a restored page reuses that controller;
+  only a real unload disposes it.
 - Dashboard layout must remain usable without horizontal overflow at narrow
   widths. A polling update that changes only a row's title, hover, status,
   progress, or idle age updates that row in place, each field on its own

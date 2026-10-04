@@ -3451,6 +3451,35 @@ class DashboardSelectedCrewsTestCase(DashboardDialogTestCase):
         self.assertEqual(result["closed"], "")
         self.assertEqual(result["nodes"], [])
 
+    def test_list_follows_frame_clicks_after_back_forward_cache_but_not_after_unload(self):
+        """A cached page returns with the same list controller, so pagehide only
+        suspends it; a real unload disposes it and its highlight subscription."""
+        result = self._run_crew("""
+            wireAgentDashboard();
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            await refreshAgentDashboard();
+            toggleAgentDashboardCrew('s1');
+            const member = () => listRow('s2').classList.contains('is-crew-member');
+            const clickFrame = () => body().fire('click', { target: head('s1'), preventDefault() {} });
+            fireWindow('pagehide', { persisted: true });
+            const cachedPaused = listWires.paused.at(-1);
+            fireWindow('pageshow', { persisted: true });
+            await settle();
+            const restoredPaused = listWires.paused.at(-1);
+            clickFrame();
+            const restored = member();
+            GridVibeAgentCrews.highlightState.clearClicks();
+            fireWindow('pagehide', { persisted: false });
+            clickFrame();
+            report({ cachedPaused, restoredPaused, restored,
+                state: GridVibeAgentCrews.highlightState.get(), unloaded: member() });
+        """)
+        self.assertTrue(result["restored"])
+        self.assertTrue(result["cachedPaused"])
+        self.assertFalse(result["restoredPaused"])
+        self.assertEqual(result["state"], "s1")
+        self.assertFalse(result["unloaded"])
+
     def test_tile_click_still_navigates_without_selecting_its_crew(self):
         result = self._run_crew("""
             wireAgentDashboard();
