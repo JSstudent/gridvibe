@@ -5,6 +5,136 @@ Closed issues are moved here from [`docs/testing_issues.md`](../../testing_issue
 
 ## Closed Issues
 
+### Issue ID: ISSUE-2026-061
+- Title: External file creation in ignored folders leaves explorer listings stale
+- Priority: Medium
+- Status: Closed
+- Closed: 2026-10-04
+- Area: `web/static/js/explorer-git-watch.js`, `web/static/js/explorer-viewer.js`, `web/static/js/explorer-tree.js`, `web/explorer.py`, `web/api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `git`, `reliability`, `tests`
+- Reported: 2026-10-04
+
+Description:
+Files created by an agent or another external program inside a Git-ignored
+folder do not appear automatically in the Files tree or the directory listing
+in the Preview tab. The user reported this in `docs/r&d/MCP/flows` in this
+repository. Creating a file through GridVibe's own explorer controls updates
+the surfaces, so the same directory appears live for UI actions but stale for
+agent output. An agent running in a GridVibe terminal still writes directly to
+disk and does not invoke the explorer's mutation-completion refresh.
+
+Steps to reproduce:
+1. Open a GridVibe Files pane rooted at this repository. Expand
+   `docs/r&d/MCP/flows` in the Files tree and open that folder's directory
+   listing in the Preview tab. Keep the page visible and let its initial
+   background poll establish a baseline.
+2. From another editor, a shell, or an agent, create a new text file inside
+   that folder. Do not use GridVibe's explorer Create file action.
+3. Leave the explorer idle, with focus and the pointer outside its listing
+   and tree, and wait beyond several normal local polling intervals.
+4. Observe that the new file is absent from both surfaces. Compare with a
+   second file created through GridVibe's explorer controls, which triggers
+   the explicit refresh and updates the displayed listing.
+
+Expected behavior:
+The directory Preview and expanded Files tree should discover externally
+created files within a bounded background-refresh interval, including files
+in ignored folders and roots outside Git repositories. A file's visibility
+in the explorer should not depend on whether Git reports it. Preserve scroll,
+expanded folders, filters, active tabs, and any open editor buffer.
+
+Actual behavior / logs:
+The live symptom and the successful GridVibe-create comparison were reported
+by the user on 2026-10-04; no separate live UI reproduction was performed
+during this investigation. The supporting mechanisms were verified in code
+and with read-only Git commands:
+
+- `git check-ignore -v -- 'docs/r&d/MCP/flows'
+  'docs/r&d/MCP/flows/example.txt'` identifies `.gitignore:86:docs/r&d/`
+  for both the folder and an example child path. These paths are ignored,
+  rather than ordinary untracked paths reported by Git.
+- `git status --porcelain=v2 --untracked-files=all --
+  'docs/r&d/MCP/flows'` returns no status entries. The `--untracked-files=all`
+  flag in `_get_git_context()` does not include ignored files.
+- `explorerGitWatchCheckOne()` uses the selected Git scope's revision for
+  the filesystem consumer. It schedules `explorerFsWatchFlushPending()`
+  only when that revision changes; there is no independent directory-change
+  check. Creating an ignored file therefore cannot supply this signal.
+- `explorerFsWatchConsumer()` also requires
+  `pane._explorerGitContext.available`, so non-Git roots cannot arm this
+  automatic listing/tree refresh either. That broader limitation is
+  confirmed by inspection, not a separate user-reported reproduction.
+- GridVibe's create action explicitly calls
+  `refreshExplorerAfterFilesystemMutation()`, which bypasses the need for
+  a background Git change signal. The directory Preview shares the quiet
+  filesystem refresh path with the Files tree; this is not a failure of
+  the separate open-file content watcher.
+
+### Proposed solution:
+Give visible filesystem surfaces a bounded change signal independent of Git.
+Extend the explorer read API/backend and page-level watcher to check the
+browsed directory and loaded expanded tree directories for membership changes,
+including ignored entries and non-Git roots. Use a bounded listing revision
+or equivalent metadata check that reliably notices child creation, deletion,
+and rename; avoid recursive whole-root scans or relying solely on Git status.
+Keep the Git poll for Git decorations and sidebar updates, without letting
+its pin/Follow scope restrict filesystem freshness.
+
+Reuse `refreshExplorerFilesystemSurfacesQuiet()` and the quiet tree/listing
+helpers when filesystem state changes. Retain visibility suspension, local/SSH
+cost bounds, no overlapping requests, interaction deferral, pane/session/root
+identity checks after awaits, and preservation of scroll and expansion.
+Unchanged directories should cause no DOM writes, and background work must
+never replace an editor buffer. No persistence format or migration is needed.
+
+Add behavioral backend and Node regression coverage for external creation,
+deletion, and rename inside an ignored folder and a non-Git root; creation
+inside an ordinary untracked folder; a Git pin on an unrelated folder/file;
+and both the directory Preview and expanded tree updating without an explicit
+mutation action. Cover local/SSH parity, unchanged-state no-op behavior,
+changes before the first baseline poll, hidden-page suspension, deferred
+apply, stale responses after navigation or pane replacement, bounded tree
+work, and preservation of an open editor buffer. Verify the reported folder
+manually with an agent-created file and compare with GridVibe's Create file
+action.
+
+Resolution:
+Added the root-confined, Git-independent `GET .../directory/state` poll and
+canonical membership revisions computed from the raw `/entries` listing.
+Directory Preview and loaded expanded Files-tree nodes keep separate rendered
+baselines. Rotating poll windows and refresh batches cover at most 16 paths;
+pending changes merge across polls, interaction holds and failures, and are
+removed only after successful application. Navigation, reload, pane/session/root
+replacement and tree expansion/cache changes invalidate stale asynchronous work.
+Quiet refresh preserves scroll, filters, tabs, commit drafts and editor buffers.
+Deleted expanded folders refresh their parent and prune vanished cached branches;
+even deleting the open Preview directory cannot block the surviving tree.
+
+Ordinary browsing remains complete. Cheap local/SFTP enumeration fingerprints
+at most 4096 children, detects overflow with one extra child, and uses a 2-second
+budget. SFTP uses streaming enumeration with one read-ahead, restores its leased
+channel timeout and releases resources on exit. Incomplete/unsupported reads
+produce no token; oversized or slow directories may need manual membership
+refresh. Local blocking filesystem calls cannot be preempted, but late results
+never claim completeness. No persistence change is required.
+
+Verification:
+371 focused backend, Node/frontend and adjacent regression tests passed, with
+5 platform/environment skips. Coverage includes ignored children in a real Git
+repository (Git status unchanged while directory membership advances), ordinary
+untracked folders, non-Git roots, external creation/deletion/rename, unrelated
+Git scope, complete browsing beyond the poll cap, local/SFTP-double bounds and
+resource cleanup, deferred/retried/rotating updates, stale ownership, deletion
+of the currently open directory, quiet rendering and preserved state. The suite
+also rechecked ISSUE-2026-062 interaction behavior and 2xx-only polling-log
+suppression. Repository-wide Ruff and `git diff --check` passed.
+
+Live browser/native-window checks, the reported-folder Create-file comparison,
+and real SSH-host verification were not performed. Backend changes require a
+GridVibe restart; the running application was left intact to preserve sessions.
+
+
 ### Issue ID: ISSUE-2026-062
 - Title: Git sidebar refresh can remain deferred after switching applications
 - Priority: Medium

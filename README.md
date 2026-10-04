@@ -229,6 +229,7 @@ Swap any pane between a terminal and a file explorer with one button — same di
 - **Find a file** — the Files tree's filter box finds files and folders by name anywhere under the root, with the matched part highlighted in place.
 - **Fold a level** — `Alt`-click a fold arrow to fold or unfold every folder beside it, so one click collapses the whole tree.
 - **Manage files** — create, copy, move, rename, and delete from the context menu. Every write stays inside the explorer root, nothing is ever overwritten, and deletion asks first.
+- **Discovers external changes.** Files added, removed or renamed by another program appear in the directory Preview and expanded Files tree, including ignored folders and non-Git roots. Folders exceeding the background check's size or time bounds still list completely and can be refreshed manually.
 - **Upload files** — through the usual picker, from any folder row or the explorer bar. Local or SFTP, multi-select, 100 MB per file. A name already in use is numbered (`report (1).pdf`), never replaced.
 - **Download files & folders** — save files directly, or right-click any folder in Files or Preview to save it as one ZIP. Local and SFTP downloads are capped at 100 MB; multi-selected files still download individually.
 - **Select several** — `Ctrl`-click to add or remove rows, `Shift`-click for a range. Copy, Cut, Delete, Download, and Copy path act on the whole selection with one confirmation.

@@ -4,6 +4,8 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **(fix) Files lists discover external changes in ignored folders and non-Git roots.** Directory Preview and the expanded Files tree now discover external creation, deletion and rename independently of Git pin/Follow. Bounded checks preserve pending changes through interaction and failures, reject stale responses, and preserve scroll, filters, tabs and editor drafts. Large or slow directories remain fully browsable and need manual membership refresh. The rule lives in [Explorer filesystem and transfers](docs/engineering_contracts.md#explorer-filesystem-and-transfers).
+
 - **(fix) Git sidebar updates resume after switching applications.** Idle retained focus and missed pointer releases no longer hold updates indefinitely. Genuine typing, composition, selections and pointer gestures still defer rebuilds; window deactivation clears stale interaction state. Quiet updates preserve drafts, caret direction and scroll, including across repeated background updates, without taking focus from another application. Stale scopes are discarded. The rule lives in [Git sidebar presentation](docs/engineering_contracts.md#git-sidebar-presentation).
 
 - **(fix) The dashboard dialog's list keeps following crew highlights after a page returns through Back or Forward.** Leaving a page disposed the dialog's list, so a page restored from the browser's back/forward cache kept a list that no longer followed diagram clicks until the next poll or pointer move. Leaving now only suspends the list on a cached page and disposes it on a real unload. The rule lives in [Agent dashboard](docs/engineering_contracts.md#agent-dashboard).

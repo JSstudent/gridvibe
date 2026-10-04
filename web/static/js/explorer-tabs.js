@@ -736,6 +736,7 @@
         if (!pane) {
             return;
         }
+        pane._explorerDirectoryEpoch = (pane._explorerDirectoryEpoch || 0) + 1;
         const tab = explorerActiveTab(pane);
         if (tab.path) {
             const diffTarget = explorerTabPersistedDiffTarget(tab);

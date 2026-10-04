@@ -34,6 +34,7 @@ STATIC_JS = ROOT / "web" / "static" / "js"
 WATCH_JS = STATIC_JS / "explorer-git-watch.js"
 SIDEBAR_JS = STATIC_JS / "explorer-git-sidebar.js"
 PIN_JS = STATIC_JS / "explorer-git-pin.js"
+DIRECTORY_JS = STATIC_JS / "explorer-directory.js"
 
 NODE = shutil.which("node")
 
@@ -150,6 +151,11 @@ const sandbox = {
     sessionIds: ['session-1'],
     document,
     fetch: async (url) => {
+        // This harness exercises Git only. The independent membership poll has
+        // no usable token and does not contribute to the Git request count.
+        if (String(url).includes('/directory/state')) {
+            return {ok:true,status:200,json:async()=>({complete:false,revision:''})};
+        }
         if (String(url).includes('/state')) {
             fetchStateCalls += 1;
             if (stateGate) {
@@ -166,6 +172,7 @@ vm.createContext(sandbox);
 
 vm.runInContext(fs.readFileSync(process.argv[4], 'utf8'), sandbox); // pin policy
 vm.runInContext(fs.readFileSync(process.argv[3], 'utf8'), sandbox); // git sidebar
+vm.runInContext(fs.readFileSync(process.argv[5], 'utf8'), sandbox); // directory ownership
 vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox); // watch
 
 // Overrides go on *after* evaluation so calls resolve to the stubs at call time.
@@ -209,7 +216,7 @@ class ExplorerGitWatchHarness(unittest.TestCase):
             script_path = Path(script_dir) / "harness.js"
             script_path.write_text(script, encoding="utf-8")
             completed = subprocess.run(
-                [NODE, str(script_path), str(WATCH_JS), str(SIDEBAR_JS), str(PIN_JS)],
+                [NODE, str(script_path), str(WATCH_JS), str(SIDEBAR_JS), str(PIN_JS), str(DIRECTORY_JS)],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",

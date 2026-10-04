@@ -94,6 +94,7 @@
         if (pane._explorerRootRevision && pane._explorerRootRevision !== nextRevision) {
             clearExplorerFilesystemClipboard(sessionId);
             explorerFilesystemActionTokens.delete(sessionId);
+            clearExplorerDirectoryBaselines(pane);
         }
         pane._explorerRootRevision = nextRevision;
     }

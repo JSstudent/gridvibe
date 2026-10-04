@@ -16232,7 +16232,7 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
         self.assertIn("async function refreshExplorerOpenFileQuiet(index)", viewer)
         quiet_fn = viewer[
             viewer.index("async function refreshExplorerOpenFileQuiet"):
-            viewer.index("function explorerEntriesSignature")
+            viewer.index("function explorerResolveFileView")
         ]
         # Quiet: no loading placeholder, no tree/pane reload, and never against
         # an open editor buffer.
@@ -16250,21 +16250,38 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
 
     def test_fs_surface_watch_shares_the_single_git_state_poll(self):
         watch = self._static("js/explorer-git-watch.js")
-        # One request, two baselines: the listing/tree consumer rides the same
-        # /git/state poll the sidebar uses rather than adding an endpoint.
+        # The Git-decoration consumer still rides exactly one /git/state poll
+        # (sidebar + tracked-file badge changes).
         self.assertEqual(watch.count("explorerGitRequestUrl("), 1)
         self.assertIn("'state'", watch)
         self.assertIn("function explorerFsWatchConsumer(pane)", watch)
         self.assertIn("_explorerFsWatchRevision", watch)
         self.assertIn("refreshExplorerFilesystemSurfacesQuiet(index)", watch)
-        # Only panes inside a Git worktree have this consumer — the revision is
-        # the change signal, so a non-repository root never polls for it.
-        self.assertIn("_explorerGitContext?.available", watch)
-        self.assertIn("_explorerTreeSidebarOpen", watch)
-        self.assertIn("_explorerMode === 'directory'", watch)
         # Failures back off silently and never advance the baseline.
         self.assertIn("function explorerFsWatchOnFailure(pane)", watch)
         self.assertIn("_explorerFsWatchSuspended", watch)
+
+    def test_fs_surface_watch_adds_an_independent_git_free_directory_poll(self):
+        watch = self._static("js/explorer-git-watch.js")
+        # The membership signal is its own check over its own endpoint, never
+        # the Git poll: ignored folders and non-Git roots count too.
+        self.assertIn("/directory/state", watch)
+        self.assertIn("async function explorerDirectoryWatchCheckOne(index)", watch)
+        self.assertIn("function explorerDirectoryWatchEligible(index)", watch)
+        self.assertIn("function explorerDirectoryWatchTargets(pane)", watch)
+        self.assertIn("function explorerDirectoryWatchFlushPending(index)", watch)
+        self.assertIn("_explorerDirWatchInFlight", watch)
+        # The independent check never gates on Git context or pin/Follow scope.
+        check = watch[
+            watch.index("async function explorerDirectoryWatchCheckOne(index)"):
+            watch.index("function explorerGitWatchFlushAllPending()")
+        ]
+        self.assertNotIn("_explorerGitContext", check)
+        self.assertNotIn("explorerGitScopePath", check)
+        # Its own in-flight state, not shared with the Git poll.
+        self.assertIn("refreshExplorerFilesystemSurfacesQuiet(index, { dirs })", watch)
+        # Bounded: one path per /directory/state, capped by the shared tree bound.
+        self.assertIn("EXPLORER_DIR_WATCH_MAX_TREE_NODES", watch)
 
     def test_fs_surface_watch_defers_apply_during_interaction(self):
         watch = self._static("js/explorer-git-watch.js")
@@ -16280,23 +16297,22 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
                 self.assertIn(gate, watch)
 
     def test_fs_surface_quiet_refresh_helper_contract(self):
-        viewer = self._static("js/explorer-viewer.js")
+        directory = self._static("js/explorer-directory.js")
         tree = self._static("js/explorer-tree.js")
         for source, helpers in (
-            (viewer, (
+            (directory, (
                 "function explorerEntriesSignature(entries)",
-                "async function refreshExplorerDirectoryQuiet(index)",
-                "async function refreshExplorerFilesystemSurfacesQuiet(index)",
+                "async function refreshExplorerDirectoryQuiet(",
+                "async function refreshExplorerFilesystemSurfacesQuiet(index, options)",
             )),
-            (tree, ("async function refreshExplorerTreeQuiet(index)",)),
+            (tree, ("async function refreshExplorerTreeQuiet(",)),
         ):
             for helper in helpers:
                 with self.subTest(helper=helper):
                     self.assertIn(helper, source)
-        quiet_fn = viewer[
-            viewer.index("function explorerEntriesSignature(entries)"):
-            viewer.index("function explorerResolveFileView")
-        ] + tree[tree.index("const EXPLORER_FS_WATCH_MAX_TREE_NODES"):]
+        quiet_fn = directory[
+            directory.index("function explorerEntriesSignature(entries)"):
+        ]
         self.assertIn("cache: 'no-store'", quiet_fn)
         # Quiet: no loading placeholder, no tab/scroll/search reset, and never
         # through the user-initiated load paths.
@@ -16312,13 +16328,26 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
         # An unchanged listing performs zero DOM writes, and the tree refresh
         # is bounded because every node costs one /entries.
         self.assertIn("explorerEntriesSignature(pane._explorerEntries)", quiet_fn)
-        self.assertIn("EXPLORER_FS_WATCH_MAX_TREE_NODES", quiet_fn)
-        self.assertIn("captureScrollMetrics(", quiet_fn)
+        self.assertIn("captureScrollMetrics(", tree)
+
+    def test_directory_watch_baselines_are_recorded_from_entries(self):
+        directory = self._static("js/explorer-directory.js")
+        for symbol in (
+            "function recordExplorerDirectoryRevision(",
+            "function explorerDirectoryBaselineRevision(",
+            "_explorerDirRevisions",
+            "_explorerTreeDirRevisions",
+        ):
+            with self.subTest(symbol=symbol):
+                self.assertIn(symbol, directory)
+        # Baseline commits and pending preservation are executed by the Node
+        # directory-watch suite; this check pins the cross-module hooks only.
 
     def test_fs_watch_baseline_is_reset_by_user_initiated_loads(self):
+        directory = self._static("js/explorer-directory.js")
         viewer = self._static("js/explorer-viewer.js")
         tree = self._static("js/explorer-tree.js")
-        self.assertIn("function resetExplorerFsWatchBaseline(pane)", viewer)
+        self.assertIn("function resetExplorerFsWatchBaseline(pane)", directory)
         # Every listing/tree load leaves the surfaces current, so the next poll
         # re-bootstraps silently instead of repainting what was just fetched.
         self.assertEqual(

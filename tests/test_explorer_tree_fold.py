@@ -113,6 +113,7 @@ const persisted = [];
 const navigated = [];
 sandbox.notePanePresentationChanged = index => persisted.push(index);
 sandbox.updateExplorerFilesystemRootRevision = () => {};
+sandbox.recordExplorerDirectoryRevision = () => {};
 sandbox.refreshExplorerFilesystemCutSource = () => {};
 sandbox.loadExplorerPane = async (index, path) => {
     navigated.push({ index, path });

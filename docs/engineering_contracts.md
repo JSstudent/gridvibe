@@ -690,6 +690,38 @@ unless the task explicitly changes this contract.
   across sidebar, tree/listing refresh and Source marks. External file changes may
   refresh the viewer, never overwrite an editor buffer. `POST .../reveal` is a
   separate local-only, non-mutating OS-file-manager action.
+- `directory/state` is the Git-independent filesystem poll: a cheap, bounded
+  readdir whose `directory_revision` fingerprint advances on child creation,
+  deletion and rename — ignored children, ordinary untracked children and
+  non-Git roots included, and never gated on Git pin/Follow scope or a worktree.
+  It never recurses, invokes Git or reads file content. Shared local/SFTP checks
+  cap membership at `EXPLORER_DIRECTORY_STATE_MAX_ENTRIES` (4096), inspect at
+  most one extra child to detect overflow, and enforce
+  `EXPLORER_DIRECTORY_STATE_MAX_SECONDS` (2 seconds) between reads and at EOF.
+  SFTP uses `listdir_iter(read_aheads=1)`, tightens each read to the remaining
+  time within the leased channel timeout, closes the iterator and restores that
+  timeout on every exit. Unsupported streaming, overflow or expiry detected
+  between reads or at EOF returns `complete: false` and no revision. Transport
+  failures, including read timeouts, remain errors; neither receives a token.
+  Local blocking filesystem calls cannot be preempted, but late results never
+  claim completeness. Ordinary `/entries` remains complete and computes the
+  same canonical-JSON fingerprint from raw membership before Git decoration
+  only when within the entry cap. Oversized/slow directories require manual
+  refresh for membership changes; they are never silently truncated in browsing.
+  Listing and tree record independent tokens only when their `/entries` data
+  applies, including unchanged rows; state polls never commit baselines.
+  The page watches the browsed directory and loaded, expanded tree directories
+  once per path through a rotating `EXPLORER_DIR_WATCH_MAX_TREE_NODES` (16)
+  window. Dirty paths merge across polls and each apply selects at most 16 paths
+  (the tree helper independently caps itself at 16 nodes). Failed or held work
+  remains pending; versions preserve changes queued during another apply.
+  Checks capture pane/session/root, path/mode/tab, navigation/root epochs and
+  tree cache/expansion identity across awaits. User navigation/reload starts
+  invalidate old work, including same-path reloads; visibility and interaction
+  are checked again immediately before writes. A vanished expanded folder
+  refreshes its parent, whose applied rows prune cached descendants; a missing
+  session suspends the watch. Quiet refresh preserves scroll, expansion, Find,
+  tabs and drafts, and an open editor permits tree refresh only.
 - Multi-entry selection belongs to session id + root revision + one surface;
   changing any drops it. It never spans tree/listing or persists. Prune targets to
   topmost paths; rename stays single-entry. Batches issue N existing per-entry
@@ -2420,10 +2452,12 @@ in `README.md`; state the rules a change has to keep.
 - Substantial new frontend surfaces get the existing domain file or their own
   static JS file. Prefer DOM-free, Node-tested policy with thin DOM adapters;
   even a single predicate belongs in one module if multiple surfaces use it.
-- Before the next substantial directory-list/Preview change, extract that domain
-  from `explorer-viewer.js`. Existing tabs, Diff, Git sidebar and Files tree
-  domains stay extracted. Pure moves preserve extracted lines and behavior;
-  source-file references in tests may move, their behavioral assertions may not.
+- `web/static/js/explorer-directory.js` owns quiet directory refresh,
+  filesystem-surface coordination, asynchronous ownership checks and independent
+  rendered membership baselines. Directory row rendering and user loading remain
+  in `explorer-viewer.js`; tree refresh/rendering lives in `explorer-tree.js`.
+  Tabs, Diff and Git sidebar stay in their own files. A substantial new directory
+  rendering or Preview change must extract its owner before extending the viewer.
 - At roughly 2,200 lines in `web/workspaces.py`, or when adding a fourth
   close/teardown path, extract the close-action matrix (launch/restore is the
   alternative cut). `test_multi_workspace.py` must pass unchanged for a pure move.

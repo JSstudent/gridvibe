@@ -2,8 +2,8 @@
        Explorer change listener. A file changed outside GridVibe refreshes in
        the *viewer* only — the editor buffer stays untouchable.
 
-       One page-level scheduler runs two independent per-pane requests while
-       the page is visible, feeding three surfaces:
+       One page-level scheduler runs three independent per-pane checks while
+       the page is visible, feeding the same surfaces:
 
        1. Repository state — poll the cheap GET /api/explorer/<id>/git/state
           semantic-revision endpoint. An unchanged revision costs one
@@ -20,20 +20,31 @@
                modified outside GridVibe appears there with its `?`/`M` badge
                instead of waiting for a manual refresh. Only panes inside a
                Git worktree have this consumer: the revision *is* the signal,
-               so an ignored or non-repository file is picked up exactly when
-               Git itself would report it.
+               while the independent directory poll below discovers membership
+               changes in ignored folders and non-Git roots.
        2. Open file — while the viewer is showing a file, poll the cheaper
           GET /api/explorer/<id>/file/state (one `stat`, no read). A changed
           token re-reads the file and updates the viewer in place, so a file
           edited outside GridVibe stops going stale in the tab the user is
           actually looking at.
+       3. Directory state — poll GET /api/explorer/<id>/directory/state (one
+          bounded readdir, no Git, no content) for the browsed directory and
+          every loaded, expanded Files-tree directory. This is the
+          *independent*, Git-free change signal (ISSUE-2026-061): a child
+          created, deleted or renamed outside GridVibe — inside an ignored
+          folder or a root with no repository — advances its fingerprint where
+          `git status` reports nothing. Each /entries load records the
+          fingerprint as the baseline, so the same-path poll detects a change
+          that lands between a surface load and the first poll. Git pin/Follow
+          scope never chooses which directories this checks; neither
+          `_explorerGitContext.available` nor any Git state gates it.
 
        Every apply is deferred while the user is interacting (commit message
        focused, IME composition, context menu or modal open, pointer down,
        reading a scrolled sidebar/tree, an active text selection).
 
        Invariants: read-only; the editor buffer is never touched, because a
-       pane with an open editor is ineligible and the editor keeps its own
+       file viewer with an open editor is ineligible and the editor keeps its own
        save-conflict flow; every apply goes through one narrow quiet door
        (refreshExplorerGitRepoQuiet / refreshExplorerOpenFileQuiet /
        refreshExplorerFilesystemSurfacesQuiet) and never through
@@ -54,6 +65,10 @@
     const EXPLORER_GIT_WATCH_MAX_FAILURES = 5;        // then suspend
     const EXPLORER_GIT_WATCH_CHURN_LIMIT = 3;         // consecutive changes
     const EXPLORER_GIT_WATCH_EDIT_SETTLE_MS = 800;    // bounded typing settle window
+    // Directory state check: how many directories one pass polls. Mirrors
+    // EXPLORER_FS_WATCH_MAX_TREE_NODES in explorer-tree.js so the tree-quiet
+    // refresh and this poll agree on a bounded per-pass plan.
+    const EXPLORER_DIR_WATCH_MAX_TREE_NODES = 16;
     let explorerGitWatchTimer = null;
     let explorerGitWatchRunning = false;
     let explorerGitWatchPointerDown = false;
@@ -589,6 +604,286 @@
         }
     }
 
+    /* Independent directory state watch (ISSUE-2026-061) ──────────────────
+       The third, Git-free check the scheduler runs. Where the /git/state poll
+       only sees what Git reports, this one sees the directory as the filesystem
+       has it — ignored children, ordinary untracked children, and roots with no
+       repository all count. Its targets are the browsed directory plus every
+       loaded, expanded tree directory, never chosen by Git pin/Follow scope and
+       never gated on `_explorerGitContext.available`. It has its own
+       in-flight/due/backoff/failure state so a broken Git poll cannot take the
+       filesystem freshness down with it, and vice versa. */
+
+    /* The directories the poll checks, deduplicated and shallowest-first for
+       the tree half. Only *loaded* tree directories are watched — the poll
+       never bootstraps a node the tree has not fetched. */
+    function explorerDirectoryWatchTargets(pane) {
+        if (!pane) {
+            return [];
+        }
+        const targets = [];
+        const children = pane._explorerTreeChildren instanceof Map
+            ? pane._explorerTreeChildren
+            : null;
+        const expanded = pane._explorerTreeExpanded instanceof Set
+            ? pane._explorerTreeExpanded
+            : new Set();
+        if (pane._explorerMode === 'directory') {
+            targets.push(String(pane._explorerPath || ''));
+        }
+        if (pane._explorerTreeSidebarOpen && children && children.has('')) {
+            if (!targets.includes('')) {
+                targets.push('');
+            }
+            const ordered = [...expanded].sort(
+                (left, right) => left.split('/').length - right.split('/').length
+            );
+            for (const path of ordered) {
+                if (children.has(path) && !targets.includes(path)) {
+                    targets.push(path);
+                }
+            }
+        }
+        return targets;
+    }
+
+    /* A bounded, rotating window over the targets. Past the per-pass ceiling
+       the window starts at a cursor that advances every pass, so a large
+       expanded tree's deeper nodes are eventually checked instead of being
+       permanently excluded beyond the first `EXPLORER_FS_WATCH_MAX_TREE_NODES`. */
+    function explorerDirectoryWatchWindow(pane) {
+        const targets = explorerDirectoryWatchTargets(pane);
+        const limit = EXPLORER_DIR_WATCH_MAX_TREE_NODES;
+        if (targets.length <= limit) {
+            return { paths: targets, advance: 0, total: targets.length };
+        }
+        const cursor = pane._explorerDirWatchCursor || 0;
+        const paths = [];
+        for (let i = 0; i < limit; i += 1) {
+            paths.push(targets[(cursor + i) % targets.length]);
+        }
+        return { paths, advance: limit, total: targets.length };
+    }
+
+    function explorerDirectoryWatchNextDelay(pane) {
+        return explorerWatchNextDelay(
+            pane, pane._explorerDirWatchLastMs, pane._explorerDirWatchChanges
+        );
+    }
+
+    function explorerDirectoryWatchBackoff(pane) {
+        return explorerWatchBackoff(
+            pane._explorerDirWatchFailures, explorerDirectoryWatchNextDelay(pane)
+        );
+    }
+
+    function explorerDirectoryWatchEligible(index) {
+        const pane = terminals[index];
+        if (!pane || !isExplorerPaneInstance(pane) || !sessionIds[index]) {
+            return false;
+        }
+        if (!explorerDirectoryWatchTargets(pane).length) {
+            return false;
+        }
+        // A GridVibe filesystem/Git action refreshes what it touched; an open
+        // editor may still refresh its tree (the quiet re-list never touches the
+        // file viewer or editor buffer).
+        if (pane._explorerGitActionBusy || pane._explorerFsBusy) {
+            return false;
+        }
+        if (pane._explorerDirWatchInFlight || pane._explorerDirWatchSuspended) {
+            return false;
+        }
+        return true;
+    }
+
+    function explorerDirectoryWatchOnFailure(pane, status) {
+        if (status === 'session_not_found') {
+            // The session is gone; suspend immediately and silently.
+            pane._explorerDirWatchFailures = EXPLORER_GIT_WATCH_MAX_FAILURES;
+        } else {
+            pane._explorerDirWatchFailures = (pane._explorerDirWatchFailures || 0) + 1;
+        }
+        if (pane._explorerDirWatchFailures >= EXPLORER_GIT_WATCH_MAX_FAILURES) {
+            pane._explorerDirWatchSuspended = true;
+        }
+    }
+
+    function queueExplorerDirectoryChange(pane, path) {
+        const pending = pane._explorerDirWatchPending || { paths: new Set(), versions: new Map() };
+        pending.versions = pending.versions || new Map();
+        pane._explorerDirWatchSerial = (pane._explorerDirWatchSerial || 0) + 1;
+        pending.paths.add(path);
+        pending.versions.set(path, pane._explorerDirWatchSerial);
+        pane._explorerDirWatchPending = pending;
+    }
+
+    /* Deferred apply: hold the newest dirty-directory set through interaction
+       and the shared FS/Git busy flags, then re-list the selected directories
+       through the ordinary quiet path. It never advances a baseline on its own;
+       the quiet re-list re-records each directory's fresh revision. */
+    async function explorerDirectoryWatchFlushPending(index) {
+        if (document.visibilityState !== 'visible') {
+            return;
+        }
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        const pending = pane?._explorerDirWatchPending;
+        if (!pane || !sessionId || !pending || !pending.paths || !pending.paths.size) {
+            return;
+        }
+        if (pane._explorerDirWatchSuspended || (pane._explorerDirWatchFailures
+            && Date.now() < (pane._explorerDirWatchNextAt || 0))) return;
+        if (pane._explorerGitActionBusy || pane._explorerFsBusy || pane._explorerFsWatchRefreshing) {
+            return;
+        }
+        if (explorerFsWatchDeferralActive(index)) {
+            return;
+        }
+        const owner = captureExplorerDirectoryOwner(index);
+        const targets = new Set(explorerDirectoryWatchTargets(pane));
+        for (const path of pending.paths) {
+            if (!targets.has(path)) pending.paths.delete(path);
+        }
+        const dirs = [...pending.paths].slice(0, EXPLORER_DIR_WATCH_MAX_TREE_NODES);
+        if (!dirs.length) {
+            pane._explorerDirWatchPending = null;
+            return;
+        }
+        const versions = new Map(dirs.map(path => [path, pending.versions?.get(path)]));
+        const applied = await refreshExplorerFilesystemSurfacesQuiet(index, { dirs });
+        if (!explorerDirectoryOwnerCurrent(index, owner)) {
+            return;
+        }
+        if (applied) {
+            pane._explorerDirWatchFailures = 0;
+            // A poll may have queued a newer version during the fetch.
+            if (pane._explorerDirWatchPending === pending) {
+                for (const path of dirs) {
+                    if (pending.versions?.get(path) === versions.get(path)) {
+                        pending.paths.delete(path);
+                        pending.versions?.delete(path);
+                    }
+                }
+                if (!pending.paths.size) pane._explorerDirWatchPending = null;
+            }
+        } else {
+            // Interaction starting during the fetch is a hold, not a failure.
+            if (document.visibilityState !== 'visible' || explorerFsWatchDeferralActive(index)) return;
+            explorerDirectoryWatchOnFailure(pane, 0);
+            pane._explorerDirWatchNextAt = Date.now() + explorerDirectoryWatchBackoff(pane);
+        }
+    }
+
+    async function explorerDirectoryWatchCheckOne(index) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        if (!pane || !sessionId) {
+            return;
+        }
+        pane._explorerDirWatchInFlight = true;
+        const started = performance.now();
+        let delay = explorerDirectoryWatchNextDelay(pane);
+        const owner = captureExplorerDirectoryOwner(index);
+        const windowPlan = explorerDirectoryWatchWindow(pane);
+        const dirty = new Set();
+        const missing = new Set();
+        try {
+            for (const path of windowPlan.paths) {
+                if (!explorerDirectoryOwnerCurrent(index, owner, { tree: true })
+                    || !explorerDirectoryWatchTargets(pane).includes(path)) return;
+                if ([...missing].some(parent => path.startsWith(parent + '/'))) continue;
+                const baselines = explorerDirectoryRenderedRevisions(pane, path);
+                const known = baselines[0] || '';
+                const response = await fetch(
+                    `/api/explorer/${encodeURIComponent(sessionId)}/directory/state`
+                    + `?path=${encodeURIComponent(path)}&known=${encodeURIComponent(known)}`,
+                    { cache: 'no-store' }
+                );
+                if (!explorerDirectoryOwnerCurrent(index, owner, { tree: true })
+                    || !explorerDirectoryWatchTargets(pane).includes(path)) {
+                    return;
+                }
+                if (!response.ok) {
+                    const error = await response.json();
+                    if (!explorerDirectoryOwnerCurrent(index, owner, { tree: true })) return;
+                    if (response.status === 404 && error?.code === 'not_found' && path) {
+                        // A vanished expanded folder dirties its parent. The
+                        // parent's applied listing prunes the cached branch.
+                        // Drop impossible re-lists first: the missing folder
+                        // may itself be open in Preview or already pending.
+                        missing.add(path);
+                        const pending = pane._explorerDirWatchPending;
+                        if (pending) {
+                            for (const queued of pending.paths) {
+                                if (queued === path || queued.startsWith(path + '/')) {
+                                    pending.paths.delete(queued);
+                                    pending.versions?.delete(queued);
+                                }
+                            }
+                        }
+                        const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+                        queueExplorerDirectoryChange(pane, parent);
+                        pane._explorerDirWatchPending.paths = new Set([
+                            parent, ...pane._explorerDirWatchPending.paths
+                        ]);
+                        dirty.add(parent);
+                        continue;
+                    }
+                    explorerDirectoryWatchOnFailure(pane, error?.code || response.status);
+                    delay = explorerDirectoryWatchBackoff(pane);
+                    return;
+                }
+                const data = await response.json();
+                if (!explorerDirectoryOwnerCurrent(index, owner, { tree: true })
+                    || !explorerDirectoryWatchTargets(pane).includes(path)) {
+                    return;
+                }
+                // The root may have been reset/replaced during the flight; the
+                // response then says nothing about the directory now on screen.
+                if ((data.root_revision || '') !== owner.root) {
+                    return;
+                }
+                const revision = typeof data?.revision === 'string' ? data.revision : '';
+                if (!revision) {
+                    // Past the state ceiling (or unreadable): no cheap signal for
+                    // this path. Record nothing and leave its surface alone.
+                    continue;
+                }
+                if (baselines.some(baseline => revision !== baseline)) {
+                    dirty.add(path);
+                    queueExplorerDirectoryChange(pane, path);
+                }
+            }
+            if (dirty.size) {
+                pane._explorerDirWatchChanges = (pane._explorerDirWatchChanges || 0) + 1;
+            } else {
+                pane._explorerDirWatchChanges = 0;
+            }
+            await explorerDirectoryWatchFlushPending(index);
+            if (!pane._explorerDirWatchPending) pane._explorerDirWatchFailures = 0;
+            if (explorerWatchPaneCurrent(index, pane, sessionId)) {
+                pane._explorerDirWatchCursor = (
+                    (pane._explorerDirWatchCursor || 0) + windowPlan.advance
+                ) % Math.max(1, windowPlan.total);
+                delay = pane._explorerDirWatchFailures > 0
+                    ? explorerDirectoryWatchBackoff(pane)
+                    : explorerDirectoryWatchNextDelay(pane);
+            }
+        } catch (error) {
+            if (explorerWatchPaneCurrent(index, pane, sessionId)) {
+                explorerDirectoryWatchOnFailure(pane, 0);
+                delay = explorerDirectoryWatchBackoff(pane);
+            }
+        } finally {
+            pane._explorerDirWatchInFlight = false;
+            if (explorerWatchPaneCurrent(index, pane, sessionId)) {
+                pane._explorerDirWatchLastMs = performance.now() - started;
+                pane._explorerDirWatchNextAt = Date.now() + delay;
+            }
+        }
+    }
+
     function explorerGitWatchFlushAllPending() {
         if (document.visibilityState !== 'visible') {
             return;
@@ -597,6 +892,7 @@
             explorerGitWatchFlushPending(index);
             explorerFileWatchFlushPending(index);
             explorerFsWatchFlushPending(index);
+            explorerDirectoryWatchFlushPending(index);
         }
     }
 
@@ -787,6 +1083,7 @@
                 explorerGitWatchFlushPending(index);
                 await explorerFileWatchFlushPending(index);
                 await explorerFsWatchFlushPending(index);
+                await explorerDirectoryWatchFlushPending(index);
                 const pane = terminals[index];
                 if (!pane) {
                     continue;
@@ -813,6 +1110,17 @@
                         }
                     }
                 }
+                if (explorerDirectoryWatchEligible(index)) {
+                    const dueAt = pane._explorerDirWatchNextAt || 0;
+                    if (Date.now() < dueAt) {
+                        noteDue(dueAt);
+                    } else {
+                        await explorerDirectoryWatchCheckOne(index);
+                        if (terminals[index] === pane) {
+                            noteDue(pane._explorerDirWatchNextAt);
+                        }
+                    }
+                }
             }
             scheduleExplorerGitWatch(
                 Math.min(
@@ -832,6 +1140,7 @@
             if (pane) {
                 pane._explorerGitWatchNextAt = 0;
                 pane._explorerFileWatchNextAt = 0;
+                pane._explorerDirWatchNextAt = 0;
             }
         });
         explorerGitWatchFlushAllPending();
