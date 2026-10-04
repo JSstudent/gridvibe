@@ -171,7 +171,7 @@ the inherited id is only the fallback for a read that failed.
 | --- | --- |
 | `report_result` | hands the outcome of the task *this* pane was given back to the agent that gave it — `result` text and a `status` of `done`, `failed` or `blocked`. It names no pane: GridVibe's record of who handed the task over decides |
 | `wait_for_task` | stands by for the next task the agent that handed *this* pane its task sends with `send_task`, and returns it exactly as `read_handoff` does — see [Following up with the same agent](#following-up-with-the-same-agent) |
-| `send_task` | hands the agent already running in a pane its next task, without relaunching it — only the agent this pane handed its current task to, once it has reported |
+| `send_task` | hands the agent already running in a pane its next task, without relaunching it — only the agent this pane handed its current task to, once it has reported. Optional `task_label` names this round on the crew board; an omitted label is never inherited |
 | `wait_for_results` | waits for the agents *this* pane handed a task to, and returns their reports — see [Handing a result back](#handing-a-result-back) |
 
 None creates, ends or changes a pane, and nothing is typed into any terminal:
@@ -183,17 +183,18 @@ task reaches the worker the same way.
 | Tool | Makes |
 | --- | --- |
 | `create_workspace` | one empty, labelled workspace. Creating it does not make a window appear, and it is refused past sixteen workspaces that are *still* empty — counted over the whole app, because the server cannot tell a tool from the launcher's own button |
-| `launch_panes` | one session (a new tab) of panes — agent, terminal, file explorer or browser preview. An agent pane may carry a `task`, and this needs no open window. In a workspace whose window already shows a tab, the new tab joins the strip without being shown; the window stays on the person's tab. The result's `session_name` is the name the tab actually got: a repeated scratch name is suffixed. The whole request is validated before anything exists — see [Where a launched pane opens](#where-a-launched-pane-opens) |
+| `launch_panes` | one session (a new tab) of panes — agent, terminal, file explorer or browser preview. Each agent pane may carry a `task` and optional `task_label`, and this needs no open window. In a workspace whose window already shows a tab, the new tab joins the strip without being shown; the window stays on the person's tab. The result's `session_name` is the name the tab actually got: a repeated scratch name is suffixed. The whole request is validated before anything exists — see [Where a launched pane opens](#where-a-launched-pane-opens) |
 | `open_window` | makes sure a workspace has a window, and never brings one forward: an open window is left where it is (`already_open: true`, `raised: false`), and a new one is created minimized in the taskbar (`minimized: true`, with a note). Reports `opened`, `blocked` or `no_window_available`. Showing a session is `focus_session`'s job. In browser mode it opens a browser tab, which the browser may show |
-| `split_pane` | halves one pane on a chosen axis and says what the new pane runs. With no `kind` stated it is what the 🪟 button makes: a terminal clones its source, and an explorer, browser or *agent* pane splits off a plain terminal rooted where it is showing — the kind is never cloned. A stated `directory` wins over where the source is standing. The pane may be in any session tab of its window, shown or not: the split switches no tab and moves no focus. Reports `split`, `refused` or `no_window_available`, and a `split` whose place in the layout could not be saved carries a `note`. With `kind: "agent"` it may carry a `task`, and the result's `handoff` says it is waiting. Its description states what the axis words produce: `horizontal` stacks the new pane below, `vertical` puts it to the right |
+| `split_pane` | halves one pane on a chosen axis and says what the new pane runs. With no `kind` stated it is what the 🪟 button makes: a terminal clones its source, and an explorer, browser or *agent* pane splits off a plain terminal rooted where it is showing — the kind is never cloned. A stated `directory` wins over where the source is standing. The pane may be in any session tab of its window, shown or not: the split switches no tab and moves no focus. Reports `split`, `refused` or `no_window_available`, and a `split` whose place in the layout could not be saved carries a `note`. With `kind: "agent"` it may carry a `task` and optional `task_label`, and the result's `handoff` says it is waiting. Its description states what the axis words produce: `horizontal` stacks the new pane below, `vertical` puts it to the right |
 
 ### replace — two
 
 `set_pane_agent` relaunches a pane into an agent CLI (or `agent: ""` back to a
 plain shell, optionally changing the local shell family and the MCP choice),
-and may hand the new agent a `task` — the way to give a task to a pane that
-already exists, since nothing types into one. It starts a fresh agent; the next
-task for an agent this one already handed a task to goes by `send_task`, which
+and may hand the new agent a `task` with an optional `task_label` — the way to
+give a task to a pane that already exists, since nothing types into one. It
+starts a fresh agent; the next task for an agent this one already handed a
+task to goes by `send_task`, which
 keeps that agent running. A stated `auto_mode` starts the
 agent with its auto-approval flag, under the same rule as `launch_panes` and
 `split_pane`: only when the person asked for an autonomous agent. Unstated, the
@@ -382,8 +383,8 @@ and `set_pane_agent` never forwards it. It follows the agent it was given to —
 kept across a save, a restore and a relaunch of the same agent, dropped when
 the tools go or the pane becomes another agent or kind, and not restored when
 the tools come back. The waiver log line says `source=mode` for the standing
-grant and `source=call` for a stated one. The pane's MCP frame and dashboard
-chip read red while it holds the grant. `whoami` does not report it yet: an
+grant and `source=call` for a stated one. The pane's MCP frame, on its header and on
+its sidebar row, reads red while it holds the grant. `whoami` does not report it yet: an
 agent in override mode learns it only from gated calls that go through.
 
 ### absent
@@ -502,8 +503,8 @@ the temporary file is `web/agent_handoff_files.py`.
 - **Only a handle rides in a split intent.** Every polling page is shown the
   intent, so the text stays in GridVibe and the split route takes the handle
   once, for its own source pane, before it appends anything. A launch takes
-  each pane's task off its config before anything else reads it, so no preset
-  and no runtime snapshot ever holds one.
+  each pane's task and optional label off its config before anything else reads
+  it, so no preset and no runtime snapshot ever holds either.
 - **A task runs on the caller's own machine.** Both local, or both SSH to the
   same host, user and port. Nothing waives it, `override` included. An agent
   with no pane is refused: it has no machine and no lineage to record.
@@ -527,6 +528,34 @@ the temporary file is `web/agent_handoff_files.py`.
   agent's request, not the person's words — it cannot waive a permission
   prompt and is never a reason to set `override`. A task never implies
   `auto_mode`.
+
+### Task labels on the crew board
+
+The sending agent chooses whether to supply `task_label` for each task.
+`split_pane`, `set_pane_agent` and `send_task` take it beside `task` as a
+top-level argument. For `launch_panes`, put it inside each tasked pane's entry
+in `panes`, beside that entry's `task`; it is not a session-wide label.
+GridVibe does not generate a label automatically.
+
+A label must be a string containing one printable line of at most 60 Unicode
+code points, with at least one non-whitespace character. Newlines, tabs,
+control characters and other nonprintable characters are refused, as are
+wrong types, blank strings, longer labels, and a label without a task. Both
+the sidecar and the HTTP routes validate before anything changes. Accepted
+text is preserved exactly, including ordinary spaces at either end; nothing
+is trimmed, stripped or truncated. Omit the field to leave a task unlabelled.
+
+The label is public dashboard metadata: it travels with the task's assignment
+and appears as `label` on its dashboard crew link. The task text remains in
+the handoff delivery. `read_handoff` and `wait_for_task` do not expose a separate
+label field. Labels are held in memory, excluded from saved pane configs and
+launch commands, and logged only by their character count.
+
+Each crew card keeps the agent icon and terminal title in its top row, with
+the title in the agent's colour. Its second row shows the current task label,
+or the normal chat line when no label was supplied. Sidebar and dialog list
+rows, crew headers and existing hover text keep their normal naming rules.
+The display contract is in [Agent dashboard](../docs/engineering_contracts.md#agent-dashboard).
 
 ## Handing a result back
 
@@ -628,6 +657,11 @@ and `wait_for_task` is how it listens. The rules are in `web/agent_followups.py`
   between the same two panes; once that report has been collected it goes, so a
   long exchange lists the worker once. An uncollected report stays until it is
   returned.
+- **Each round chooses its own label.** Supply `task_label` on `send_task` to
+  describe that follow-up on the crew board. Omit it to restore the chat line;
+  the previous round's label is never inherited. An empty string is refused,
+  so clearing a label means leaving the key out. The terminal title above the
+  label keeps naming the same pane.
 
 ## Stated properties, not discoveries
 

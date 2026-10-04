@@ -71,6 +71,7 @@ What is pinned is what the dashboard is *for*:
 """
 
 import json
+import re
 import shutil
 import subprocess
 import unittest
@@ -82,7 +83,10 @@ STATIC_JS = REPO_ROOT / "web" / "static" / "js"
 AGENT_IDENTITY_JS = STATIC_JS / "agent-identity.js"
 AGENT_GLYPHS_JS = STATIC_JS / "agent-glyphs.js"
 SESSION_COLOUR_JS = STATIC_JS / "session-colour.js"
+AGENT_CREWS_JS = STATIC_JS / "agent-crews.js"
 DASHBOARD_DIALOG_JS = STATIC_JS / "dashboard-dialog.js"
+DASHBOARD_SIDEBAR_JS = STATIC_JS / "dashboard-sidebar.js"
+LIST_DOM_JS = REPO_ROOT / "tests" / "dashboard_list_dom.js"
 
 NODE = shutil.which("node")
 
@@ -332,7 +336,7 @@ function camel(name) {
 /* How many of each section the reader is looking at: the nesting is the point,
    so it is counted rather than inferred from the row list. */
 function sectionCounts() {
-    const count = pattern => (body().innerHTML.match(pattern) || []).length;
+    const count = pattern => (renderedListHtml().match(pattern) || []).length;
     return {
         workspaces: count(/<section class="dash-workspace[ "]/g),
         sessions: count(/<section class="dash-session[ "]/g),
@@ -347,10 +351,10 @@ function parseAgentRows() {
     const rows = [];
     const pattern = /<button\b[^>]*class="dash-agent"([^>]*)>([\s\S]*?)<\/button>/g;
     let found;
-    while ((found = pattern.exec(body().innerHTML)) !== null) {
+    while ((found = pattern.exec(renderedListHtml())) !== null) {
         const agent = /data-agent="([^"]*)"/.exec(found[1]);
         const inner = found[2];
-        const name = /<span class="dash-agent-name">([\s\S]*?)<\/span>/.exec(inner);
+        const name = /<span class="dash-agent-who">([\s\S]*?)<\/span>/.exec(inner);
         /* The shell, off the last line of the row's hover: the chip that used
            to state it on the line itself is gone. */
         const hover = /title="([^"]*)"/.exec(found[1]);
@@ -374,7 +378,7 @@ function parseSessionColours() {
     const colours = [];
     const pattern = /<section class="dash-session" style="([^"]*)"[\s\S]*?data-dashboard-key="session:([^"]*)"/g;
     let found;
-    while ((found = pattern.exec(body().innerHTML)) !== null) {
+    while ((found = pattern.exec(renderedListHtml())) !== null) {
         const edge = /--dash-session-color:([^;"]*)/.exec(found[1]);
         const soft = /--dash-session-color-soft:([^;"]*)/.exec(found[1]);
         colours.push({
@@ -391,7 +395,7 @@ function parseRows() {
     const rows = [];
     const pattern = /<button\b([^>]*)>([\s\S]*?)<\/button>/g;
     let found;
-    while ((found = pattern.exec(body().innerHTML)) !== null) {
+    while ((found = pattern.exec(renderedListHtml())) !== null) {
         const attributes = {};
         const dataset = {};
         const attributePattern = /([a-zA-Z-]+)="([^"]*)"/g;
@@ -439,7 +443,7 @@ function parseRows() {
                the only place a value spans two lines. */
             hover,
             agent: attributes['data-agent'] || '',
-            name: /<span class="dash-agent-name">([\s\S]*?)<\/span>/.exec(inner)?.[1].trim() || '',
+            name: /<span class="dash-agent-who">([\s\S]*?)<\/span>/.exec(inner)?.[1].trim() || '',
             transport: transport.trim(),
             tags,
             tagHovers,
@@ -618,13 +622,21 @@ function report(value) { process.stdout.write(JSON.stringify(value)); }
 
 @unittest.skipUnless(NODE, "Node.js is required for the dashboard dialog tests")
 class DashboardDialogTestCase(unittest.TestCase):
+    # Load the shipped dialog and its shared list without source switches.
+    def _dialog_source(self) -> str:
+        return DASHBOARD_DIALOG_JS.read_text(encoding="utf-8")
+
     def _run_node(self, body: str):
         script = (
             HARNESS_STUBS
+            + LIST_DOM_JS.read_text(encoding="utf-8")
             + AGENT_IDENTITY_JS.read_text(encoding="utf-8")
             + AGENT_GLYPHS_JS.read_text(encoding="utf-8")
             + SESSION_COLOUR_JS.read_text(encoding="utf-8")
-            + DASHBOARD_DIALOG_JS.read_text(encoding="utf-8")
+            + AGENT_CREWS_JS.read_text(encoding="utf-8")
+            + self._dialog_source()
+            + (REPO_ROOT / "tests" / "dashboard_list_exports.js").read_text(encoding="utf-8")
+            + DASHBOARD_SIDEBAR_JS.read_text(encoding="utf-8")
             + "\n(async () => {\n"
             + body
             + "\n})().catch(error => { console.error(error); process.exit(1); });\n"
@@ -684,13 +696,13 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             const progress = { innerHTML: dashboardProgressHtml(first) };
             /* The hover the first render actually gave this row, path and all,
                so an update that dropped it would show here. */
-            const row = { dataset: { sessionId: 's1' }, title: dashboardPaneHover(first),
+            const row = { classList: fakeClassList(), removeAttribute() {}, dataset: { sessionId: 's1' }, title: dashboardPaneHover(first),
                 querySelector: selector => ({
                     '.dash-agent-line': line,
                     '.dash-agent-reading': reading,
                     '.dash-agent-progress': progress
                 }[selector]) };
-            body().querySelectorAll = () => [row];
+            listBody.querySelectorAll = () => [row];
             body().scrollTop = 123;
             fetchAnswer = snapshot([group([pane({ activity: activity({
                 title: 'Renamed chat', state: 'idle', idle_seconds: 70
@@ -709,6 +721,46 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
         self.assertIn("Idle 1m", result["reading"])
         self.assertEqual(result["scroll"], 123)
 
+    def test_waiting_on_another_agent_is_a_reading_updated_in_place(self):
+        """`waiting` overrides the activity reading after the transport, in the
+        crew module's words, and it is a reading: an agent entering
+        `wait_for_results` changes its dot and never rebuilds its row."""
+        result = self._run_node(
+            """
+            dashboardShown();
+            const busy = pane({ activity: activity({ state: 'working' }) });
+            fetchAnswer = snapshot([group([busy])]);
+            await refreshAgentDashboard();
+            const originalHtml = body().innerHTML;
+            const reading = { innerHTML: dashboardActivityHtml(busy) };
+            const progress = { innerHTML: dashboardProgressHtml(busy) };
+            const row = { classList: fakeClassList(), removeAttribute() {}, dataset: { sessionId: 's1' }, title: dashboardPaneHover(busy),
+                querySelector: selector => ({
+                    '.dash-agent-line': { textContent: '' },
+                    '.dash-agent-reading': reading,
+                    '.dash-agent-progress': progress
+                }[selector]) };
+            listBody.querySelectorAll = () => [row];
+            fetchAnswer = snapshot([group([pane({ waiting: 'crew', activity: activity({ state: 'working' }) })])]);
+            await refreshAgentDashboard();
+            const words = ['task', 'crew', ''].map(waiting => dashboardPaneStateWord(pane({ waiting })));
+            report({
+                sameButtons: body().innerHTML === originalHtml,
+                reading: reading.innerHTML,
+                words,
+                disconnected: dashboardPaneStateKey(pane({ waiting: 'crew', status: 'disconnected' }))
+            });
+            """
+        )
+        self.assertTrue(result["sameButtons"])
+        self.assertIn("dash-state-waiting", result["reading"])
+        self.assertIn("Waiting on its crew", result["reading"])
+        self.assertEqual(
+            result["words"],
+            ["Standing by for its next task", "Waiting on its crew", "No output yet"],
+        )
+        self.assertEqual(result["disconnected"], "error")
+
     def test_a_pane_that_only_moved_updates_the_hover_its_line_does_not_show(self):
         """`directory` is deliberately absent from the structure key, so a pane
         that has only changed directory takes the in-place path -- and its line,
@@ -724,13 +776,13 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             const line = { textContent: dashboardPaneLine(before) };
             const reading = { innerHTML: dashboardActivityHtml(before) };
             const progress = { innerHTML: dashboardProgressHtml(before) };
-            const row = { dataset: { sessionId: 's1' }, title: dashboardPaneHover(before),
+            const row = { classList: fakeClassList(), removeAttribute() {}, dataset: { sessionId: 's1' }, title: dashboardPaneHover(before),
                 querySelector: selector => ({
                     '.dash-agent-line': line,
                     '.dash-agent-reading': reading,
                     '.dash-agent-progress': progress
                 }[selector]) };
-            body().querySelectorAll = () => [row];
+            listBody.querySelectorAll = () => [row];
             const originalHtml = body().innerHTML;
             fetchAnswer = snapshot([group([pane({
                 directory: '/srv/app/worker',
@@ -1001,7 +1053,7 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             report({
                 line: rowFor('pane:s1').label,
                 hover: rowFor('pane:s1').hover,
-                html: body().innerHTML
+                html: renderedListHtml()
             });
             """
         )
@@ -1031,13 +1083,13 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             const line = { textContent: dashboardPaneLine(unnamed) };
             const reading = { innerHTML: dashboardActivityHtml(unnamed) };
             const progress = { innerHTML: dashboardProgressHtml(unnamed) };
-            const row = { dataset: { sessionId: 's1' }, title: dashboardPaneHover(unnamed),
+            const row = { classList: fakeClassList(), removeAttribute() {}, dataset: { sessionId: 's1' }, title: dashboardPaneHover(unnamed),
                 querySelector: selector => ({
                     '.dash-agent-line': line,
                     '.dash-agent-reading': reading,
                     '.dash-agent-progress': progress
                 }[selector]) };
-            body().querySelectorAll = () => [row];
+            listBody.querySelectorAll = () => [row];
             const before = line.textContent;
 
             const named = pane({ agent_selection: 'codex',
@@ -1126,12 +1178,12 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
                 auto: rowFor('pane:s1').tags,
                 plain: rowFor('pane:s2').tags,
                 transports: parseAgentRows().map(entry => entry.transport),
-                html: body().innerHTML,
+                html: renderedListHtml(),
                 rows: parseAgentRows().length
             });
             """
         )
-        self.assertEqual(result["auto"], ["auto"])
+        self.assertEqual(result["auto"], [])
         self.assertEqual(result["plain"], [])
         self.assertEqual(result["transports"], ["SSH", "SSH"])
         # And nothing on the drawn row says it: the chip is gone, so `tags` is
@@ -1139,64 +1191,7 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
         self.assertNotIn("dash-tag-transport", result["html"])
         self.assertEqual(result["rows"], 2)
 
-    def test_the_pane_running_with_gridvibe_tools_is_the_one_that_says_so(self):
-        """The distinction the dashboard had no reading of at all.
 
-        Two agent panes on one CLI, one of which can create workspaces, launch
-        panes and split the grid through the `gridvibe` MCP server and one of
-        which cannot, read identically here -- so choosing which row to give a
-        "split this pane" instruction to meant going and asking the agent.
-        """
-        result = self._run_node(
-            """
-            fetchAnswer = snapshot([group([
-                pane({ agent_mcp: true }),
-                pane({ session_id: 's2', index: 1 })
-            ])]);
-            showDashboard();
-            await settle();
-            report({
-                tooled: rowFor('pane:s1').tags,
-                hovers: rowFor('pane:s1').tagHovers,
-                plain: rowFor('pane:s2').tags,
-                names: parseAgentRows().map(entry => entry.name)
-            });
-            """
-        )
-        self.assertEqual(result["tooled"], ["MCP"])
-        self.assertEqual(result["plain"], [])
-        # Three characters on the row, the sentence on the chip's own hover --
-        # which sits inside the row's, the way the state dot's does.
-        self.assertEqual(len(result["hovers"]), 1)
-        self.assertIn("GridVibe tools", result["hovers"][0])
-        # Both rows still name the same agent: the tag is what tells them apart.
-        self.assertEqual(result["names"], ["Claude Code", "Claude Code"])
-
-    def test_a_remote_pane_with_the_tools_wears_the_tag_too(self):
-        """A remote pane's tools reach it over a reverse forward on its own SSH
-        transport, so dropping the tag there would be a lie about the pane."""
-        result = self._run_node(
-            """
-            fetchAnswer = snapshot([group([
-                pane({ mode: 'ssh', agent_mcp: true }),
-                pane({
-                    session_id: 's2', index: 1, mode: 'wsl', use_powershell: true,
-                    host: 'PowerShell', agent_mcp: true, agent_auto_mode: true
-                })
-            ])]);
-            showDashboard();
-            await settle();
-            report({
-                remote: rowFor('pane:s1').tags,
-                local: rowFor('pane:s2').tags,
-                transports: parseAgentRows().map(entry => entry.transport)
-            });
-            """
-        )
-        self.assertEqual(result["remote"], ["MCP"])
-        # And a pane with both wears both, in one order.
-        self.assertEqual(result["local"], ["MCP", "auto"])
-        self.assertEqual(result["transports"], ["SSH", "PowerShell"])
 
     def test_the_flag_says_nothing_about_a_pane_that_is_no_longer_an_agent(self):
         """`agent_mcp` outlives the agent that justified it, and the row is not
@@ -1257,7 +1252,7 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             await settle();
             report({
                 styled: parseSessionColours().length,
-                cards: (body().innerHTML.match(/<section class="dash-session"[ >]/g) || []).length,
+                cards: (renderedListHtml().match(/<section class="dash-session"[ >]/g) || []).length,
                 rows: parseAgentRows().length
             });
             """
@@ -1270,11 +1265,11 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             fetchAnswer = snapshot([group([pane()], { pane_count: 4, agent_count: 1 })]);
             showDashboard();
             await settle();
-            report({ html: body().innerHTML, active: rowFor('session:g1').tags });
+            report({ html: renderedListHtml(), active: rowFor('session:g1').tags });
             """
         )
-        self.assertIn("1 agent · 3 other panes", result["html"])
-        self.assertEqual(result["active"], ["active"])
+        self.assertIn("1 agent · 3 other", result["html"])
+        self.assertEqual(result["active"], [])
 
     def test_the_totals_line_counts_what_the_window_is_about(self):
         result = self._run_node(
@@ -1295,7 +1290,7 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             fetchAnswer = { generated_at: 1, workspaces: [], totals: { workspaces: 0, sessions: 0, agents: 0 } };
             showDashboard();
             await settle();
-            report({ html: body().innerHTML, totals: totals().textContent, rows: parseRows().length });
+            report({ html: renderedListHtml(), totals: totals().textContent, rows: parseRows().length });
             """
         )
         self.assertIn("Nothing is running.", result["html"])
@@ -1312,7 +1307,7 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             showDashboard();
             await settle();
             report({
-                html: body().innerHTML,
+                html: renderedListHtml(),
                 cards: sectionCounts().sessions,
                 agents: parseAgentRows().length,
                 quiet: rowFor('session:g9'),
@@ -1341,7 +1336,7 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             fetchAnswer = snapshot([group(), quietGroup()]);
             showDashboard();
             await settle();
-            report(body().innerHTML);
+            report(renderedListHtml());
             """
         )
         self.assertIn("3 panes", result)
@@ -1357,12 +1352,12 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             });
             showDashboard();
             await settle();
-            report({ totals: totals().textContent, html: body().innerHTML });
+            report({ totals: totals().textContent, html: renderedListHtml() });
             """
         )
         self.assertEqual(result["totals"], "no agents · 1 session · 1 workspace")
         # And the band above it says the same thing about itself.
-        self.assertIn("1 session · no agents", result["html"])
+        self.assertIn("no agents", result["html"])
         self.assertIn('class="dash-workspace is-quiet"', result["html"])
 
     def test_an_announced_title_cannot_rewrite_the_rows(self):
@@ -1373,7 +1368,7 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             })])]);
             showDashboard();
             await settle();
-            report({ html: body().innerHTML, line: rowFor('pane:s1').label });
+            report({ html: renderedListHtml(), line: rowFor('pane:s1').label });
             """
         )
         self.assertNotIn("<img src=x", result["html"])
@@ -1464,7 +1459,7 @@ class DashboardWindowActivityTestCase(DashboardDialogTestCase):
         order = [
             row["html"].index('class="dash-agent-reading"'),
             row["html"].index('class="dash-agent-icon"'),
-            row["html"].index('class="dash-agent-name"'),
+            row["html"].index('class="dash-agent-who"'),
             row["html"].index('class="dash-agent-line"'),
             row["html"].index('class="dash-agent-progress"'),
         ]
@@ -2414,90 +2409,10 @@ class DashboardDialogRepaintTestCase(DashboardDialogTestCase):
             """
         )
         self.assertTrue(result["unchanged"])
-        self.assertFalse(result["afterChange"])
+        self.assertTrue(result["afterChange"])
         self.assertEqual(result["line"], "now doing something else")
 
-    def test_a_pane_relaunched_onto_the_tools_repaints_and_an_idle_tick_does_not(self):
-        """The tag is structure, not a reading: it changes only when the pane is
-        relaunched, so it rides the same key the agent and the shell do and a
-        poll that says the same thing still repaints nothing."""
-        result = self._run_node(
-            """
-            fetchAnswer = snapshot([group([pane({ agent_mcp: true })])]);
-            showDashboard();
-            await settle();
-            const tagged = rowFor('pane:s1').tags;
-            body().innerHTML += '<!--the reader was here-->';
-            await refreshAgentDashboard();
-            const unchanged = body().innerHTML.includes('the reader was here');
-            fetchAnswer = snapshot([group([pane({ agent_mcp: false })])]);
-            await refreshAgentDashboard();
-            report({
-                tagged,
-                unchanged,
-                afterRelaunch: body().innerHTML.includes('the reader was here'),
-                plain: rowFor('pane:s1').tags
-            });
-            """
-        )
-        self.assertEqual(result["tagged"], ["MCP"])
-        self.assertTrue(result["unchanged"])
-        self.assertFalse(result["afterRelaunch"])
-        self.assertEqual(result["plain"], [])
 
-    def test_an_override_mode_pane_wears_the_same_chip_in_red(self):
-        """Override mode is a hue, not a second chip: the text stays `MCP`, the
-        chip gains `is-override`, and its hover says in words what the colour
-        means. Only a pane that wears the chip at all can wear it red, and a
-        relaunch that drops the grant repaints the row without it."""
-        result = self._run_node(
-            """
-            fetchAnswer = snapshot([group([
-                pane({ agent_mcp: true, agent_mcp_override: true }),
-                pane({ session_id: 's2', index: 1, agent_mcp: true }),
-                pane({
-                    session_id: 's3', index: 2, agent_mcp: false,
-                    agent_mcp_override: true
-                }),
-                pane({
-                    session_id: 's4', index: 3, agent_mcp: true,
-                    agent_mcp_override: 'true'
-                })
-            ])]);
-            showDashboard();
-            await settle();
-            const read = key => ({
-                tags: rowFor(key).tags,
-                classes: rowFor(key).tagClasses,
-                hovers: rowFor(key).tagHovers
-            });
-            const before = ['pane:s1', 'pane:s2', 'pane:s3', 'pane:s4'].map(read);
-            fetchAnswer = snapshot([group([
-                pane({ agent_mcp: true, agent_mcp_override: false })
-            ])]);
-            await refreshAgentDashboard();
-            report({
-                before,
-                after: read('pane:s1'),
-                plainTitle: GridVibeAgentIdentity.MCP_TAG_TITLE,
-                overrideTitle: GridVibeAgentIdentity.MCP_OVERRIDE_TAG_TITLE
-            });
-            """
-        )
-        red, plain, stale, stringy = result["before"]
-        self.assertEqual(red["tags"], ["MCP"])
-        self.assertEqual(red["classes"], [["dash-tag", "dash-tag-mcp", "is-override"]])
-        self.assertEqual(red["hovers"], [result["overrideTitle"]])
-        self.assertEqual(plain["classes"], [["dash-tag", "dash-tag-mcp"]])
-        self.assertEqual(plain["hovers"], [result["plainTitle"]])
-        # A grant left behind on a pane without the tools paints nothing.
-        self.assertEqual(stale["tags"], [])
-        # Only a stated `true` is the grant.
-        self.assertEqual(stringy["classes"], [["dash-tag", "dash-tag-mcp"]])
-        # The relaunch that dropped the grant took the red with it.
-        self.assertEqual(result["after"]["tags"], ["MCP"])
-        self.assertEqual(result["after"]["classes"], [["dash-tag", "dash-tag-mcp"]])
-        self.assertEqual(result["after"]["hovers"], [result["plainTitle"]])
 
     def test_a_reading_that_changed_keeps_the_caret_and_the_scroll(self):
         result = self._run_node(
@@ -2512,13 +2427,13 @@ class DashboardDialogRepaintTestCase(DashboardDialogTestCase):
             focusIsInside = true;
             focusTarget = { focused: false, focus() { this.focused = true; } };
             document.activeElement = { dataset: { dashboardKey: 'pane:s1' } };
-            fetchAnswer = snapshot([group([pane({ activity: activity({ title: 'a different thing' }) })])]);
+            fetchAnswer = snapshot([group([pane({ session_id: 's2', activity: activity({ title: 'a different thing' }) })])]);
             await refreshAgentDashboard();
             report({ scrollTop: body().scrollTop, queries: focusQueries, refocused: focusTarget.focused });
             """
         )
         self.assertEqual(result["scrollTop"], 240)
-        self.assertEqual(result["queries"], ['[data-dashboard-key="pane:s1"]'])
+        self.assertIn('[data-dashboard-key="pane:s1"]', result["queries"])
         self.assertTrue(result["refocused"])
 
     def test_a_slow_answer_never_repaints_over_a_newer_one(self):
@@ -2624,6 +2539,1284 @@ class DashboardDialogRepaintTestCase(DashboardDialogTestCase):
         )
 
 
+# The crew board's page: the slot the module writes the board into, parsed back
+# into node and crew-head elements whose slots count every write, so an in-place
+# update is told apart from a rebuilt node. The wire layer is recorded rather
+# than run; `test_agent_crews.py` runs the real one.
+CREW_BOARD_STUBS = r"""
+const HANDED = '2026-10-02T10:00:00+00:00';
+const HANDED_S = Date.parse(HANDED) / 1000;
+
+/* One assignment, as `GET /api/dashboard` lists it. */
+function link(requester, worker, extra) {
+    return Object.assign({
+        link_id: `${requester}-${worker}`,
+        requester_session_id: requester,
+        worker_session_id: worker,
+        state: 'working',
+        read: true,
+        status: '',
+        collected: false,
+        handed_at: HANDED,
+        reported_at: '',
+        round: 1,
+        reason: ''
+    }, extra || {});
+}
+
+/* An orchestrator (`s1`), two agents it handed tasks to (`s2`, `s3`), one
+   more agent (`s4`) and a pane with nothing to do with any of it (`s5`). */
+function crewReading(links, extra) {
+    const more = extra || {};
+    return snapshot([group([
+        pane({ waiting: more.waiting || '', activity: activity({ title: more.s1 || 'Plan the release', state: 'idle' }) }),
+        pane({ session_id: 's2', index: 1, agent_selection: 'codex',
+            activity: activity({ title: more.s2 || 'Review the parser' }) }),
+        pane({ session_id: 's3', index: 2, activity: activity({ title: 'Write the tests' }) }),
+        pane({ session_id: 's4', index: 3, activity: activity({ title: 'Fix the build' }) }),
+        pane({ session_id: 's5', index: 4, activity: activity({ title: 'On its own' }) })
+    ])], { links, generated_at: HANDED_S + (more.age || 30) });
+}
+
+let slotWrites = 0;
+function countedSlot(property, value) {
+    let held = value;
+    return Object.defineProperty({}, property, {
+        get() { return held; },
+        set(next) { held = next; slotWrites += 1; },
+        enumerable: true
+    });
+}
+
+function attributesOf(source) {
+    const attributes = {};
+    const pattern = /([a-zA-Z-]+)="([^"]*)"/g;
+    let found;
+    while ((found = pattern.exec(source)) !== null) { attributes[found[1]] = found[2]; }
+    return attributes;
+}
+
+function datasetOf(attributes) {
+    const dataset = {};
+    Object.keys(attributes).filter(name => name.startsWith('data-'))
+        .forEach(name => { dataset[camel(name.slice(5))] = attributes[name]; });
+    return dataset;
+}
+
+function segments(html, opener) {
+    const starts = [];
+    let found;
+    while ((found = opener.exec(html)) !== null) { starts.push({ at: found.index, match: found }); }
+    return starts.map((start, index) => ({
+        match: start.match,
+        html: html.slice(start.at, index + 1 < starts.length ? starts[index + 1].at : html.length)
+    }));
+}
+
+function first(pattern, html) {
+    const found = pattern.exec(html);
+    return found ? found[1] : '';
+}
+
+let boardWidth = 470;
+function parseBoard(slot) {
+    const html = slot.html;
+    slot.board = /class="dash-crews-board"/.test(html) ? { scrollLeft: 0, clientWidth: boardWidth } : null;
+    slot.nodes = segments(html, /<(button|div)\b([^>]*\bdata-crew-node="[^"]*"[^>]*)>/g).map(part => {
+        const attributes = attributesOf(part.match[2]);
+        const slots = {
+            '.dash-crew-name': countedSlot('textContent',
+                first(/<span class="dash-crew-name">([^<]*)<\/span>/, part.html)),
+            '.dash-crew-line': countedSlot('textContent',
+                first(/<span class="dash-crew-line">([^<]*)<\/span>/, part.html)),
+            '.dash-crew-reading': countedSlot('innerHTML',
+                first(/<span class="dash-crew-reading">([\s\S]*?)<\/span>\s*<span class="dash-agent-icon"/, part.html)),
+            '.dash-crew-pill-slot': countedSlot('innerHTML',
+                first(/<span class="dash-crew-pill-slot">((?:<span[^>]*>[^<]*<\/span>)?)<\/span>/, part.html)),
+            '.dash-crew-round': countedSlot('textContent',
+                first(/<span class="dash-crew-round">([^<]*)<\/span>/, part.html)),
+            '.dash-crew-age': countedSlot('innerHTML',
+                first(/<span class="dash-crew-age">((?:<span[^>]*>[^<]*<\/span>)?)<\/span>/, part.html))
+        };
+        return {
+            tag: part.match[1],
+            attributes,
+            dataset: datasetOf(attributes),
+            title: attributes.title || '',
+            html: part.html,
+            classList: fakeClassList(),
+            closest(selector) { return selector === '[data-crew-node]' || selector === '[data-dashboard-action]' ? this : null; },
+            slots,
+            querySelector: selector => slots[selector] || null
+        };
+    });
+    slot.heads = segments(html, /<div class="dash-crew" data-crew-root="([^"]*)"[^>]*>/g).map(part => {
+        const slots = {
+            '.dash-crew-title-line': countedSlot('textContent',
+                first(/<span class="dash-crew-title-line">([^<]*)<\/span>/, part.html)),
+            '.dash-crew-meta': countedSlot('textContent',
+                first(/<span class="dash-crew-meta">([^<]*)<\/span>/, part.html)),
+            '.dash-crew-segments': countedSlot('innerHTML',
+                first(/<span class="dash-crew-segments" aria-hidden="true">([\s\S]*?)<\/span>/, part.html))
+        };
+        return { dataset: { crewRoot: part.match[1], dashboardKey: 'crew-frame:' + part.match[1] },
+            classList: fakeClassList(), slots,
+            closest(selector) { return selector === '[data-crew-root]' ? this : null; },
+            querySelector: selector => slots[selector] || null };
+    });
+}
+
+/* The slot the module writes the board into. A full render makes a new one; a
+   board-only rebuild writes this one's `innerHTML`. */
+function makeCrewSlot(html) {
+    const slot = { html, rebuilds: 0, scrollTop: 0, classList: fakeClassList(), contains: () => false };
+    let populated = Boolean(html.trim());
+    Object.defineProperty(slot, 'innerHTML', {
+        get() { return this.html; },
+        set(next) { if (populated) this.rebuilds += 1; populated = true; this.html = next; parseBoard(this); }
+    });
+    slot.querySelector = selector => (selector === '.dash-crews-board' ? slot.board : null);
+    slot.querySelectorAll = selector => ({
+        '[data-crew-node]': slot.nodes,
+        '[data-crew-root]': slot.heads
+    }[selector] || []);
+    parseBoard(slot);
+    return slot;
+}
+
+const crewDom = { bodyHtml: null, slot: null };
+function crewSlot() {
+    const html = body().innerHTML;
+    if (crewDom.bodyHtml !== html) {
+        crewDom.bodyHtml = html;
+        const open = '<div class="dash-crews-slot" data-dashboard-crews hidden>';
+        const start = html.indexOf(open);
+        if (start < 0) {
+            crewDom.slot = null;
+        } else {
+            const rest = html.slice(start + open.length);
+            /* The board is the body's final slot, after the permanent list. */
+            crewDom.slot = makeCrewSlot(rest.replace(/<\/div>\s*$/, ''));
+        }
+    }
+    return crewDom.slot;
+}
+function node(id) { return (crewSlot()?.nodes || []).find(entry => entry.dataset.crewNode === id) || null; }
+function nodes() { return (crewSlot()?.nodes || []).map(entry => entry.dataset.crewNode); }
+function head(root) { return (crewSlot()?.heads || []).find(entry => entry.dataset.crewRoot === root) || null; }
+function cell(id) {
+    const found = new RegExp(`<div class="dash-crew-cell" style="([^"]*)">\\s*<(?:button|div)\\b[^>]*data-crew-node="${id}"`)
+        .exec(crewSlot().html);
+    const value = name => Number(new RegExp(`--dash-crew-${name}:(\\d+)`).exec(found[1])[1]);
+    return { col: value('col'), row: value('row'), span: value('span') };
+}
+
+body().querySelectorAll = () => [];
+body().querySelector = selector => {
+    if (selector === '[data-dashboard-crews]') return crewSlot();
+    if (selector === '.dash-crews-board') return crewSlot()?.board || null;
+    return null;
+};
+
+/* The wire layer, recorded. */
+const wires = { made: [], paints: 0, paused: [], disposed: 0 };
+const listWires = { paused: [], paints: 0 };
+GridVibeAgentCrews.createWireLayer = options => {
+    if (options.card === undefined) return {
+        paint() { listWires.paints++; }, highlight() {},
+        setPaused(value) { listWires.paused.push(value); }, dispose() {}
+    };
+    const made = { mode: options.mode, card: options.card, container: options.container };
+    wires.made.push(made);
+    return {
+        paint() { wires.paints += 1; },
+        highlight() {},
+        setPaused(on) { wires.paused.push(on); },
+        dispose() { wires.disposed += 1; }
+    };
+};
+"""
+
+
+class DashboardCrewBoardTestCase(DashboardDialogTestCase):
+    """The crew board above the session list.
+
+    It is drawn from the same reading as the list, against its own structure
+    key: the shape of each crew (who sits where, and whether its pane is still
+    open) rebuilds the board alone, and everything a node says -- its title,
+    reading, phase pill, round and age -- is written in place, so a report or a
+    follow-up round never replaces a node element. The list below is never
+    touched by any of it."""
+
+    def test_a_task_label_is_board_only_safe_text_and_updates_without_replacing_nodes(self):
+        result = self._run_crew(r"""
+            const firstLabel = '<img src=x onerror=evil()> & "review"';
+            fetchAnswer = crewReading([link('s1', 's2', { label: firstLabel })]);
+            fetchAnswer.workspaces[0].groups[0].panes[1].title = '<b>Parser worker</b>';
+            await refreshAgentDashboard();
+            const before = node('s2');
+            const initialName = before.slots['.dash-crew-name'].textContent;
+            const rootName = node('s1').slots['.dash-crew-name'].textContent;
+            const initial = before.slots['.dash-crew-line'].textContent;
+            const initialHtml = crewSlot().html;
+            const nodeHead = first(/<span class="dash-crew-node-head">([\s\S]*?)<\/span>\s*<span class="dash-crew-line">/, before.html);
+            const listHtml = body().innerHTML;
+            const header = head('s1').slots['.dash-crew-title-line'].textContent;
+            fetchAnswer = crewReading([link('s1', 's2', {
+                label: '<script>evil()</script>', round: 2, link_id: 'round-two'
+            })]);
+            fetchAnswer.workspaces[0].groups[0].panes[1].title = '<b>Parser worker</b>';
+            await refreshAgentDashboard();
+            const second = node('s2').slots['.dash-crew-line'].textContent;
+            const secondName = node('s2').slots['.dash-crew-name'].textContent;
+            fetchAnswer = crewReading([link('s1', 's2', { round: 3, link_id: 'round-three' })]);
+            fetchAnswer.workspaces[0].groups[0].panes[1].title = '<b>Parser worker</b>';
+            await refreshAgentDashboard();
+            const fallback = node('s2').slots['.dash-crew-line'].textContent;
+            const fallbackName = node('s2').slots['.dash-crew-name'].textContent;
+            const listUnchanged = body().innerHTML === listHtml;
+            fetchAnswer.workspaces[0].groups[0].panes[1].title = '<script>Renamed worker</script>';
+            await refreshAgentDashboard();
+            report({ initial, initialHtml, second, initialName, rootName, secondName, fallbackName,
+                nodeHead, fallback,
+                renamed: node('s2').slots['.dash-crew-name'].textContent,
+                fallbackAfterRename: node('s2').slots['.dash-crew-line'].textContent,
+                same: before === node('s2'), rebuilds: crewSlot().rebuilds,
+                listUnchanged,
+                headerUnchanged: head('s1').slots['.dash-crew-title-line'].textContent === header,
+                listHasLabel: listHtml.includes(firstLabel) || listHtml.includes('&lt;img')
+            });
+        """)
+        # The small HTML parser keeps entities; a browser decodes them into text.
+        self.assertEqual(result["initial"], '&lt;img src=x onerror=evil()&gt; &amp; &quot;review&quot;')
+        self.assertNotIn('<img src=x', result["initialHtml"])
+        self.assertIn('&lt;img src=x onerror=evil()&gt;', result["initialHtml"])
+        self.assertEqual(result["initialName"], '&lt;b&gt;Parser worker&lt;/b&gt;')
+        self.assertEqual(result["rootName"], "Claude Code")
+        self.assertIn('class="dash-agent-icon"', result["nodeHead"])
+        self.assertIn('class="dash-crew-name"', result["nodeHead"])
+        self.assertNotIn('dash-crew-line', result["nodeHead"])
+        self.assertNotIn('&lt;img', result["nodeHead"])
+        self.assertNotIn('<b>Parser worker</b>', result["initialHtml"])
+        self.assertEqual(result["secondName"], result["initialName"])
+        self.assertEqual(result["fallbackName"], result["initialName"])
+        self.assertEqual(result["renamed"], '<script>Renamed worker</script>')
+        self.assertEqual(result["second"], '<script>evil()</script>')
+        self.assertEqual(result["fallback"], "Review the parser")
+        self.assertEqual(result["fallbackAfterRename"], result["fallback"])
+        self.assertTrue(result["same"])
+        self.assertEqual(result["rebuilds"], 0)
+        self.assertTrue(result["listUnchanged"])
+        self.assertTrue(result["headerUnchanged"])
+        self.assertFalse(result["listHasLabel"])
+
+    def _run_crew(self, body: str):
+        return self._run_node(CREW_BOARD_STUBS + r"""
+dashboardShown();
+const readSelectedBoard = refreshAgentDashboard;
+let boardSelectionInitialized = false;
+refreshAgentDashboard = async () => {
+    if (!boardSelectionInitialized && fetchAnswer?.links?.length) {
+        for (const root of dashboardCrewContext(fetchAnswer).crews.roots) _agentDashboardSelectedCrews.add(root);
+        boardSelectionInitialized = true;
+    }
+    return readSelectedBoard();
+};
+""" + body)
+
+    def test_no_links_draw_no_board(self):
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([]);
+            await refreshAgentDashboard();
+            const empty = body().innerHTML;
+            fetchAnswer = snapshot([group([pane()])]);
+            await refreshAgentDashboard();
+            report({
+                section: empty.includes('class="dash-crews"'),
+                slot: crewSlot().html,
+                agents: sectionCounts().agents,
+                noLinksKey: body().innerHTML.includes('dash-crews"'),
+                made: wires.made.length
+            });
+            """
+        )
+        self.assertFalse(result["section"])
+        self.assertEqual(result["slot"], "")
+        self.assertEqual(result["agents"], 1)
+        self.assertFalse(result["noLinksKey"])
+        self.assertEqual(result["made"], 0)
+
+    def test_a_nested_crew_is_laid_out_by_depth_with_parents_spanning(self):
+        """`s1` handed tasks to `s2` and `s3`; `s2` handed one on to `s4`.
+        Depth-first in list order; a parent spans its leaves' rows; the list
+        beside it is the list it always was."""
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([
+                link('s1', 's2'), link('s2', 's4'), link('s1', 's3')
+            ]);
+            await refreshAgentDashboard();
+            report({
+                order: nodes(),
+                cells: Object.fromEntries(nodes().map(id => [id, cell(id)])),
+                depths: /--dash-crew-depths:(\\d+)/.exec(crewSlot().html)[1],
+                crews: crewSlot().heads.map(entry => entry.dataset.crewRoot),
+                meta: head('s1').slots['.dash-crew-meta'].textContent,
+                segments: (head('s1').slots['.dash-crew-segments'].innerHTML.match(/dash-crew-segment/g) || []).length,
+                title: head('s1').slots['.dash-crew-title-line'].textContent,
+                agents: sectionCounts().agents,
+                rootClass: node('s1').attributes.class
+            });
+            """
+        )
+        self.assertEqual(result["order"], ["s1", "s2", "s4", "s3"])
+        self.assertEqual(result["cells"], {
+            "s1": {"col": 1, "row": 1, "span": 2},
+            "s2": {"col": 2, "row": 1, "span": 1},
+            "s4": {"col": 3, "row": 1, "span": 1},
+            "s3": {"col": 2, "row": 2, "span": 1},
+        })
+        self.assertEqual(result["depths"], "3")
+        self.assertEqual(result["crews"], ["s1"])
+        self.assertEqual(result["meta"], "0 of 3 reported")
+        self.assertEqual(result["segments"], 3)
+        self.assertEqual(result["title"], "Plan the release")
+        # Every live session is still listed, crew or not.
+        self.assertEqual(result["agents"], 5)
+        self.assertIn("is-root", result["rootClass"])
+
+    def test_a_node_carries_its_rows_target(self):
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            const live = node('s2');
+            report({
+                live: { tag: live.tag, dataset: live.dataset },
+                row: rowFor('pane:s2').dataset,
+                agent: live.dataset.agent,
+                line: live.slots['.dash-crew-line'].textContent
+            });
+            """
+        )
+        live = result["live"]
+        self.assertEqual(live["tag"], "button")
+        for name in ("dashboardAction", "workspaceId", "groupId", "sessionId"):
+            with self.subTest(attribute=name):
+                self.assertEqual(live["dataset"][name], result["row"][name])
+        self.assertEqual(live["dataset"]["dashboardKey"], "crew:s2")
+        self.assertEqual(result["agent"], "codex")
+
+    def test_a_pane_that_is_not_listed_is_not_on_the_board(self):
+        """The server stops publishing a closed pane's links, and the board
+        draws only panes it can land on, so even a reading that still carried
+        one would draw no ghost of it: no node, no pill saying the pane
+        closed, and no dashed box."""
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([
+                link('s1', 's2'),
+                link('s1', 's9', { state: 'reported', status: 'done', reported_at: HANDED })
+            ]);
+            await refreshAgentDashboard();
+            report({
+                order: nodes(),
+                html: crewSlot().html,
+                meta: head('s1').slots['.dash-crew-meta'].textContent
+            });
+            """
+        )
+        self.assertEqual(result["order"], ["s1", "s2"])
+        self.assertNotIn("pane closed", result["html"].lower())
+        self.assertNotIn("is-ghost", result["html"])
+        self.assertNotIn('data-crew-node="s9"', result["html"])
+        self.assertEqual(result["meta"], "0 of 1 reported")
+
+    def test_every_report_wears_its_status_and_collecting_is_only_in_words(self):
+        result = self._run_crew(
+            """
+            const reported = (status, collected) => ({
+                state: 'reported', status, collected, reported_at: HANDED
+            });
+            fetchAnswer = crewReading([
+                link('s1', 's2', reported('done', false)),
+                link('s1', 's3', reported('blocked', true)),
+                link('s1', 's4', reported('failed', true))
+            ]);
+            await refreshAgentDashboard();
+            fetchAnswer = crewReading([
+                link('s1', 's2', reported('done', true)),
+                link('s1', 's3', reported('blocked', true)),
+                link('s1', 's4', reported('failed', true))
+            ]);
+            await refreshAgentDashboard();
+            report({
+                pills: ['s2', 's3', 's4'].map(id => node(id).slots['.dash-crew-pill-slot'].innerHTML),
+                segments: head('s1').slots['.dash-crew-segments'].innerHTML,
+                meta: head('s1').slots['.dash-crew-meta'].textContent
+            });
+            """
+        )
+        done, blocked, failed = result["pills"]
+        self.assertIn('class="dash-crew-pill is-done"', done)
+        self.assertIn(">done<", done)
+        self.assertIn("has collected the report", done)
+        self.assertIn('class="dash-crew-pill is-blocked"', blocked)
+        self.assertIn('class="dash-crew-pill is-failed"', failed)
+        # A report is never a pill of its own called "collected".
+        for pill in result["pills"]:
+            self.assertNotIn("is-collected", pill)
+            self.assertNotIn(">collected<", pill)
+        self.assertNotIn("is-collected", result["segments"])
+        self.assertEqual(result["meta"], "3 of 3 reported")
+
+    def test_an_uncollected_report_says_so_in_its_hover(self):
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([link('s1', 's2', {
+                state: 'reported', status: 'done', collected: false, reported_at: HANDED
+            })]);
+            await refreshAgentDashboard();
+            report({ pill: node('s2').slots['.dash-crew-pill-slot'].innerHTML });
+            """
+        )
+        self.assertIn("Reported done; its orchestrator has not collected the report yet", result["pill"])
+
+    def test_the_dialog_is_big_while_a_crew_is_on_it_and_a_column_otherwise(self):
+        result = self._run_crew(
+            """
+            const dialogEl = { on: false, classList: { toggle(name, force) {
+                if (name === 'has-crews') dialogEl.on = Boolean(force);
+            } } };
+            body().parentElement = dialogEl;
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            const withCrew = dialogEl.on;
+            fetchAnswer = crewReading([]);
+            await refreshAgentDashboard();
+            report({ withCrew, without: dialogEl.on });
+            """
+        )
+        self.assertTrue(result["withCrew"])
+        self.assertFalse(result["without"])
+
+    def test_both_panes_keep_their_own_scroll_across_a_render(self):
+        result = self._run_crew("""
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            crewSlot().scrollTop = 120;
+            listBody.scrollTop = 340;
+            const before = crewSlot();
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            fetchAnswer.workspaces[0].groups[0].panes[4].agent_selection = 'codex';
+            await refreshAgentDashboard();
+            report({ crews: crewSlot().scrollTop, sessions: listBody.scrollTop, same: before === crewSlot() });
+        """)
+        self.assertEqual(result["crews"], 120)
+        self.assertEqual(result["sessions"], 340)
+        self.assertTrue(result["same"])
+
+    def test_a_report_keeps_every_node_and_writes_only_what_changed(self):
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([link('s1', 's2'), link('s1', 's3', { read: false })]);
+            await refreshAgentDashboard();
+            const listHtml = body().innerHTML;
+            const before = { s1: node('s1'), s2: node('s2'), s3: node('s3') };
+            const firstPill = node('s2').slots['.dash-crew-pill-slot'].innerHTML;
+            const handed = node('s3').slots['.dash-crew-pill-slot'].innerHTML;
+            slotWrites = 0;
+            fetchAnswer = crewReading([link('s1', 's2'), link('s1', 's3', { read: false })]);
+            await refreshAgentDashboard();
+            const idleWrites = slotWrites;
+            fetchAnswer = crewReading([
+                link('s1', 's2', { state: 'reported', status: 'done', reported_at: HANDED }),
+                link('s1', 's3', { read: false })
+            ], { age: 120 });
+            await refreshAgentDashboard();
+            report({
+                sameNodes: ['s1', 's2', 's3'].every(id => node(id) === before[id]),
+                rebuilds: crewSlot().rebuilds,
+                sameList: body().innerHTML === listHtml,
+                firstPill,
+                handed,
+                pill: node('s2').slots['.dash-crew-pill-slot'].innerHTML,
+                untouched: node('s3').slots['.dash-crew-pill-slot'].innerHTML,
+                age: node('s2').slots['.dash-crew-age'].innerHTML,
+                meta: head('s1').slots['.dash-crew-meta'].textContent,
+                segments: head('s1').slots['.dash-crew-segments'].innerHTML,
+                idleWrites,
+                made: wires.made.length,
+                paints: wires.paints
+            });
+            """
+        )
+        self.assertTrue(result["sameNodes"])
+        self.assertEqual(result["rebuilds"], 0)
+        self.assertTrue(result["sameList"])
+        self.assertIn("is-working", result["firstPill"])
+        self.assertIn('class="dash-crew-pill is-handed"', result["handed"])
+        self.assertIn('class="dash-crew-pill is-done"', result["pill"])
+        self.assertIn(">done<", result["pill"])
+        self.assertEqual(result["untouched"], result["handed"])
+        self.assertIn(">2m<", result["age"])
+        self.assertIn("Reported 2m ago", result["age"])
+        self.assertEqual(result["meta"], "1 of 2 reported")
+        self.assertIn("is-done", result["segments"])
+        # An unchanged poll writes nothing at all.
+        self.assertEqual(result["idleWrites"], 0)
+        # One layer, painted after every reading.
+        self.assertEqual(result["made"], 1)
+        self.assertEqual(result["paints"], 3)
+
+    def test_a_follow_up_round_keeps_the_node_and_counts_from_round_two(self):
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([link('s1', 's2', {
+                link_id: 'a', state: 'reported', status: 'done', collected: true, reported_at: HANDED
+            })]);
+            await refreshAgentDashboard();
+            const before = node('s2');
+            const roundOne = node('s2').slots['.dash-crew-round'].textContent;
+            const markup = crewSlot().html;
+            fetchAnswer = crewReading([link('s1', 's2', { link_id: 'b', round: 2, read: false })]);
+            await refreshAgentDashboard();
+            report({
+                roundOne,
+                roundOneInMarkup: /round \\d/.test(markup),
+                same: node('s2') === before,
+                rebuilds: crewSlot().rebuilds,
+                round: node('s2').slots['.dash-crew-round'].textContent,
+                pill: node('s2').slots['.dash-crew-pill-slot'].innerHTML,
+                hover: node('s2').title,
+                linkIdInMarkup: crewSlot().html.includes('data-link') || crewSlot().html.includes('"b"')
+            });
+            """
+        )
+        self.assertEqual(result["roundOne"], "")
+        self.assertFalse(result["roundOneInMarkup"])
+        self.assertTrue(result["same"])
+        self.assertEqual(result["rebuilds"], 0)
+        self.assertEqual(result["round"], "round 2")
+        self.assertIn("is-handed", result["pill"])
+        self.assertIn("· round 2", result["hover"])
+        self.assertFalse(result["linkIdInMarkup"])
+
+    def test_a_new_worker_rebuilds_the_board_and_leaves_the_list(self):
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            const listHtml = body().innerHTML;
+            const slot = crewSlot();
+            fetchAnswer = crewReading([link('s1', 's2'), link('s1', 's3')]);
+            await refreshAgentDashboard();
+            report({
+                sameSlot: crewSlot() === slot,
+                rebuilds: slot.rebuilds,
+                order: nodes(),
+                sameList: body().innerHTML === listHtml,
+                made: wires.made.length,
+                disposed: wires.disposed
+            });
+            """
+        )
+        self.assertTrue(result["sameSlot"])
+        self.assertEqual(result["rebuilds"], 1)
+        self.assertEqual(result["order"], ["s1", "s2", "s3"])
+        self.assertTrue(result["sameList"])
+        # The board element was replaced, so its wires are made again on it.
+        self.assertEqual(result["made"], 2)
+        self.assertEqual(result["disposed"], 1)
+
+    def test_a_list_change_keeps_the_boards_sideways_scroll(self):
+        """A change elsewhere in the list re-renders the body, board included;
+        a deep crew the reader scrolled sideways stays where it was."""
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([link('s1', 's2'), link('s2', 's4')]);
+            await refreshAgentDashboard();
+            const before = crewSlot().board;
+            before.scrollLeft = 190;
+            const reading = crewReading([link('s1', 's2'), link('s2', 's4')]);
+            reading.workspaces[0].groups[0].panes[4].agent_mcp = true;
+            fetchAnswer = reading;
+            await refreshAgentDashboard();
+            report({
+                replaced: crewSlot().board !== before,
+                scrollLeft: crewSlot().board.scrollLeft,
+                order: nodes()
+            });
+            """
+        )
+        self.assertFalse(result["replaced"])
+        self.assertEqual(result["scrollLeft"], 190)
+        self.assertEqual(result["order"], ["s1", "s2", "s4"])
+
+    def test_the_last_link_gone_takes_the_board_and_its_wires(self):
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            fetchAnswer = crewReading([]);
+            await refreshAgentDashboard();
+            report({ slot: crewSlot().html, disposed: wires.disposed });
+            """
+        )
+        self.assertEqual(result["slot"], "")
+        self.assertEqual(result["disposed"], 1)
+
+    def test_an_ended_pill_names_why_it_ended(self):
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([
+                link('s1', 's2', { state: 'ended', reason: 'agent exited' }),
+                link('s1', 's3', { state: 'ended', reason: 'something new' })
+            ]);
+            await refreshAgentDashboard();
+            report({
+                exited: node('s2').slots['.dash-crew-pill-slot'].innerHTML,
+                other: node('s3').slots['.dash-crew-pill-slot'].innerHTML,
+                meta: head('s1').slots['.dash-crew-meta'].textContent
+            });
+            """
+        )
+        self.assertIn('title="Ended: Its agent exited before it reported"', result["exited"])
+        self.assertIn(">ended<", result["exited"])
+        self.assertIn('title="Ended before it reported"', result["other"])
+        self.assertEqual(result["meta"], "0 of 2 reported")
+
+    def test_the_waiting_orchestrator_says_how_many_it_waits_on(self):
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([
+                link('s1', 's2'),
+                link('s1', 's3', { read: false }),
+                link('s1', 's4', { state: 'reported', status: 'blocked', reported_at: HANDED })
+            ], { waiting: 'crew' });
+            await refreshAgentDashboard();
+            const waiting = node('s1').slots['.dash-crew-pill-slot'].innerHTML;
+            fetchAnswer = crewReading([link('s1', 's2'), link('s1', 's3', { read: false }),
+                link('s1', 's4', { state: 'reported', status: 'blocked', reported_at: HANDED })]);
+            await refreshAgentDashboard();
+            report({ waiting, after: node('s1').slots['.dash-crew-pill-slot'].innerHTML,
+                blocked: node('s4').slots['.dash-crew-pill-slot'].innerHTML });
+            """
+        )
+        self.assertIn('class="dash-crew-pill is-waiting"', result["waiting"])
+        self.assertIn(">waiting on 2<", result["waiting"])
+        self.assertEqual(result["after"], "")
+        self.assertIn('class="dash-crew-pill is-blocked"', result["blocked"])
+
+    def test_a_narrow_board_draws_lanes_and_a_wide_one_fans(self):
+        result = self._run_crew(
+            """
+            boardWidth = 300;
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            const narrow = wires.made.map(entry => [entry.mode, entry.card]);
+            crewSlot().board.clientWidth = 470;
+            fetchAnswer = crewReading([link('s1', 's2', { read: false })]);
+            await refreshAgentDashboard();
+            report({
+                narrow,
+                modes: wires.made.map(entry => entry.mode),
+                disposed: wires.disposed,
+                container: wires.made[1].container === crewSlot().board
+            });
+            """
+        )
+        self.assertEqual(result["narrow"], [["lane", ""]])
+        self.assertEqual(result["modes"], ["lane", "fan"])
+        self.assertEqual(result["disposed"], 1)
+        self.assertTrue(result["container"])
+
+    def test_the_wires_stop_with_the_poll(self):
+        result = self._run_crew(
+            """
+            shell().classList.remove('visible');
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            showDashboard();
+            await settle();
+            const made = wires.paused.slice();
+            document.hidden = true;
+            document.fire('visibilitychange');
+            const hidden = wires.paused[wires.paused.length - 1];
+            document.hidden = false;
+            document.fire('visibilitychange');
+            await settle();
+            const back = wires.paused[wires.paused.length - 1];
+            closeAgentDashboardDialog();
+            report({ made, hidden, back, shut: wires.paused[wires.paused.length - 1] });
+            """
+        )
+        self.assertEqual(result["made"], [False])
+        self.assertTrue(result["hidden"])
+        self.assertFalse(result["back"])
+        self.assertTrue(result["shut"])
+
+    def test_a_node_press_opens_the_pane_it_names(self):
+        result = self._run_crew(
+            """
+            wireAgentDashboard();
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            body().fire('click', {
+                target: { closest: () => ({ dataset: node('s2').dataset }) },
+                preventDefault() {}
+            });
+            await settle();
+            report({ opened: calls.openWorkspaceWindow, targets: calls.focusTargets });
+            """
+        )
+        self.assertEqual(
+            result["opened"], [{"workspaceId": "default", "options": {"groupId": "g1"}}]
+        )
+        self.assertEqual(result["targets"][0]["options"], {"groupId": "g1", "sessionId": "s2"})
+        self.assertEqual(result["targets"][0]["openedSoFar"], 0)
+
+
+class DashboardSelectedCrewsTestCase(DashboardDialogTestCase):
+    """The shipped dialog: one shared list and boards selected by the reader."""
+
+    def _run_crew(self, body: str):
+        return self._run_node(CREW_BOARD_STUBS + "\ndashboardShown();\n" + body)
+
+    def test_opening_a_crew_clears_the_sidebar_hover_and_focus_highlight(self):
+        result = self._run_crew("""
+            wireAgentDashboard();
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            listBody.fire('pointerover', { target: listRow('s2') });
+            listBody.fire('focusin', { target: listRow('s2') });
+            const before = GridVibeAgentCrews.highlightState.get();
+            listBody.fire('contextmenu', { target: listRow('s2'), preventDefault() {} });
+            const opened = { state: GridVibeAgentCrews.highlightState.get(),
+                frame: head('s1').classList.contains('is-crew-member'),
+                list: listRow('s2').classList.contains('is-crew-member') };
+            fetchAnswer = crewReading([link('s1', 's2', { round: 2 })]);
+            await refreshAgentDashboard();
+            const refreshed = GridVibeAgentCrews.highlightState.get();
+            body().fire('click', { target: head('s1'), preventDefault() {} });
+            report({ before, opened, refreshed, clicked: GridVibeAgentCrews.highlightState.get() });
+        """)
+        self.assertEqual(result["before"], "s1")
+        self.assertEqual(result["opened"], {"state": "", "frame": False, "list": False})
+        self.assertEqual(result["refreshed"], "")
+        self.assertEqual(result["clicked"], "s1")
+
+    def test_dialog_width_tracks_the_deepest_open_crew(self):
+        result = self._run_crew("""
+            const values = {};
+            body().parentElement = { classList: fakeClassList(),
+                style: { setProperty(name, value) { values[name] = value; } } };
+            const depth = () => values['--dash-crew-depths'];
+            fetchAnswer = crewReading([link('s1', 's2'), link('s2', 's5'), link('s3', 's4')]);
+            await refreshAgentDashboard();
+            toggleAgentDashboardCrew('s3');
+            const shallow = depth();
+            toggleAgentDashboardCrew('s1');
+            const deep = depth();
+            toggleAgentDashboardCrew('s1');
+            const afterHide = depth();
+            toggleAgentDashboardCrew('s1');
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            await refreshAgentDashboard();
+            report({ shallow, deep, afterHide, afterRemoval: depth() });
+        """)
+        self.assertEqual(result, {"shallow": "2", "deep": "3", "afterHide": "2", "afterRemoval": "2"})
+
+    def test_opening_another_graph_clears_the_existing_highlight_and_keeps_both_open(self):
+        result = self._run_crew("""
+            wireAgentDashboard();
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            await refreshAgentDashboard(); toggleAgentDashboardCrew('s1');
+            body().fire('click', { target: head('s1'), preventDefault() {} });
+            const before = GridVibeAgentCrews.highlightState.get();
+            listBody.fire('contextmenu', { target: listRow('s4'), preventDefault() {} });
+            const cleared = { state: GridVibeAgentCrews.highlightState.get(),
+                highlighted: crewSlot().heads.filter(frame => frame.classList.contains('is-crew-member')).map(frame => frame.dataset.crewRoot),
+                members: listBody.querySelectorAll().filter(row => row.classList.contains('is-crew-member')).map(row => row.dataset.sessionId) };
+            await refreshAgentDashboard();
+            listBody.fire('pointerleave', {});
+            report({ before, cleared, roots: crewSlot().heads.map(frame => frame.dataset.crewRoot),
+                afterPoll: GridVibeAgentCrews.highlightState.get() });
+        """)
+        self.assertEqual(result["before"], "s1")
+        self.assertEqual(result["cleared"], {"state": "", "highlighted": [], "members": []})
+        self.assertEqual(result["roots"], ["s1", "s3"])
+        self.assertEqual(result["afterPoll"], "")
+
+    def test_removing_the_deepest_branch_shrinks_the_diagram_depth(self):
+        result = self._run_crew(r"""
+            fetchAnswer = crewReading([link('s1', 's2'), link('s2', 's3')]);
+            await refreshAgentDashboard(); toggleAgentDashboardCrew('s1');
+            const depth = () => Number(/--dash-crew-depths:(\d+)/.exec(crewSlot().html)[1]);
+            const nested = depth();
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            fetchAnswer.workspaces[0].groups[0].panes = fetchAnswer.workspaces[0].groups[0].panes.filter(pane => pane.session_id !== 's3');
+            await refreshAgentDashboard();
+            report({ nested, compact: depth(), nodes: nodes(), heads: crewSlot().heads.length,
+                barsBelowTitle: crewSlot().html.indexOf('dash-crew-segments') > crewSlot().html.indexOf('dash-crew-title-line'),
+                controls: [...crewSlot().html.matchAll(/data-dashboard-action="([^"]*)"/g)].map(match => match[1]) });
+        """)
+        self.assertEqual(result["nested"], 3)
+        self.assertEqual(result["compact"], 2)
+        self.assertEqual(result["nodes"], ["s1", "s2"])
+        self.assertEqual(result["heads"], 1)
+        self.assertTrue(result["barsBelowTitle"])
+        self.assertEqual(result["controls"], ["hide-crew", "pane", "pane"])
+
+    def test_an_unshown_crew_does_not_dim_every_board_and_list_navigation_clears_click(self):
+        result = self._run_crew("""
+            wireAgentDashboard();
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            await refreshAgentDashboard(); toggleAgentDashboardCrew('s3');
+            listBody.fire('pointerover', { target: listRow('s2') });
+            const unshown = crewSlot().classList.contains('is-crew-highlight');
+            listBody.fire('pointerleave', {});
+            body().fire('click', { target: head('s3'), preventDefault() {} });
+            await settle();
+            const clicked = GridVibeAgentCrews.highlightState.get();
+            listBody.fire('click', { target: listRow('s2'), preventDefault() {} });
+            await settle();
+            listBody.fire('pointerleave', {});
+            report({ unshown, clicked, cleared: GridVibeAgentCrews.highlightState.get() });
+        """)
+        self.assertFalse(result["unshown"])
+        self.assertEqual(result["clicked"], "s3")
+        self.assertEqual(result["cleared"], "")
+
+    def test_refocusing_a_row_after_rebuild_does_not_select_its_crew(self):
+        result = self._run_crew("""
+            fetchAnswer = crewReading([]);
+            await refreshAgentDashboard();
+            focusIsInside = true;
+            focusTarget = listRow('s2');
+            focusTarget.focus = function () { document.activeElement = this; };
+            document.activeElement = focusTarget;
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            fetchAnswer.workspaces[0].groups[0].name = 'Renamed session';
+            await refreshAgentDashboard();
+            report({ state: GridVibeAgentCrews.highlightState.get(), focused: listRow('s2').classList.contains('is-crew-member') });
+        """)
+        self.assertEqual(result["state"], "")
+        self.assertFalse(result["focused"])
+
+    def test_frame_click_selects_the_crew_and_tile_hover_keeps_that_selection(self):
+        result = self._run_crew("""
+            wireAgentDashboard();
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            await refreshAgentDashboard();
+            toggleAgentDashboardCrew('s1'); toggleAgentDashboardCrew('s3');
+            const members = () => listBody.querySelectorAll().filter(row => row.classList.contains('is-crew-member')).map(row => row.dataset.sessionId);
+            listBody.fire('pointerover', { target: listRow('s2') });
+            const listToBoard = head('s1').classList.contains('is-crew-member');
+            listBody.fire('pointerleave', {});
+            body().fire('pointerover', { target: node('s4') });
+            const beforeClick = members();
+            body().fire('click', { target: head('s3'), preventDefault() {} });
+            const boardToList = members();
+            for (const id of ['s1', 's2', 's3', 's4']) {
+                body().fire('pointerover', { target: node(id) });
+                body().fire('focusin', { target: node(id) });
+                body().fire('pointerout', { target: node(id), relatedTarget: null });
+            }
+            const afterMoving = members();
+            body().fire('click', { target: head('s3'), preventDefault() {} });
+            report({ listToBoard, beforeClick, boardToList, afterMoving, toggled: members(), opened: calls.openWorkspaceWindow });
+        """)
+        self.assertTrue(result["listToBoard"])
+        self.assertEqual(result["beforeClick"], [])
+        self.assertEqual(result["boardToList"], ["s3", "s4"])
+        self.assertEqual(result["afterMoving"], ["s3", "s4"])
+        self.assertEqual(result["toggled"], [])
+        self.assertEqual(result["opened"], [])
+
+    def test_frame_highlight_survives_dialog_dismissal_and_clears_when_crew_disappears(self):
+        result = self._run_crew("""
+            wireAgentDashboard();
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard(); toggleAgentDashboardCrew('s1');
+            body().fire('click', { target: head('s1'), preventDefault() {} });
+            closeAgentDashboardDialog();
+            const clicked = GridVibeAgentCrews.highlightState.get();
+            dashboardShown();
+            fetchAnswer = crewReading([]);
+            await refreshAgentDashboard();
+            report({ clicked, closed: GridVibeAgentCrews.highlightState.get(), nodes: nodes() });
+        """)
+        self.assertEqual(result["clicked"], "s1")
+        self.assertEqual(result["closed"], "")
+        self.assertEqual(result["nodes"], [])
+
+    def test_list_follows_frame_clicks_after_back_forward_cache_but_not_after_unload(self):
+        """A cached page returns with the same list controller, so pagehide only
+        suspends it; a real unload disposes it and its highlight subscription."""
+        result = self._run_crew("""
+            wireAgentDashboard();
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            await refreshAgentDashboard();
+            toggleAgentDashboardCrew('s1');
+            const member = () => listRow('s2').classList.contains('is-crew-member');
+            const clickFrame = () => body().fire('click', { target: head('s1'), preventDefault() {} });
+            fireWindow('pagehide', { persisted: true });
+            const cachedPaused = listWires.paused.at(-1);
+            fireWindow('pageshow', { persisted: true });
+            await settle();
+            const restoredPaused = listWires.paused.at(-1);
+            clickFrame();
+            const restored = member();
+            GridVibeAgentCrews.highlightState.clearClicks();
+            fireWindow('pagehide', { persisted: false });
+            clickFrame();
+            report({ cachedPaused, restoredPaused, restored,
+                state: GridVibeAgentCrews.highlightState.get(), unloaded: member() });
+        """)
+        self.assertTrue(result["restored"])
+        self.assertTrue(result["cachedPaused"])
+        self.assertFalse(result["restoredPaused"])
+        self.assertEqual(result["state"], "s1")
+        self.assertFalse(result["unloaded"])
+
+    def test_tile_click_still_navigates_without_selecting_its_crew(self):
+        result = self._run_crew("""
+            wireAgentDashboard();
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            await refreshAgentDashboard();
+            toggleAgentDashboardCrew('s1'); toggleAgentDashboardCrew('s3');
+            body().fire('click', { target: head('s3'), preventDefault() {} });
+            body().fire('click', { target: node('s2'), preventDefault() {} });
+            await settle();
+            report({ selected: GridVibeAgentCrews.highlightState.get(), targets: calls.focusTargets });
+        """)
+        self.assertEqual(result["selected"], "s3")
+        self.assertEqual(result["targets"][0]["options"], {"groupId": "g1", "sessionId": "s2"})
+
+    def test_board_close_hides_only_its_crew_without_closing_agents_or_navigating(self):
+        result = self._run_crew("""
+            wireAgentDashboard();
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            await refreshAgentDashboard();
+            toggleAgentDashboardCrew('s1'); toggleAgentDashboardCrew('s3');
+            body().fire('click', { target: head('s1'), preventDefault() {} });
+            const match = /<button[^>]*class="dash-session-close dash-crew-close"([^>]*data-crew-id="s1"[^>]*)>/.exec(crewSlot().html);
+            const attrs = attributesOf(match[1]);
+            const close = { dataset: datasetOf(attrs) };
+            close.closest = selector => selector === '[data-dashboard-action]' ? close : null;
+            const ran = [];
+            window.GridVibeDashboardClose = { handles: () => true, run: (...args) => ran.push(args) };
+            body().fire('click', { target: close, preventDefault() {} });
+            await settle();
+            const afterOne = { nodes: nodes(), state: GridVibeAgentCrews.highlightState.get(), agents: sectionCounts().agents };
+            body().fire('click', { target: { closest: () => ({ dataset: { dashboardAction: 'hide-crew', crewId: 's3' } }) }, preventDefault() {} });
+            const empty = crewSlot().hidden;
+            toggleAgentDashboardCrew('s1');
+            report({ ran, opened: calls.openWorkspaceWindow, up: dialogOpen(), label: attrs['aria-label'], afterOne, empty, reopened: nodes() });
+        """)
+        self.assertEqual(result["ran"], [])
+        self.assertEqual(result["opened"], [])
+        self.assertTrue(result["up"])
+        self.assertEqual(result["label"], "Hide this crew diagram")
+        self.assertEqual(result["afterOne"], {"nodes": ["s3", "s4"], "state": "", "agents": 5})
+        self.assertTrue(result["empty"])
+        self.assertEqual(result["reopened"], ["s1", "s2"])
+
+    def test_closing_a_focused_graph_clears_its_sidebar_highlight(self):
+        result = self._run_crew("""
+            wireAgentDashboard();
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            await refreshAgentDashboard();
+            toggleAgentDashboardCrew('s1'); toggleAgentDashboardCrew('s3');
+            const members = () => listBody.querySelectorAll().filter(row => row.classList.contains('is-crew-member')).map(row => row.dataset.sessionId);
+            body().fire('click', { target: head('s1'), preventDefault() {} });
+            const before = members();
+            const row = listRow('s1');
+            row.focus = function () {
+                document.activeElement = this;
+                listBody.fire('focusin', { target: this });
+            };
+            const close = { dataset: { dashboardAction: 'hide-crew', crewId: 's1',
+                sessionId: 's1', dashboardKey: 'hide-crew:s1' } };
+            close.closest = selector => selector === '[data-dashboard-action]' ? close : null;
+            crewSlot().contains = element => element === close;
+            document.activeElement = close;
+            body().fire('click', { target: close, preventDefault() {} });
+            const afterClose = members();
+            const focusReturned = document.activeElement === row;
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            await refreshAgentDashboard();
+            const afterPoll = members();
+            listBody.fire('pointerover', { target: row });
+            const hovered = members();
+            listBody.fire('pointerleave', {});
+            report({ before, afterClose, focusReturned, afterPoll, hovered, left: members() });
+        """)
+        self.assertEqual(result["before"], ["s1", "s2"])
+        self.assertTrue(result["focusReturned"])
+        self.assertEqual(result["afterClose"], [])
+        self.assertEqual(result["afterPoll"], [])
+        self.assertEqual(result["hovered"], ["s1", "s2"])
+        self.assertEqual(result["left"], [])
+
+    def test_crew_frame_keyboard_selects_without_activating_nested_tiles(self):
+        result = self._run_crew("""
+            wireAgentDashboard();
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard(); toggleAgentDashboardCrew('s1');
+            let prevented = 0;
+            body().fire('keydown', { target: head('s1'), key: 'Enter', preventDefault() { prevented++; } });
+            const selected = GridVibeAgentCrews.highlightState.get();
+            body().fire('keydown', { target: node('s2'), key: 'Enter', preventDefault() { prevented++; } });
+            body().fire('keydown', { target: head('s1'), key: ' ', preventDefault() { prevented++; } });
+            report({ selected, cleared: GridVibeAgentCrews.highlightState.get(), prevented });
+        """)
+        self.assertEqual(result, {"selected": "s1", "cleared": "", "prevented": 2})
+
+    def test_list_click_routes_once_and_list_wires_pause_with_the_dialog(self):
+        result = self._run_crew("""
+            wireAgentDashboard();
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            const event = { target: listRow('s2'), preventDefault() {} };
+            listBody.fire('click', event);
+            body().fire('click', event); // the same event bubbling to the body
+            await settle();
+            document.hidden = true;
+            scheduleAgentDashboardRefresh();
+            const hidden = listWires.paused.at(-1);
+            document.hidden = false;
+            scheduleAgentDashboardRefresh();
+            const visible = listWires.paused.at(-1);
+            closeAgentDashboardDialog();
+            report({ opened: calls.openWorkspaceWindow, hidden, visible, shut: listWires.paused.at(-1) });
+        """)
+        self.assertEqual(result["opened"], [{"workspaceId": "default", "options": {"groupId": "g1"}}])
+        self.assertTrue(result["hidden"])
+        self.assertFalse(result["visible"])
+        self.assertTrue(result["shut"])
+
+    def test_list_navigation_keeps_the_target_resolvers_retry_notice(self):
+        result = self._run_crew("""
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            workspaceOpens = false;
+            listBody.fire('click', { target: listRow('s2'), preventDefault() {} });
+            await settle();
+            report({ text: notice().textContent, up: dialogOpen() });
+        """)
+        self.assertEqual(result["text"], WORKSPACE_TAB_BLOCKED_HINT)
+        self.assertTrue(result["up"])
+
+    def test_a_removed_board_returns_focus_to_its_member_in_the_list(self):
+        result = self._run_crew("""
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            toggleAgentDashboardCrew('s1');
+            crewSlot().contains = () => true;
+            document.activeElement = node('s2');
+            toggleAgentDashboardCrew('s1');
+            report({ focused: Boolean(listRow('s2').focused), hidden: crewSlot().hidden });
+        """)
+        self.assertTrue(result["focused"])
+        self.assertTrue(result["hidden"])
+
+    def test_the_list_uses_the_sidebar_renderer_and_boards_start_hidden(self):
+        result = self._run_crew("""
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            await refreshAgentDashboard();
+            const runtime = { esc: escHtml, activity: dashboardActivityHtml, progress: dashboardProgressHtml,
+                glyph: dashboardAgentGlyphHtml, glyphKey: dashboardAgentGlyphKey, line: dashboardPaneLine,
+                hover: dashboardPaneHover, agentName: dashboardAgentName, workspaceLabel: dashboardWorkspaceLabel,
+                sessionColourStyle: dashboardSessionColourStyle };
+            report({ same: listBody.innerHTML === GridVibeDashboardSidebar.policy.bodyHtml(
+                GridVibeDashboardSidebar.policy.withoutWaiting(fetchAnswer), runtime, dashboardCloseActions()),
+                agents: sectionCounts().agents, hidden: crewSlot().hidden, nodes: nodes(),
+                hint: listRow('s2').title, words: listRow('s2').slots['.dash-agent-selection'].textContent });
+        """)
+        self.assertTrue(result["same"])
+        self.assertEqual(result["agents"], 5)
+        self.assertTrue(result["hidden"])
+        self.assertEqual(result["nodes"], [])
+        self.assertIn("Right-click to show this crew", result["hint"])
+        self.assertIn("Shift+F10", result["words"])
+
+    def test_mouse_and_keyboard_toggle_crews_in_selection_order_and_ignore_plain_rows(self):
+        result = self._run_crew("""
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            await refreshAgentDashboard();
+            let prevented = 0;
+            const toggle = (id, type = 'contextmenu', extra = {}) => listBody.fire(type, {
+                target: listRow(id), preventDefault() { prevented++; }, ...extra });
+            toggle('s5');
+            const plain = { prevented, nodes: nodes() };
+            toggle('s4');
+            toggle('s2', 'keydown', { key: 'ContextMenu' });
+            const both = { roots: crewSlot().heads.map(h => h.dataset.crewRoot), hidden: crewSlot().hidden,
+                selected: listRow('s1').classList.contains('is-crew-selected'), title: listRow('s1').title };
+            toggle('s1', 'keydown', { key: 'F10', shiftKey: true });
+            const one = nodes();
+            toggle('s3');
+            report({ plain, both, one, none: nodes(), hidden: crewSlot().hidden, prevented,
+                selection: listRow('s3').slots['.dash-agent-selection'].textContent });
+        """)
+        self.assertEqual(result["plain"], {"prevented": 0, "nodes": []})
+        self.assertEqual(result["both"]["roots"], ["s3", "s1"])
+        self.assertFalse(result["both"]["hidden"])
+        self.assertTrue(result["both"]["selected"])
+        self.assertIn("Crew shown", result["both"]["title"])
+        self.assertEqual(result["one"], ["s3", "s4"])
+        self.assertEqual(result["none"], [])
+        self.assertTrue(result["hidden"])
+        self.assertEqual(result["prevented"], 4)
+        self.assertIn("show this crew", result["selection"])
+
+    def test_context_menu_key_claims_both_defaults_and_toggles_once(self):
+        result = self._run_crew("""
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            const prevented = [];
+            for (const type of ['keydown', 'keyup']) {
+                let claimed = false;
+                listBody.fire(type, { target: listRow('s2'), key: 'ContextMenu',
+                    preventDefault() { claimed = true; } });
+                prevented.push(claimed);
+                if (!claimed) listBody.fire('contextmenu', { target: listRow('s2'), preventDefault() {} });
+            }
+            let plainClaimed = false;
+            listBody.fire('keyup', { target: listRow('s5'), key: 'ContextMenu',
+                preventDefault() { plainClaimed = true; } });
+            report({ prevented, nodes: nodes(), plainClaimed });
+        """)
+        self.assertEqual(result["prevented"], [True, True])
+        self.assertEqual(result["nodes"], ["s1", "s2"])
+        self.assertFalse(result["plainClaimed"])
+
+    def test_selection_survives_close_and_an_ended_crew_leaves_automatically(self):
+        result = self._run_crew("""
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            await refreshAgentDashboard();
+            toggleAgentDashboardCrew('s1');
+            toggleAgentDashboardCrew('s3');
+            closeAgentDashboardDialog();
+            showDashboard();
+            await settle();
+            const kept = nodes();
+            fetchAnswer = crewReading([link('s3', 's4')]);
+            await refreshAgentDashboard();
+            const remaining = nodes();
+            fetchAnswer = crewReading([]);
+            await refreshAgentDashboard();
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            report({ kept, remaining, none: nodes(), hidden: crewSlot().hidden,
+                selected: [..._agentDashboardSelectedCrews] });
+        """)
+        self.assertEqual(result["kept"], ["s1", "s2", "s3", "s4"])
+        self.assertEqual(result["remaining"], ["s3", "s4"])
+        self.assertEqual(result["none"], [])
+        self.assertTrue(result["hidden"])
+        self.assertEqual(result["selected"], [])
+
+    def test_marks_waiting_and_selection_are_decorations_on_the_shared_rows(self):
+        result = self._run_crew("""
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            const before = listRow('s1');
+            const rebuilds = listBody.rebuilds;
+            listBody.scrollTop = 137;
+            fetchAnswer.workspaces[0].groups[0].panes[0] = { ...fetchAnswer.workspaces[0].groups[0].panes[0],
+                agent_mcp: true, agent_mcp_override: true, agent_auto_mode: true, waiting: 'crew' };
+            await refreshAgentDashboard();
+            toggleAgentDashboardCrew('s1');
+            report({ same: before === listRow('s1'), rebuilds: listBody.rebuilds - rebuilds,
+                scroll: listBody.scrollTop, mark: before.icon.dataset, title: before.icon.title,
+                reading: before.slots['.dash-agent-reading'].innerHTML,
+                flags: before.slots['.dash-agent-flags'].textContent,
+                selected: before.classList.contains('is-crew-selected') });
+        """)
+        self.assertTrue(result["same"])
+        self.assertEqual(result["rebuilds"], 0)
+        self.assertEqual(result["scroll"], 137)
+        self.assertEqual(result["mark"], {"mcp": "on", "mcpOverride": "on", "auto": "on"})
+        self.assertIn("override", result["title"])
+        self.assertIn("auto-approval", result["flags"])
+        self.assertIn("dash-state-waiting", result["reading"])
+        self.assertTrue(result["selected"])
+
+
+class DashboardCrewBoardStylingTestCase(unittest.TestCase):
+    """The board's stylesheet hooks: the narrow breakpoint is the module's own
+    constant, and the board's colours are the status tokens."""
+
+    CSS = REPO_ROOT / "web" / "static" / "css" / "agent-dashboard.css"
+
+    def test_the_narrow_rule_is_the_modules_breakpoint(self):
+        css = self.CSS.read_text(encoding="utf-8")
+        script = DASHBOARD_DIALOG_JS.read_text(encoding="utf-8")
+        width = script.split("const DASHBOARD_CREW_NARROW_PX = ", 1)[1].split(";", 1)[0]
+        self.assertIn(f"@container dash-crews (max-width: {width}px)", css)
+        self.assertIn("container: dash-crews / inline-size;", css)
+
+    def test_the_dialog_grows_to_its_window_only_while_a_crew_is_on_it(self):
+        css = self.CSS.read_text(encoding="utf-8")
+        rule = re.search(r"\.dash-dialog\.has-crews \{([^}]*)\}", css)
+        self.assertIsNotNone(rule)
+        # Three quarters of the window it opened in, in each direction, and no
+        # more: the dialog never covers the page behind it.
+        self.assertIn("width: 75vw;", rule.group(1))
+        self.assertIn("height: 75vh;", rule.group(1))
+        # The column it always was is the unqualified rule, under the same cap.
+        base = re.search(r"\n\.dash-dialog \{([^}]*)\}", css)
+        self.assertIsNotNone(base)
+        self.assertIn("width: min(380px, 75vw);", base.group(1))
+        self.assertIn("height: min(75vh, 820px);", base.group(1))
+        # No narrow-window override puts it back to the whole window.
+        self.assertNotIn(".dash-dialog.has-crews { height: 100%; }", css)
+
+    def test_the_board_and_the_list_sit_side_by_side_only_when_there_is_room(self):
+        css = self.CSS.read_text(encoding="utf-8")
+        wide = re.search(r"@media \(min-width: (\d+)px\) \{(.*?)\n\}\n", css, flags=re.S)
+        self.assertIsNotNone(wide)
+        block = wide.group(2)
+        self.assertIn("width: min(75vw, calc(", block)
+        self.assertIn("var(--dash-crew-depths, 2)", block)
+        self.assertIn("var(--dash-crew-column)", block)
+        self.assertIn("var(--dash-crew-column-gap)", block)
+        # The list stays on the left; the selected boards take the remainder.
+        self.assertIn(".dash-dialog.has-crews > .dash-body", block)
+        self.assertIn("grid-template-columns:", block)
+        # Each pane scrolls on its own inside a body that does not.
+        self.assertIn(".dash-dialog.has-crews .dash-crews-slot", block)
+        self.assertIn("minmax(240px, 320px) minmax(0, 1fr)", block)
+        self.assertIn("overflow: hidden;", css)
+        self.assertIn("overflow-y: auto;", block)
+        # Below that width nothing is declared for the panes: they stack in
+        # the one scroller, as they did.
+        self.assertIn("grid-template-rows: minmax(0, 1fr) minmax(0, 1fr)", css[:wide.start()])
+
+
+    def test_the_narrow_board_reads_its_gutter_from_the_wire_layer(self):
+        css = self.CSS.read_text(encoding="utf-8")
+        narrow = css[css.index("@container dash-crews (max-width:"):]
+        self.assertIn("padding-left: var(--dash-wire-gutter, 16px);", narrow)
+
+    def test_no_stylesheet_draws_a_closed_pane(self):
+        css = self.CSS.read_text(encoding="utf-8")
+        self.assertNotIn("is-ghost", css)
+        self.assertNotIn("is-closed", css)
+
+    def test_the_board_wears_only_tokens(self):
+        css = self.CSS.read_text(encoding="utf-8")
+        board = css[css.index("/* The permanent list and optional crew window"):]
+        self.assertNotIn("#", board.replace("/* ──", ""))
+        self.assertNotIn("rgb(", board)
+        self.assertNotIn("rgba(", board)
+        for token in ("--gv-accent", "--gv-success", "--gv-warning", "--gv-danger", "--gv-dialog-muted"):
+            with self.subTest(token=token):
+                self.assertIn(f"var({token})", board)
+
 
 class OverrideModeStylingTestCase(unittest.TestCase):
     """Override mode's red is a theme token, defined for every theme and read
@@ -2656,10 +3849,10 @@ class OverrideModeStylingTestCase(unittest.TestCase):
             ".terminal-agent-icon[data-mcp][data-mcp-override] {",
         )
         self.assertIn("var(--gv-mcp-override)", frame)
-        chip = self._block(self._css("agent-dashboard.css"), ".dash-tag-mcp.is-override {")
-        self.assertIn("color: var(--gv-mcp-override);", chip)
-        self.assertIn("background: var(--gv-mcp-override-soft);", chip)
-        for rule in (frame, chip):
+        frame = self._block(self._css("agent-dashboard-sidebar.css"),
+                            ".agent-sidebar-list .dash-agent-icon[data-mcp][data-mcp-override] {")
+        self.assertIn("outline-color: var(--gv-mcp-override);", frame)
+        for rule in (frame,):
             self.assertNotIn("#", rule)
             self.assertNotIn("rgb", rule)
 

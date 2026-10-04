@@ -19,14 +19,14 @@
          a column: it stays in the row's accessible name, out of flow, where a
          reader who is hearing the row still gets it and the title gets the
          width.
-     · **The `MCP` chip is the exception, and for the opposite reason.** It
-         survives the same width squeeze the name did not, because nothing else
-         on the row answers it: the mark says *which* agent this is, and no part
-         of a row says whether that agent can create workspaces, launch panes
-         and split the grid. Choosing which pane to instruct is the thing a
-         panel kept up *while* the reader works is for, so the three characters
-         that decide it are worth the width here even though a whole word for
-         the shell is not.
+     · **What the agent may do is drawn on its mark, not beside it.** Whether
+         it can create workspaces, launch panes and split the grid is a frame
+         around the mark (blue, red in override mode), exactly as the pane
+         header draws it and from the same rule, and auto-approval is a small
+         framed `A` pinned to the mark's corner. Neither takes a pixel of the
+         title's width, which is what the `MCP` chip used to cost. Colour is
+         never the only statement: both are in the mark's hover and in the
+         row's accessible name.
      · **It does not close when you leave.** The dialog dismisses itself on the
        reader going elsewhere, because a modal surface left standing over a
        window nobody is looking at is stale. This is chrome: it is *part* of the
@@ -84,7 +84,7 @@
         typeof CURRENT_WORKSPACE_ID === 'string' ? CURRENT_WORKSPACE_ID : 'default'
     );
 
-    const controller = api.create({
+    const runtime = {
         getElement: id => doc.getElementById(id),
         setBodyClass: (name, on) => doc.body?.classList?.toggle(name, on),
         activeElement: () => doc.activeElement,
@@ -133,17 +133,30 @@
                 typeof root.dashboardPaneLine === 'function'
                     ? root.dashboardPaneLine(pane) : ''
             ),
-            hover: pane => (
+            hover: (pane, crew) => (
                 typeof root.dashboardPaneHover === 'function'
-                    ? root.dashboardPaneHover(pane) : ''
+                    ? root.dashboardPaneHover(pane, crew) : ''
+            ),
+            /* The crew reading and the orchestrator's chip, the dialog's
+               answers like the rest. A page without the crew module answers
+               no crews, which draws a row exactly as it was before. */
+            crewContext: snapshot => (
+                typeof root.dashboardCrewContext === 'function'
+                    ? root.dashboardCrewContext(snapshot) : null
+            ),
+            crewChip: (pane, crews) => (
+                typeof root.dashboardCrewChipHtml === 'function'
+                    ? root.dashboardCrewChipHtml(pane, crews) : ''
             ),
             agentName: pane => (
                 typeof root.dashboardAgentName === 'function'
                     ? root.dashboardAgentName(pane) : ''
             ),
-            mcp: pane => (
-                typeof root.dashboardMcpTagHtml === 'function'
-                    ? root.dashboardMcpTagHtml(pane) : ''
+            /* The frame and the pin on the agent's mark: the pane header's own
+               rule, answered by the dialog. A page without it frames nothing. */
+            mark: pane => (
+                typeof root.dashboardAgentMarkState === 'function'
+                    ? root.dashboardAgentMarkState(pane) : null
             ),
             workspaceLabel: (workspace, index) => (
                 typeof root.dashboardWorkspaceLabel === 'function'
@@ -202,8 +215,16 @@
             typeof root.focusedTerminalSessionId === 'function'
                 ? root.focusedTerminalSessionId() : ''
         ),
+        /* The crew wires, drawn by `agent-crews.js` inside the scroller. */
+        createWireLayer: options => (
+            root.GridVibeAgentCrews?.createWireLayer?.(options) || null
+        ),
+        crewHighlight: root.GridVibeAgentCrews?.highlightState,
         logError: (message, error) => console.error(message, error)
-    });
+    };
+    const controller = api.create(runtime);
+    /* Same list, decorations and lane layer; the dialog owns its poll. */
+    root.createAgentDashboardList = options => api.create({ ...runtime, ...options });
 
     root.wireAgentDashboardSidebar = () => controller.wire();
     root.toggleAgentDashboardSidebar = event => {
@@ -231,6 +252,19 @@
     const OPEN_BODY_CLASS = 'agent-sidebar-open';
     const RIGHT_BODY_CLASS = 'agent-sidebar-right';
     const INPUT_TARGET_CLASS = 'is-input-target';
+    /* Crews. `has-crews` opens the lane gutter on the panel, and only while the
+       reading holds a crew, so a column with no crews is exactly as wide
+       inside as it always was. The other two are the crew highlight: one on
+       the panel, one on each row of the highlighted crew. */
+    const CREWS_CLASS = 'has-crews';
+    const CREW_HIGHLIGHT_CLASS = 'is-crew-highlight';
+    const CREW_MEMBER_CLASS = 'is-crew-member';
+    const AGENT_ROW_SELECTOR = '.dash-agent[data-session-id]';
+    const CREW_SLOT_SELECTOR = '.dash-agent-crew';
+    const ICON_SELECTOR = '.dash-agent-icon';
+    const FLAGS_SLOT_SELECTOR = '.dash-agent-flags';
+    const READING_SLOT_SELECTOR = '.dash-agent-reading';
+    const PROGRESS_SLOT_SELECTOR = '.dash-agent-progress';
     const SIDEBAR_SCALE_MIN = 100;
     const SIDEBAR_SCALE_MAX = 200;
 
@@ -284,21 +318,23 @@
        dialog's own, so `agent-dashboard.css` dresses both and this feature's
        stylesheet states only what a column changes. */
 
-    /* One pane, one line: the dot, the agent's mark, what the pane announced,
-       and whether that agent has GridVibe's own tools. `dash-agent-who` and not
+    /* One pane, one line: the dot, the agent's mark, and what the pane
+       announced. `dash-agent-who` and not
        `dash-agent-name` is the whole difference from the dialog's row, and it
        is a deliberate class of its own: the name is out of flow here, the way
        `dash-state-word` is, so a stylesheet cannot accidentally draw it back
        into the line and a reader hearing the row still learns which agent it
        is.
 
-       The `MCP` chip is drawn, and it is the one thing this row keeps that the
-       name gave up, because it is not the same kind of fact. The name is
-       answered by the mark beside it; nothing else on the row says whether this
-       agent can create workspaces, launch panes and split the grid. That is
-       what a reader is choosing between when they pick a pane to instruct, and
-       a panel meant to be up *while* they work is exactly where that choice is
-       made. Three characters, from the dialog's own builder. */
+       The mark's frame (GridVibe tools) and its `A` pin (auto-approval) are not
+       in this markup. They are laid on the drawn mark after every reading
+       (`decorateMarks` below), with their words in `dash-agent-flags`, which is
+       drawn empty like the crew slot: a relaunch onto the tools changes a frame
+       and never the markup a repaint compares.
+
+       `dash-agent-crew` is drawn empty. The orchestrator's crew chip is filled
+       into it after every reading (`decorateCrews` below), so a report or a new
+       round changes a chip and never the markup a repaint compares. */
     function agentRowHtml(pane, render) {
         const esc = render.esc;
         return `
@@ -317,7 +353,9 @@
                 <span class="dash-agent-icon" aria-hidden="true">${render.glyph(pane)}</span>
                 <span class="dash-agent-who">${esc(render.agentName(pane))}</span>
                 <span class="dash-agent-line">${esc(render.line(pane))}</span>
-                ${render.mcp(pane)}
+                <span class="dash-agent-crew"></span>
+                <span class="dash-agent-selection"></span>
+                <span class="dash-agent-flags"></span>
                 <span class="dash-agent-progress">${render.progress(pane)}</span>
             </button>
         `;
@@ -427,6 +465,23 @@
             .join('');
     }
 
+    /* The reading the row markup is drawn from: every pane's `waiting` left
+       out. Waiting on another agent changes only a row's dot and bar, and an
+       orchestrator enters and leaves `wait_for_results` all the time, so it is
+       laid on the drawn rows (`decorateCrews`) instead of rebuilding them. */
+    function withoutWaiting(snapshot) {
+        return {
+            ...snapshot,
+            workspaces: (snapshot?.workspaces || []).map(workspace => ({
+                ...workspace,
+                groups: (workspace?.groups || []).map(group => ({
+                    ...group,
+                    panes: (group?.panes || []).map(pane => ({ ...pane, waiting: '' }))
+                }))
+            }))
+        };
+    }
+
     /* Which mark the one control wears and what it says it will do: "Show"
        while it is shut, "Hide" while it is up. */
     function toggleFace(open) {
@@ -446,6 +501,9 @@
         OPEN_BODY_CLASS,
         RIGHT_BODY_CLASS,
         INPUT_TARGET_CLASS,
+        CREWS_CLASS,
+        CREW_HIGHLIGHT_CLASS,
+        CREW_MEMBER_CLASS,
         SIDEBAR_SIDE_LEFT,
         SIDEBAR_SIDE_RIGHT,
         normalizeSide,
@@ -454,6 +512,7 @@
         sessionHtml,
         workspaceHtml,
         bodyHtml,
+        withoutWaiting,
         toggleFace
     };
 
@@ -481,13 +540,26 @@
             report = () => {},
             onLayoutChanged = () => {},
             inputTarget = () => '',
-            logError = () => {}
+            createWireLayer = () => null,
+            logError = () => {},
+            ids = {},
+            onCrewToggle = null,
+            crewSelected = () => false,
+            crewHighlight = null,
+            notice: externalNotice = null,
+            refresh: externalRefresh = null,
+            targetOwnsNotice = false
         } = runtime || {};
+
+        const shellId = ids.shell || SHELL_ID;
+        const bodyId = ids.body || BODY_ID;
 
         let timer = null;
         let requestId = 0;
         let inFlight = null;
         let painted = '';
+        let structure = '';
+        let rowsWired = false;
         let wired = false;
         let scale = SIDEBAR_SCALE_MIN;
         let side = SIDEBAR_SIDE_LEFT;
@@ -495,15 +567,25 @@
         let actionNotice = '';
         let actionTone = 'error';
         let readNotice = '';
+        /* The last reading's crews, the wire layer and the hovered pane. */
+        let crewContext = null;
+        let wires = null;
+        let pointerRow = '';
+        const pointerSource = {};
+        /* What each decorated slot (chip, reading, bar) last had written into
+           it, so an unchanged one is not rewritten every four seconds. Keyed
+           by the slot element, so a rebuilt row starts from its markup. */
+        const writtenSlots = new WeakMap();
 
-        function shell() { return getElement(SHELL_ID); }
-        function body() { return getElement(BODY_ID); }
+        function shell() { return getElement(shellId); }
+        function body() { return getElement(bodyId); }
 
         function isOpen() {
             return Boolean(shell()?.classList?.contains('visible'));
         }
 
         function setNotice(message, tone = 'error', source = 'action') {
+            if (externalNotice) return externalNotice(message, source, tone);
             if (source === 'read') readNotice = message || '';
             else {
                 actionNotice = message || '';
@@ -545,6 +627,8 @@
                 ? focused?.dataset?.dashboardKey || ''
                 : '';
             const scrollTop = panel.scrollTop;
+            // Removed elements need not dispatch pointerleave.
+            clearHighlight();
             panel.innerHTML = html;
             painted = html;
             panel.scrollTop = scrollTop;
@@ -572,6 +656,140 @@
                 }
             });
             return target;
+        }
+
+        /* ── Crews ──
+
+           Everything a crew puts on the column is laid on the rows already
+           drawn, the way the input-target ring is: the chip in its slot, the
+           waiting mark in the reading slot, the worker's "Working for" hover
+           line, the highlight classes and the wires. None of it is in the
+           markup `paint` compares, so a report, a phase change, a new round or
+           a wait never rebuilds a row, and scroll, focus and the input-target
+           ring stay where they were. A reading that does
+           rebuild the rows gets all of it straight back. */
+
+        function wireLayer() {
+            const panel = body();
+            if (!wires && panel) {
+                wires = createWireLayer({ container: panel, mode: 'lane' }) || null;
+                wires?.setPaused(!isOpen() || documentHidden());
+            }
+            return wires;
+        }
+
+        function crewOf(id) {
+            return (id && crewContext?.crews?.rootOf?.get(id)) || '';
+        }
+
+        /* Highlight only a hovered pane's crew or an explicitly selected graph.
+           Keyboard focus keeps its own row indicator without selecting a crew. */
+        function applyHighlight() {
+            const crew = crewHighlight?.get() || (!crewHighlight ? crewOf(pointerRow) : '');
+            shell()?.classList?.toggle(CREW_HIGHLIGHT_CLASS, Boolean(crew));
+            body()?.querySelectorAll?.(AGENT_ROW_SELECTOR).forEach(row => {
+                row.classList?.toggle(
+                    CREW_MEMBER_CLASS,
+                    Boolean(crew) && crewOf(row.dataset?.sessionId || '') === crew
+                );
+            });
+            wires?.highlight(crew);
+            return crew;
+        }
+
+        const unsubscribeHighlight = crewHighlight?.subscribe(applyHighlight);
+
+        function clearHighlight() {
+            pointerRow = '';
+            crewHighlight?.clear(pointerSource);
+            applyHighlight();
+        }
+
+        /* Compare against the drawn slot once, then remember each reading. */
+        function writeSlot(slot, html) {
+            if (!slot) return;
+            const current = writtenSlots.has(slot) ? writtenSlots.get(slot) : slot.innerHTML;
+            if (current !== html) slot.innerHTML = html;
+            writtenSlots.set(slot, html);
+        }
+
+        function decorateCrews(snapshot) {
+            const crews = crewContext?.crews || null;
+            shell()?.classList?.toggle(CREWS_CLASS, Boolean(crews?.edges?.length));
+            if (!crewContext) return;
+            body()?.querySelectorAll?.(AGENT_ROW_SELECTOR).forEach(row => {
+                const pane = crewContext.panes?.get(row.dataset?.sessionId || '');
+                if (!pane) return;
+                writeSlot(row.querySelector?.(CREW_SLOT_SELECTOR), render.crewChip(pane, crews) || '');
+                /* The waiting mark: the markup was drawn from the reading
+                   without `waiting` (`withoutWaiting`), so a pane entering or
+                   leaving a wait rewrites its dot and its bar, not its row. */
+                writeSlot(
+                    row.querySelector?.(READING_SLOT_SELECTOR),
+                    render.activity(pane)
+                );
+                writeSlot(
+                    row.querySelector?.(PROGRESS_SLOT_SELECTOR),
+                    render.progress(pane)
+                );
+                const root = crewOf(row.dataset?.sessionId || '');
+                const selected = Boolean(root) && crewSelected(root);
+                const hint = onCrewToggle && root
+                    ? (selected ? 'Crew shown. Right-click to hide this crew'
+                        : 'Right-click to show this crew') + ' (ContextMenu or Shift+F10)'
+                    : '';
+                row.classList?.toggle('is-crew-selected', selected);
+                const selection = row.querySelector?.('.dash-agent-selection');
+                if (selection && selection.textContent !== hint) selection.textContent = hint;
+                const hover = [render.hover(pane, crewContext), hint].filter(Boolean).join('\n');
+                if (row.title !== hover) row.title = hover;
+            });
+        }
+
+        /* The frame and the pin on each agent's mark, and the words for both.
+           Attributes on the mark and a sentence in `dash-agent-flags`, written
+           only when they differ from what the row holds, so a poll that says
+           the same thing touches nothing and a relaunch onto the tools changes
+           a frame and not a row. The stylesheet draws both from the attributes
+           (`data-mcp`, `data-mcp-override`, `data-auto`), the way the pane
+           header's frame is. */
+        function decorateMarks(snapshot) {
+            const panes = new Map();
+            (snapshot?.workspaces || []).forEach(workspace => {
+                (workspace?.groups || []).forEach(group => {
+                    (group?.panes || []).forEach(pane => panes.set(String(pane?.session_id || ''), pane));
+                });
+            });
+            body()?.querySelectorAll?.(AGENT_ROW_SELECTOR).forEach(row => {
+                const pane = panes.get(row.dataset?.sessionId || '');
+                const icon = row.querySelector?.(ICON_SELECTOR);
+                if (!pane || !icon) return;
+                const mark = render.mark ? render.mark(pane) : null;
+                const flags = [
+                    ['mcp', Boolean(mark?.mcp)],
+                    ['mcpOverride', Boolean(mark?.override)],
+                    ['auto', Boolean(mark?.auto)]
+                ];
+                flags.forEach(([name, on]) => {
+                    if (on === (name in icon.dataset)) return;
+                    if (on) icon.dataset[name] = 'on';
+                    else delete icon.dataset[name];
+                });
+                const words = [mark?.mcpTitle, mark?.autoTitle].filter(Boolean).join('\n');
+                if ((icon.title || '') !== words) {
+                    if (words) icon.title = words;
+                    else icon.removeAttribute('title');
+                }
+                const slot = row.querySelector?.(FLAGS_SLOT_SELECTOR);
+                if (slot && (writtenSlots.has(slot) ? writtenSlots.get(slot) : '') !== words) {
+                    slot.textContent = words.replace(/\n/g, '. ');
+                    writtenSlots.set(slot, words);
+                }
+            });
+        }
+
+        function rowIdAt(target) {
+            return target?.closest?.(AGENT_ROW_SELECTOR)?.dataset?.sessionId || '';
         }
 
         async function refresh() {
@@ -616,10 +834,54 @@
             if (!snapshot) return false;
             const totals = getElement(TOTALS_ID);
             if (totals) totals.textContent = render.totals(snapshot);
-            paint(bodyHtml(snapshot, render, getCloseActions()));
+            paintSnapshot(snapshot);
+            return true;
+        }
+
+        function paintSnapshot(snapshot) {
+            // Restored focus must resolve against this reading, including a
+            // pane that just joined or changed crews while the list rebuilt.
+            crewContext = render.crewContext ? render.crewContext(snapshot) : null;
+            crewHighlight?.reconcile(crewContext?.crews, snapshot?.generated_at);
+            const nextStructure = JSON.stringify((snapshot?.workspaces || []).map(workspace => ({
+                ...workspace,
+                groups: workspace.groups.map(group => ({
+                    ...group,
+                    panes: group.panes.map(pane => {
+                        const { activity, title, directory, status, waiting,
+                            agent_mcp, agent_mcp_override, agent_auto_mode, ...identity } = pane;
+                        return identity;
+                    })
+                }))
+            })));
+            if (nextStructure !== structure) {
+                paint(bodyHtml(withoutWaiting(snapshot), render, getCloseActions()));
+                structure = nextStructure;
+            }
+            const panes = new Map();
+            (snapshot?.workspaces || []).forEach(workspace => workspace.groups.forEach(group =>
+                group.panes.forEach(pane => panes.set(String(pane.session_id || ''), pane))));
+            body()?.querySelectorAll?.(AGENT_ROW_SELECTOR).forEach(row => {
+                const pane = panes.get(row.dataset?.sessionId || '');
+                if (!pane) return;
+                const line = row.querySelector?.('.dash-agent-line');
+                const text = render.line(pane);
+                if (line) {
+                    const previous = writtenSlots.has(line) ? writtenSlots.get(line) : line.textContent;
+                    if (previous !== text) line.textContent = text;
+                    writtenSlots.set(line, text);
+                }
+            });
             /* After every reading, repainted or not: an unchanged tree keeps
                its rows, but the pane that was the target may not be any more. */
             markInputTarget();
+            /* The same rule for the crews, and the wires last, so they measure
+               the rows with their chips in. */
+            decorateCrews(snapshot);
+            decorateMarks(snapshot);
+            if (!crewOf(pointerRow)) pointerRow = '';
+            wireLayer()?.paint(snapshot);
+            applyHighlight();
             return true;
         }
 
@@ -632,6 +894,8 @@
                 disarmTimer(timer);
                 timer = null;
             }
+            /* The wires stop flowing whenever the poll stands down. */
+            wires?.setPaused(!isOpen() || documentHidden());
             if (!isOpen() || documentHidden()) {
                 ++requestId;
                 inFlight?.abort();
@@ -652,6 +916,7 @@
         function apply(open, { persist = false, report: shouldReport = false, scale: nextScale } = {}) {
             cancelDrag?.();
             const shouldShow = Boolean(open);
+            if (!shouldShow) clearHighlight();
             const widthChanged = nextScale !== undefined && clampScale(nextScale) !== scale;
             const changed = shouldShow !== isOpen() || widthChanged;
             if (nextScale !== undefined) writeScale(nextScale);
@@ -763,9 +1028,11 @@
                     name: dataset.sessionName || '',
                     label: dataset.workspaceLabel || '',
                     groupCount: Number(dataset.groupCount) || 0
-                }, element, { notice: setNotice, refresh });
+                }, element, { notice: (message, tone) => setNotice(message, tone),
+                    refresh: externalRefresh || refresh });
             }
             let landed = false;
+            crewHighlight?.clearClicks();
             try {
                 landed = Boolean(await openTarget({
                     workspaceId: dataset.workspaceId,
@@ -774,23 +1041,70 @@
                 }));
             } catch (error) {
                 logError('[GridVibe Dashboard] sidebar row failed:', error);
+                setNotice('Could not open that workspace.');
+                return false;
             }
-            setNotice(landed ? '' : 'Could not open that workspace.');
+            if (!targetOwnsNotice) setNotice(landed ? '' : 'Could not open that workspace.');
             return landed;
         }
 
-        function wire() {
+        function wireRows() {
             const panel = body();
-            if (wired || !shell() || !panel) return false;
-            wired = true;
+            if (rowsWired || !shell() || !panel) return false;
+            rowsWired = true;
             /* Delegated: every row is rebuilt whenever the reading changes, so
                a listener on a row would not outlive the reading that drew it. */
             panel.addEventListener('click', event => {
                 const row = event.target?.closest?.('[data-dashboard-action]');
-                if (!row) return;
+                if (!row) { crewHighlight?.clearClicks(); return; }
                 event.preventDefault();
                 handleRow(row.dataset, row);
             });
+            /* Hovering a crew's row highlights that crew. Also
+               delegated, for the same reason, and both only toggle classes. */
+            panel.addEventListener('pointerover', event => {
+                pointerRow = rowIdAt(event.target);
+                crewHighlight?.set(pointerSource, crewOf(pointerRow), 'pointer', pointerRow);
+                applyHighlight();
+            });
+            panel.addEventListener('pointerout', event => {
+                pointerRow = rowIdAt(event.relatedTarget);
+                crewHighlight?.set(pointerSource, crewOf(pointerRow), 'pointer', pointerRow);
+                applyHighlight();
+            });
+            panel.addEventListener('pointerleave', () => {
+                pointerRow = '';
+                crewHighlight?.clear(pointerSource);
+                applyHighlight();
+            });
+            if (onCrewToggle) {
+                const toggleCrew = event => {
+                    const root = crewOf(rowIdAt(event.target));
+                    if (!root) return;
+                    event.preventDefault();
+                    onCrewToggle(root);
+                };
+                panel.addEventListener('contextmenu', toggleCrew);
+                panel.addEventListener('keydown', event => {
+                    if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) {
+                        toggleCrew(event);
+                    }
+                });
+                /* Windows can dispatch the ContextMenu default on keyup.
+                   Claim that default too, without toggling a second time. */
+                panel.addEventListener('keyup', event => {
+                    if (event.key === 'ContextMenu' && crewOf(rowIdAt(event.target))) {
+                        event.preventDefault();
+                    }
+                });
+            }
+            return true;
+        }
+
+        function wire() {
+            if (wired || !shell() || !body()) return false;
+            wired = true;
+            wireRows();
             getElement(REFRESH_BTN_ID)?.addEventListener('click', () => refresh());
             getElement(CLOSE_BTN_ID)?.addEventListener('click', () => {
                 apply(false, { persist: true, report: true });
@@ -804,6 +1118,7 @@
             });
             onBridgeReady(() => {
                 painted = '';
+                structure = '';
                 refresh();
             });
             wireResize();
@@ -816,6 +1131,11 @@
 
         return {
             wire, apply, toggle, isOpen, refresh, schedule, handleRow, setNotice, syncToggle,
+            wireRows, paintSnapshot,
+            pause: paused => wires?.setPaused(Boolean(paused)),
+            clearHighlight,
+            dispose: () => { clearHighlight(); unsubscribeHighlight?.(); wires?.dispose(); wires = null; },
+            invalidate: () => { structure = ''; painted = ''; },
             setSide, markInputTarget,
             getSide: () => side,
             getScale: () => scale

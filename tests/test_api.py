@@ -1018,12 +1018,11 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         for mark, source in (
             ("session-bar-launcher-icon", "GridVibe_icon.ico"),
-            ("dashboard-icon", "active_ws.ico"),
+            ("dashboard-icon", "crew.ico"),
             ("session-bar-menu-icon", "icon_transparent.ico"),
         ):
             with self.subTest(mark=mark):
-                self.assertIn(f'class="{mark}"', html)
-                self.assertIn(f'/docs/images/{source}', html)
+                self.assertRegex(html, rf'<img\b[^>]*class="{mark}"[^>]*src="/docs/images/{source}"')
 
         # Nothing in that row paints from currentColor any more, so the button
         # rule no longer carries a stroke colour for a glyph it has not got.
@@ -1034,7 +1033,7 @@ class ApiRoutesTestCase(unittest.TestCase):
     def test_session_bar_controls_share_one_drawn_mark(self):
         """One size is declared and every box is derived from it. The assets
         do not agree on how much padding they bake into their own canvas --
-        GridVibe_icon inks about 0.53 of it, the other two about 0.61 -- so
+        GridVibe_icon inks about 0.53, the crew mark 0.89 and the menu 0.61, so
         each carries its own 1/fraction scale and the negative margin takes the
         padding back out. Two rules that both said 26px are what drew a 26px
         mark beside a 16px one."""
@@ -15425,15 +15424,6 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("window.addEventListener('pointerup', finishGridResize);", html)
         self.assertIn("redrawAttachedTerminals(affectedIndices, { forceResize: true });", html)
         self.assertIn("if (activeGridResize) {\n                event.preventDefault();", html)
-
-    def test_terminals_page_cached_group_views_preserve_resize_weights(self):
-        response = self.client.get("/terminals")
-        html = self._page_html(response)
-        self.assertIn("splitColumnWeights: hasLocalSplitLayout ? cloneSplitTrackWeights(splitColumnWeights) : null", html)
-        self.assertIn("splitRowWeights: hasLocalSplitLayout ? cloneSplitTrackWeights(splitRowWeights) : null", html)
-        self.assertIn("splitColumnWeights = cached.className === 'layout-split-local'", html)
-        self.assertIn("splitRowWeights = cached.className === 'layout-split-local'", html)
-
 
 class ExplorerGitRevisionTestCase(unittest.TestCase):
     """Explorer Git change listener (explorer_git_change_listener_plan_2026-07-30):

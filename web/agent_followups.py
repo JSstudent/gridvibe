@@ -45,6 +45,7 @@ from web.agent_handoffs import (
     HandoffError,
     pane_description,
     validate_task,
+    validate_task_label,
 )
 from web.agent_handoffs import handoffs as agent_handoffs
 from web.agent_results import REPORTED
@@ -89,7 +90,7 @@ def _refused(exc: PaneGateRefusal) -> FollowupError:
 
 
 def _check_followup(worker_session_id: str, payload: Mapping[str, Any]) -> tuple:
-    """Every rule a follow-up passes. Returns ``(caller, live assignment)``."""
+    """Every rule a follow-up passes. Returns ``(caller, worker, live assignment)``."""
     request = read_caller_request(payload, "a follow-up task")
     caller_id = request.caller_session_id
     if worker_session_id == caller_id:
@@ -137,7 +138,7 @@ def _check_followup(worker_session_id: str, payload: Mapping[str, Any]) -> tuple
             "Collect its report with wait_for_results, then send the next task.",
             409,
         )
-    return caller, live
+    return caller, worker, live
 
 
 def hand_followup_task(
@@ -155,10 +156,11 @@ def hand_followup_task(
     data = payload or {}
     try:
         text = validate_task(data.get("task"))
+        label = validate_task_label(data.get("task_label"), text)
     except HandoffError as exc:
         raise FollowupError(exc.message, exc.status_code) from exc
     try:
-        caller, live = _check_followup(str(worker_session_id or ""), data)
+        caller, worker, live = _check_followup(str(worker_session_id or ""), data)
     except PaneGateRefusal as exc:
         raise _refused(exc) from exc
 
@@ -168,6 +170,7 @@ def hand_followup_task(
     def create() -> str:
         view = agent_handoffs.create_followup(
             text,
+            label=label,
             session_id=worker_session_id,
             previous_handoff_id=live["handoff_id"],
             source_session_id=caller_id,
@@ -187,11 +190,12 @@ def hand_followup_task(
     state = agent_handoffs.public_state(worker_session_id) or {}
     logger.info(
         "Handoff %s follow-up handed session=%s requested_by_session_id=%s "
-        "chars=%d standing_by=%s",
+        "chars=%d label_chars=%d standing_by=%s",
         handoff_id,
         worker_session_id,
         caller_id,
         created["view"].chars,
+        len(label),
         standing_by,
     )
     result: Dict[str, Any] = {

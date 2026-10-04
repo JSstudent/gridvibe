@@ -30,10 +30,10 @@
     >
         <header class="dash-titlebar">
             <div class="dash-titlebar-left">
-                <img class="dash-logo" src="/docs/images/active_ws.ico" alt="" aria-hidden="true">
+                <img class="dash-logo" src="/docs/images/crew.ico" alt="" aria-hidden="true">
                 <div class="dash-titlebar-text">
                     <h2 class="dash-title" id="agentDashboardTitle">Agent Dashboard</h2>
-                    <p class="dash-titlebar-sub">Every agent running, in every workspace</p>
+                    <p class="dash-titlebar-sub">Every session, with crews you choose to follow</p>
                 </div>
             </div>
             <div class="dash-titlebar-right">
@@ -68,7 +68,7 @@
            dialog that is still telling you something true four seconds ago. #}
         <p class="dash-notice" id="agentDashboardNotice" role="status" hidden></p>
 
-        {# The one scroller. dashboard-dialog.js owns everything inside it. #}
+        {# Shared sidebar list on the left; selected crew boards on the right. #}
         <main class="dash-body" id="agentDashboardBody">
             <div class="dash-empty"><p class="dash-empty-title">Reading…</p></div>
         </main>

@@ -141,7 +141,7 @@ Until it is installed the checkbox still appears and the agent simply finds no t
 - **Agents report back.** An agent handed a task reports its outcome to the agent that handed it over, which can wait for several at once — ask for *"hand this to three Codex agents beside this one and wait for their results."* A pane closed before it reported is reported as ended, so nothing waits forever.
 - **Agents keep the conversation going.** An agent can send the next task to an agent it already handed one to, without restarting it, so the worker keeps everything it knows — ask for *"have a Claude agent below guess my number, and keep answering until it gets it right."* The worker stands by for the next task only when its task asks it to.
 - **It asks before it replaces.** Refused a pane it did not make, an agent gets GridVibe's own question to put to you — which pane, and what it would end — and acts only on your yes.
-- **Override mode, when you want it to stop asking.** Tick **Override** beside **MCP** in the launcher, or pick **Override** on the pane's 🔄 dropdown, and after a warning that agent closes, moves, relaunches, re-modes and clears panes it did not create without asking. It still never touches its own pane or sends a task to another machine, and its MCP frame and dashboard chip turn red.
+- **Override mode, when you want it to stop asking.** Tick **Override** beside **MCP** in the launcher, or pick **Override** on the pane's 🔄 dropdown, and after a warning that agent closes, moves, relaunches, re-modes and clears panes it did not create without asking. It still never touches its own pane or sends a task to another machine, and its MCP frame, on the pane header and on its sidebar row, turns red.
 - **Agents launching agents is bounded.** A pane an agent creates counts one generation deeper than the pane that asked for it, and the chain stops after five.
 - **New panes open where the asking agent is.** A tool called from an SSH pane opens its panes on that same host over the same connection, and refuses rather than quietly falling back to this machine. They land in the workspace that agent's tab is in *now*, so moving a session between workspaces takes its agent with it.
 - **SSH panes get the tools too**, with nothing installed on the remote host. The pane reaches GridVibe back down its own connection, on a port that exists only while the pane does, is reachable only from that host, and answers only that pane's own requests.
@@ -189,21 +189,26 @@ Closing a workspace asks first and offers **Cancel**, **Save and close**, or **C
 
 ## Agent Dashboard
 
-See **every session in every workspace**, agents first. Open the dashboard dialog with `Alt+A` or the dashboard button, or keep it beside your panes with the sidebar handle at the start of the session tab line.
+See **every session in every workspace**, agents first, in a sidebar you can keep beside your panes (the handle at the start of the session tab line), or open the same list and follow selected crews in the dashboard dialog (`Alt+A` or the dashboard button).
 
 - **Keep the overview beside your work** — the docked sidebar stays open as you work or switch windows. Each workspace remembers whether it is open.
 - **See which agent you are typing into** — the sidebar row of the agent pane holding your keyboard focus wears the same accent ring as the pane, and follows you as you click between panes.
 - **Widen it when you need more room** — drag the sidebar's inner edge from its default width up to twice that width. The chosen scale is saved with the workspace and adapts to the window size.
 - **Put it on the side you want** — **App Settings ▸ Agents ▸ Agent Dashboard Side** docks the sidebar left or right — pick the card that shows it on that edge — and every open window moves as soon as you save. The handle, its marks and the rows are the same either way.
 - **Three levels** — a workspace is a titled band, a session tab is a card inside it drawn in that tab's own colour, and each agent is one row inside the card.
-- **Every agent on one line** — a leading status dot, the agent's mark, its chat title, and `MCP` when the agent has GridVibe tools, in red when it runs in override mode. The dialog also draws the agent's name and `auto` when it was launched with auto-approval.
+- **Each list row on one line** — a leading status dot, the agent's mark and its chat title. A blue frame round the mark means the agent has GridVibe tools, red in override mode, and a small framed **A** on its corner means it was launched with auto-approval; point at the mark for the words.
 - **The state is the leading mark** — a spinning green ring while working, amber z's while idle, a red dot when unreachable. Point at it for the words: how long it has been idle, or what went wrong.
 - **The rest is one hover away** — pointing at a row gives the full chat title, where the pane is, and what it runs on (`SSH`, `WSL`, `PowerShell`, `cmd`).
-- **A badge that means something** — the button counts the agents **working right now**, not how many you have open. No badge means every agent is sitting at a prompt.
-- **Click anything to go there** — a row, its session, or its workspace opens or focuses that window at that tab.
+- **A badge that means something** — the button counts the agents **working right now**, not how many you have open. No badge means every agent is sitting at a prompt or waiting on another agent.
+- **See who handed work to whom** — the sidebar draws a separate lane for each crew, branches coloured by each task's state, and a count of reported workers on the orchestrator's row. Finished reports stay as solid lines with a slow pulse.
+- **Follow the crews you choose** — in the dialog, right-click a crew member to show or hide its diagram, use **ContextMenu** or **Shift+F10** on its row, or hide an open diagram with its **×** while its agents keep running. The dialog fits the open diagrams within three quarters of the window, stacks them below the list on narrow screens, and removes crews that end.
+- **Highlight a whole crew** — hover a crew member in either list, or click empty space inside its diagram to highlight the crew and its sidebar lines. Click the frame again to clear it; opening another diagram or hiding the highlighted one also clears the graph highlight.
+- **See each worker's task** — crew tiles show the agent icon and terminal title in its agent's colour, with the current task label or chat line underneath. Session, status, round and time share one compact row.
+- **Waiting is not working** — an agent waiting on its crew, or standing by for its next task, wears a dotted mark instead of the working spinner.
+- **Click anything to go there** — a row in either list, its session, or its workspace, or a node on a crew board, opens or focuses that window at that tab.
 - **Keep the dialog up while you work elsewhere** — it stays open when you move to another window, so you can leave it on a second screen. It closes when you click beside it, reach a pane in its own workspace, or open it somewhere else.
-- **Close from either view** — a session card's **×** and a band's **Close workspace** both offer **Cancel**, **Save and close**, or the plain close; a failed save cancels the close. **Close window** in native mode keeps the sessions running; these actions leave the dashboard open.
-- **Sessions without agents are listed too**, sorted after the ones that have them, because this is also the fastest way to reach any tab in any window.
+- **Close from either list** — a session card's **×** and a band's **Close workspace** both offer **Cancel**, **Save and close**, or the plain close; a failed save cancels the close. **Close window** in native mode keeps the sessions running; these actions leave the overview open.
+- **Sessions without agents are listed too**, sorted after the ones that have them, because the sidebar is also the fastest way to reach any tab in any window.
 - **Nothing is typed into a running agent** — the chat title and the working/idle reading both come from the pane's own output, and the check for what a pane is running reads this machine's process list rather than the pane.
 
 A pane running an agent also renames itself after it: `Terminal 1` becomes `Claude Code`, with that agent's icon beside it. A title you typed yourself always wins.

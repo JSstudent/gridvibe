@@ -52,14 +52,29 @@ from web.agent_handoffs import (  # noqa: E402
     WAITING,
 )
 from web.agent_handoffs import handoffs as store  # noqa: E402
+from web.agent_results import results as result_store  # noqa: E402
 from web.window_intents import window_intents  # noqa: E402
 
 QUOTED = f'"{HANDOFF_OPENING_PROMPT}"'
 BRIEF = "Findings: the retry loop in sync.py never backs off. Proposed fix: cap it."
 
+INVALID_LABELS = (
+    42, True, [], {}, "", "  ", "x" * 61, "€" * 61, "🚀" * 61, "a\nb", "a\r\nb", "a\tb",
+    "a\x00b", "a\x1bb", "a\x7fb", "a\u200bb", "a\u2028b", "a\u00a0b", "a\ud800b",
+)
+
 
 def _detect_found(target, binary):
     return {"found": True, "path": f"/usr/bin/{binary}"}
+
+
+def _requester_of(session_id):
+    """Who the dashboard link for this worker says handed it its task."""
+    links = [
+        link for link in result_store.links_snapshot()
+        if link["worker_session_id"] == session_id
+    ]
+    return links[-1]["requester_session_id"] if links else None
 
 
 class _RouteCase(unittest.TestCase):
@@ -128,6 +143,20 @@ class _RouteCase(unittest.TestCase):
 
 
 class SplitIntentTaskTestCase(_RouteCase):
+    def test_invalid_labels_and_labels_without_tasks_record_nothing(self):
+        caller = self._agent_pane()
+        for label in INVALID_LABELS:
+            with self.subTest(label=repr(label)):
+                response = self._intent(caller, self._body(caller, task_label=label))
+                self.assertEqual(response.status_code, 400, response.get_json())
+                self.assertIn("task_label", response.get_json()["error"])
+                self.assertEqual(store.count(), 0)
+                self.assertEqual(window_intents.pending(), [])
+        response = self._intent(caller, self._body(caller, task=None, task_label="Review"))
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("only alongside", response.get_json()["error"])
+        self.assertEqual(store.count(), 0)
+
     def _intent(self, source, body):
         with patch.object(web_agents, "_detect_agent_binary_cached", side_effect=_detect_found):
             return self.client.post(f"/api/sessions/{source.session_id}/split-intent", json=body)
@@ -228,6 +257,23 @@ class SplitIntentTaskTestCase(_RouteCase):
 
 
 class SplitTakesTheHandleTestCase(_RouteCase):
+    def test_a_label_reaches_the_link_only_after_the_handle_is_bound(self):
+        caller = self._agent_pane()
+        label = "€" * 60
+        request = self._record(caller, task_label=label)
+        self.assertNotIn("task_label", request)
+        self.assertNotIn(label, json.dumps(window_intents.pending(), ensure_ascii=False))
+        self.assertFalse(any(row["requester_session_id"] == caller.session_id
+                             for row in result_store.links_snapshot()))
+        response = self._split(caller, request)
+        self.assertEqual(response.status_code, 201, response.get_json())
+        created = response.get_json()["session"]
+        link = next(row for row in result_store.links_snapshot()
+                    if row["worker_session_id"] == created["session_id"])
+        self.assertEqual(link["label"], label)
+        self.assertEqual(link["round"], 1)
+        self.assertNotIn(label, json.dumps(created, ensure_ascii=False))
+
     def _record(self, caller, source=None, **overrides):
         source = source or caller
         body = {
@@ -268,11 +314,19 @@ class SplitTakesTheHandleTestCase(_RouteCase):
         self.assertEqual(started[0]["state"], WAITING)
         self.assertNotIn("task", json.dumps(created))
 
+    def test_the_new_pane_is_linked_to_the_agent_that_handed_it_the_task(self):
+        caller = self._agent_pane()
+        split_request = self._record(caller)
+
+        created = self._split(caller, split_request).get_json()["session"]
+
+        self.assertEqual(_requester_of(created["session_id"]), caller.session_id)
+
     def test_a_source_that_closes_between_take_and_bind_costs_the_task_not_the_split(self):
         caller = self._agent_pane()
         split_request = self._record(caller)
 
-        def gone(handoff_id, session_id):
+        def gone(handoff_id, session_id, **_kwargs):
             store.forget_session(caller.session_id)
             raise api.HandoffError("That task is no longer waiting for a pane.", 409)
 
@@ -347,6 +401,42 @@ class SplitTakesTheHandleTestCase(_RouteCase):
 
 
 class LaunchTaskTestCase(_RouteCase):
+    def test_invalid_labels_refuse_the_whole_launch(self):
+        caller = self._agent_pane()
+        before = set(api.session_manager.sessions)
+        for label in INVALID_LABELS:
+            with self.subTest(label=repr(label)):
+                status, payload = self._launch(self._body(caller, [
+                    self._agent_config(task_label="Valid"), self._agent_config(task_label=label),
+                ]))
+                self.assertEqual(status, 400, payload)
+                self.assertIn("Pane 2: 'task_label'", payload["error"])
+                self.assertEqual(set(api.session_manager.sessions), before)
+                self.assertEqual(store.count(), 0)
+        status, payload = self._launch(self._body(caller, [
+            self._agent_config(task=None, task_label="Review"),
+        ]))
+        self.assertEqual(status, 400, payload)
+        self.assertIn("only alongside", payload["error"])
+
+    def test_each_panes_label_reaches_its_link_and_no_durable_surface(self):
+        caller = self._agent_pane()
+        labels = ["€" * 60, " Write tests ", ""]
+        configs = [self._agent_config(task_label=labels[0]),
+                   self._agent_config(task_label=labels[1]), self._agent_config()]
+        status, payload = self._launch(self._body(caller, configs))
+        self.assertEqual(status, 201, payload)
+        for pane, label in zip(payload["sessions"], labels):
+            link = next(row for row in result_store.links_snapshot()
+                        if row["worker_session_id"] == pane["session_id"])
+            self.assertEqual(link["label"], label)
+        for surface in (payload, api.session_manager.snapshot_live_workspaces()):
+            text = json.dumps(surface, default=str, ensure_ascii=False)
+            self.assertNotIn("task_label", text)
+            self.assertNotIn(labels[0], text)
+            self.assertNotIn(labels[1].strip(), text)
+        self.assertEqual(configs[0]["task_label"], labels[0])
+
     def _launch(self, body, preflight=None):
         with patch.object(api.socketio, "start_background_task"), patch.object(
             web_agents, "_agent_preflight_payload",
@@ -414,6 +504,18 @@ class LaunchTaskTestCase(_RouteCase):
         ):
             self.assertNotIn(second_brief, surface)
             self.assertNotIn('"task"', surface)
+
+    def test_each_launched_pane_is_linked_to_the_agent_that_launched_it(self):
+        caller = self._agent_pane()
+
+        status, payload = self._launch(
+            self._body(caller, [self._agent_config("claude", "One."),
+                                self._agent_config("codex", "Two.")])
+        )
+
+        self.assertEqual(status, 201, payload)
+        for created in payload["sessions"]:
+            self.assertEqual(_requester_of(created["session_id"]), caller.session_id)
 
     def test_a_pane_without_a_task_is_launched_as_before(self):
         caller = self._agent_pane()
@@ -844,6 +946,34 @@ def _pane_state(session_id):
 
 
 class RelaunchWithTaskTestCase(shell_tests.ShellTransitionTestCase):
+    def test_invalid_labels_are_refused_before_the_self_gate(self):
+        caller, _repo = self._caller()
+        before = _pane_state(caller.session_id)
+        for label in INVALID_LABELS:
+            with self.subTest(label=repr(label)):
+                response, started = self._relaunch(caller.session_id, self._body(caller, task_label=label))
+                self.assertEqual(response.status_code, 400, response.get_json())
+                self.assertIn("task_label", response.get_json()["error"])
+                self.assertEqual(started, [])
+                self.assertEqual(_pane_state(caller.session_id), before)
+                self.assertEqual(store.count(), 0)
+        response, started = self._relaunch(caller.session_id, self._body(caller, task=None, task_label="Review"))
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("only alongside", response.get_json()["error"])
+        self.assertEqual(started, [])
+
+    def test_a_relaunch_binds_the_label_before_start_and_publishes_only_the_link(self):
+        caller, repo = self._caller()
+        target = self._target(caller, repo)
+        label = "€" * 60
+        response, started = self._relaunch(target.session_id, self._body(caller, task_label=label))
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertTrue(started)
+        link = next(row for row in result_store.links_snapshot()
+                    if row["worker_session_id"] == target.session_id)
+        self.assertEqual(link["label"], label)
+        self.assertNotIn(label, json.dumps(response.get_json(), ensure_ascii=False))
+
     def setUp(self):
         super().setUp()
         store.reset()
@@ -917,6 +1047,15 @@ class RelaunchWithTaskTestCase(shell_tests.ShellTransitionTestCase):
         self.assertEqual(started, [payload["handoff"]])
         self.assertEqual(store.pending_for(target.session_id).source_session_id, caller.session_id)
         self.assertNotIn(BRIEF, json.dumps(payload))
+
+    def test_the_relaunched_pane_is_linked_to_the_agent_that_handed_it_the_task(self):
+        caller, repo = self._caller()
+        target = self._target(caller, repo)
+
+        response, _started = self._relaunch(target.session_id, self._body(caller))
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(_requester_of(target.session_id), caller.session_id)
 
     def test_a_task_turns_the_tools_on(self):
         caller, repo = self._caller()

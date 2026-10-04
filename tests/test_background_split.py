@@ -363,6 +363,7 @@ ADAPTER_SOURCE_NAMES = (
     "cloneSplitTrackWeights",
     "buildWorkspaceLayoutSnapshotFromState",
     "getLayoutClass",
+    "gridLayoutClass",
     "adoptSplitGroupRecord",
     "sumTrackSpan",
     "getResizableGridMetrics",

@@ -42,9 +42,12 @@ What is pinned:
   keeps the number a tally of the dots it labels.
 """
 
+import json
 import sys
+import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -61,7 +64,14 @@ from web.agent_activity import (  # noqa: E402
     blank_agent_activity,
     note_agent_output,
 )
-from web.dashboard import PANE_FIELDS, compose_dashboard  # noqa: E402
+from web.agent_handoffs import handoffs as handoff_store  # noqa: E402
+from web.agent_results import results as result_store  # noqa: E402
+from web.dashboard import (  # noqa: E402
+    PANE_FIELDS,
+    WAITING_CREW,
+    WAITING_TASK,
+    compose_dashboard,
+)
 
 ESC = "\x1b"
 BEL = "\x07"
@@ -156,7 +166,7 @@ class DashboardComposerTestCase(unittest.TestCase):
         # And the field list is the whole of what a pane may publish.
         self.assertEqual(
             set(pane) - set(PANE_FIELDS),
-            {"workspace_id", "index", "directory", "activity"},
+            {"workspace_id", "index", "directory", "activity", "waiting"},
         )
 
     def test_a_pane_publishes_what_it_runs_on(self):
@@ -495,6 +505,141 @@ class DashboardComposerTestCase(unittest.TestCase):
         self.assertEqual(snapshot["totals"]["working"], 2)
 
 
+def link(requester, worker, **overrides):
+    payload = {
+        "link_id": f"{requester}-{worker}",
+        "requester_session_id": requester,
+        "worker_session_id": worker,
+        "state": "working",
+        "read": True,
+        "status": "",
+        "collected": False,
+        "handed_at": "2026-10-02T10:00:00+00:00",
+        "reported_at": "",
+        "reason": "",
+        "round": 1,
+    }
+    payload.update(overrides)
+    return payload
+
+
+class DashboardCrewTestCase(unittest.TestCase):
+    """Who handed a task to whom, and who is waiting on it."""
+
+    def _compose(self, **overrides):
+        arguments = {
+            "workspaces": [workspace("default", active_group_id="g1")],
+            "groups_by_workspace": {"default": [group("g1", "default")]},
+            "sessions_by_group": {
+                "g1": [
+                    session("orch", "g1"),
+                    session("worker", "g1"),
+                    plain_session("shell", "g1"),
+                ]
+            },
+            "activity": {
+                "orch": note_agent_output(None, 499.0),
+                "worker": note_agent_output(None, 499.0),
+            },
+            "now": 500.0,
+        }
+        arguments.update(overrides)
+        return compose_dashboard(**arguments)
+
+    def _panes(self, snapshot):
+        return {
+            pane["session_id"]: pane
+            for workspace_row in snapshot["workspaces"]
+            for group_row in workspace_row["groups"]
+            for pane in group_row["panes"]
+        }
+
+    def test_links_are_composed_only_between_two_agent_rows(self):
+        snapshot = self._compose(
+            links=[
+                link("orch", "worker"),
+                # A closed pane is in no crew: its link is not published, so
+                # every surface loses it together and none draws a ghost.
+                link("orch", "closed-pane", state="reported", status="done"),
+                # Nor is a pane that is open but no longer an agent pane.
+                link("orch", "shell"),
+                # A requester with no agent row is not an orchestrator here.
+                link("shell", "worker"),
+                link("gone", "worker"),
+            ]
+        )
+
+        self.assertEqual(
+            [(item["requester_session_id"], item["worker_session_id"]) for item in snapshot["links"]],
+            [("orch", "worker")],
+        )
+        self.assertEqual(snapshot["links"][0], link("orch", "worker"))
+
+    def test_a_worker_whose_agent_ended_but_whose_pane_is_open_keeps_its_link(self):
+        snapshot = self._compose(
+            links=[link("orch", "worker", state="ended", reason="agent exited")]
+        )
+
+        (published,) = snapshot["links"]
+        self.assertEqual(published["state"], "ended")
+        self.assertEqual(published["reason"], "agent exited")
+
+    def test_a_pane_that_closes_takes_its_links_out_of_the_next_reading(self):
+        links = [link("orch", "worker"), link("orch", "other")]
+        before = self._compose(
+            sessions_by_group={
+                "g1": [session(name, "g1") for name in ("orch", "worker", "other")]
+            },
+            links=links,
+        )
+        after = self._compose(
+            sessions_by_group={"g1": [session(name, "g1") for name in ("orch", "other")]},
+            links=links,
+        )
+
+        self.assertEqual(
+            [item["worker_session_id"] for item in before["links"]], ["worker", "other"]
+        )
+        self.assertEqual([item["worker_session_id"] for item in after["links"]], ["other"])
+
+    def test_no_links_is_an_empty_list(self):
+        self.assertEqual(self._compose()["links"], [])
+
+    def test_waiting_names_the_kind_and_crew_wins_on_overlap(self):
+        panes = self._panes(
+            self._compose(
+                sessions_by_group={
+                    "g1": [session(name, "g1") for name in ("orch", "worker", "both", "idle")]
+                },
+                waiting={"orch", "both"},
+                standing_by={"worker", "both"},
+            )
+        )
+
+        self.assertEqual(
+            {name: pane["waiting"] for name, pane in panes.items()},
+            {"orch": WAITING_CREW, "worker": WAITING_TASK, "both": WAITING_CREW, "idle": ""},
+        )
+
+    def test_a_waiting_pane_is_never_counted_as_working(self):
+        """Both readings say a tool call is open, which a CLI may show as work."""
+        snapshot = self._compose(waiting={"orch"}, standing_by={"worker"})
+
+        panes = self._panes(snapshot)
+        self.assertEqual(panes["orch"]["activity"]["state"], ACTIVITY_WORKING)
+        self.assertEqual(panes["worker"]["activity"]["state"], ACTIVITY_WORKING)
+        self.assertEqual(snapshot["totals"]["working"], 0)
+        self.assertEqual(self._compose()["totals"]["working"], 2)
+
+    def test_links_never_enter_the_row_structure(self):
+        bare = self._compose()
+        linked = self._compose(links=[link("orch", "worker")])
+
+        self.assertEqual(bare["workspaces"], linked["workspaces"])
+        self.assertEqual(bare["totals"], linked["totals"])
+        self.assertNotIn("link_id", json.dumps(linked["workspaces"]))
+
+
 class DashboardObservationOwnershipTestCase(unittest.TestCase):
     """A reading belongs to the transport that produced it, and to no other."""
 
@@ -605,7 +750,7 @@ class DashboardRouteTestCase(unittest.TestCase):
         self.assertEqual(group_row["panes"][0]["startup_mode"], "agent")
 
     def test_the_route_publishes_the_live_override_grant(self):
-        """The row paints its MCP chip red from `agent_mcp_override`, so the
+        """The row paints its MCP mark red from `agent_mcp_override`, so the
         route must carry the live record's own value -- including after a
         relaunch without the tools settled the grant away, which re-ticking
         the tools does not bring back."""
@@ -721,6 +866,74 @@ class DashboardRouteTestCase(unittest.TestCase):
         self.assertEqual(gone["totals"]["agents"], 1)
         self.assertEqual(gone["totals"]["working"], 0)
 
+    def test_links_and_waiting_reach_the_route_from_the_stores(self):
+        _, agent, _ = self._launch_group()
+        result_store.reset()
+        self.addCleanup(result_store.reset)
+        worker = api.session_manager.create_session(
+            group_id=agent.group_id,
+            host="10.0.0.5",
+            directory="/srv/app",
+            password="hunter2",
+            title="Terminal 3",
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection="codex",
+        )
+        result_store.expect(
+            "h-1", requester_session_id=agent.session_id, worker_session_id=worker.session_id
+        )
+        result_store.expect(
+            "h-2", requester_session_id=agent.session_id, worker_session_id="closed-worker"
+        )
+        result_store.wait_until_settled(agent.session_id, timeout=0.01)
+
+        payload = self.client.get("/api/dashboard").get_json()
+
+        # The live worker's link is published; the closed pane's is not.
+        (published,) = payload["links"]
+        self.assertEqual(published["worker_session_id"], worker.session_id)
+        self.assertNotIn("worker_agent", published)
+        self.assertNotIn("h-1", json.dumps(payload))
+        self.assertNotIn("closed-worker", json.dumps(payload))
+        self.assertEqual(
+            payload["workspaces"][0]["groups"][0]["panes"][0]["waiting"], WAITING_CREW
+        )
+
+    def test_neither_store_is_read_under_the_manager_lock_or_connection_lock(self):
+        self._launch_group()
+        held = []
+
+        def free(lock):
+            """Whether another thread can take ``lock`` -- false while this one holds it."""
+            taken = []
+
+            def attempt():
+                if lock.acquire(timeout=1):
+                    taken.append(True)
+                    lock.release()
+
+            thread = threading.Thread(target=attempt)
+            thread.start()
+            thread.join(2)
+            return bool(taken)
+
+        def reading(original):
+            def wrapped(*args, **kwargs):
+                held.append(
+                    (free(api.session_manager.lock), free(web_terminal_io.connection_lock))
+                )
+                return original(*args, **kwargs)
+            return wrapped
+
+        with patch.object(result_store, "links_snapshot", reading(result_store.links_snapshot)), \
+                patch.object(result_store, "waiting_requesters", reading(result_store.waiting_requesters)), \
+                patch.object(handoff_store, "standing_by", reading(handoff_store.standing_by)):
+            response = self.client.get("/api/dashboard")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(held, [(True, True)] * 3)
+
     def test_an_empty_server_answers_rather_than_failing(self):
         """A workspace record with no session in it is not a live workspace --
         `list_live_workspaces` already decided that -- so an idle server is an
@@ -741,10 +954,15 @@ class DashboardRouteTestCase(unittest.TestCase):
                 self.assertIn('id="agentDashboardShell"', body)
                 self.assertIn("agentDashboardBody", body)
                 self.assertIn("dashboard-dialog.js", body)
+                self.assertIn("dashboard-sidebar.js", body)
+                self.assertIn("css/agent-dashboard-sidebar.css", body)
+                self.assertEqual(body.count('src="/docs/images/crew.ico"'), 2)
                 # The button that raises it, and the badge that is the reason
                 # to.
                 self.assertIn('id="dashboardBtn"', body)
         self.assertEqual(self.client.get("/dashboard").status_code, 404)
+        with self.client.get("/docs/images/crew.ico") as response:
+            self.assertEqual(response.status_code, 200)
 
 
 if __name__ == "__main__":

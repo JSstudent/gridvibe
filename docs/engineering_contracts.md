@@ -97,6 +97,14 @@ Regression history and audit narratives do not belong in this reference.
   Update the captured pane's own state even when cached; resolve its current slot
   before painting. Release captured busy DOM nodes, never replacement nodes found
   by id. A grid index alone is never identity.
+- A session view belongs either to the visible grid or to its detached cache.
+  Restoring transfers the pane cards and instances and removes the cache entry
+  without disposal or leaving session rooms; departure creates a fresh entry.
+  Reject empty or inconsistent fragments before clearing the grid. Reconciliation
+  checks that the model's cards are mounted and reloads if they are missing.
+  Compare layout classes independently of focus and broadcast decorations in
+  load, refresh, cached geometry and presentation capture; an unchanged view
+  keeps its nodes, input focus and session rooms when background tabs arrive.
 - A completed Git action on a replaced/cached pane marks its model stale without
   blanking it; restore performs the fresh load. A still-visible pane whose scope
   changed paints and loads its current scope immediately. Already-sent shell/Git
@@ -1084,9 +1092,10 @@ unless the task explicitly changes this contract.
 - `GET /api/dashboard` is the only cross-workspace read: one pass composing
   every live workspace, its groups and their agent panes. Consumers must not fan
   out per-workspace requests to rebuild it.
-- The payload carries **every live session, agents first**. The surface is the
+- The payload carries **every live session, agents first**. The list surfaces
+  (the docked sidebar and the dialog's shared list) are the
   agent list *and* the only place every workspace and session is named at once,
-  so it is also how a reader reaches one — which makes dropping a session the
+  so they are also how a reader reaches one — which makes dropping a session the
   removal of its only route from here. The two jobs are reconciled in the
   order, never by omission: `agents_first()` puts the rows holding an agent
   ahead of the rows holding none at both levels (a workspace and a group both
@@ -1111,10 +1120,12 @@ unless the task explicitly changes this contract.
 - `totals.working` is the button badge's number and is composed here, beside
   the rows, so the badge is a tally of the state dots in the list it labels
   rather than a second answer to the same question. A pane counts only when
-  its `status` is `connected` **and** its activity reading is `working` — the
-  same override `dashboardPaneStateKey()` makes on the row, so a dead shell's
-  last frames and a pane that is still connecting are never counted. It is a
-  field beside `totals.agents`, never a replacement: the dialog lists what
+  its `status` is `connected`, its `waiting` is empty **and** its activity
+  reading is `working` — the same order `dashboardPaneStateKey()` applies on
+  the row (transport, then waiting, then activity), so a dead shell's last
+  frames, a pane that is still connecting and an agent sitting inside a wait
+  tool call are never counted. It is a
+  field beside `totals.agents`, never a replacement: the sidebar lists what
   exists, and the badge signals what wants looking at.
 - `web/dashboard.py` composes; the route stays thin. `compose_dashboard()` is
   pure (dictionaries in, dictionary out, no manager, no clock). The gatherer
@@ -1138,23 +1149,23 @@ unless the task explicitly changes this contract.
   part of the rule — a remote pane's tools arrive over the reverse forward on
   its own SSH transport, so `pane_can_run_the_sidecar()` picks the *shape* of
   the answer (local config file against tunnelled URL) and never whether there
-  is one. The dashboard draws the tag as an `MCP` chip; the pane header draws
-  the same reading as a frame around the agent's mark (`data-mcp` on the icon,
-  written by `syncPaneAgentIcon()`), with `MCP_TAG_TITLE` on the mark's hover,
-  because the header has no width to spare for a word. The tag is its own value
+  is one. The pane header and both dashboard lists draw the tag as a frame
+  around the agent's mark (`data-mcp` on the icon, written by
+  `syncPaneAgentIcon()` in the header and by `decorateMarks()` in the sidebar),
+  with `MCP_TAG_TITLE` on the mark's hover, because neither has width to spare
+  for a word. The tag is its own value
   and is never folded into `paneDisplayTitle()`
   or `paneChatLine()`: a title is also what the reader typed, and a chip
   concatenated into one would be indistinguishable from a name and would reach
   the typed-title comparison as though somebody had chosen it. `agent_mcp`
-  therefore stays in `PANE_FIELDS` and in the repaint's structure key, so a
-  relaunch on or off the tools rebuilds the row and an unchanged poll does not.
+  therefore stays in `PANE_FIELDS`; both dashboard lists rewrite the mark's
+  attributes in place, so a relaunch on or off the tools never rebuilds a row.
 - **Override mode is a state of that same tag, never a second one.**
   `paneAgentMcpOverride()` in `agent-identity.js` is true only when the pane
   wears the MCP tag *and* `agent_mcp_override === true`, so a stale or stringy
-  grant paints nothing. The header writes `data-mcp-override` beside `data-mcp`
-  and the dashboard chip gains `is-override`; both colour through
-  `--gv-mcp-override` / `--gv-mcp-override-soft` (the theme's danger hue, never
-  a literal), the chip text stays `MCP`, and `paneAgentMcpTagTitle()` swaps in
+  grant paints nothing. The header and both lists write `data-mcp-override`
+  beside `data-mcp` and colour through `--gv-mcp-override` (the theme's danger
+  hue, never a literal). `paneAgentMcpTagTitle()` swaps in
   `MCP_OVERRIDE_TAG_TITLE` so colour is not the only signal.
   `agent_mcp_override` is in `PANE_FIELDS`, read from the live record, so a
   relaunch that drops the grant clears the red where the pane stands.
@@ -1247,6 +1258,34 @@ unless the task explicitly changes this contract.
   and `EXPLORER_ESCAPE_CLAIM_SELECTOR` already claims Escape for it. Include
   the partial *before* the confirm dialogs on each page; at equal z-index the
   later element wins.
+- **The dialog uses the docked sidebar's list with an optional crew window.**
+  `dashboard-sidebar.js` supplies a second controller instance with its own
+  body and shell, but the same renderer, in-place decorations, shared crew
+  highlight and lane wire layer. The dialog supplies the snapshot from its
+  existing poll; the list instance neither polls nor persists sidebar state.
+  The list shows workspace bands, session cards, agent rows and close actions;
+  the header counts agents, sessions and workspaces. There is no hidden-list
+  switch or alternative dialog list renderer.
+- **Crew selection is a dialog-only gesture.** Right-clicking an orchestrator
+  or worker row toggles its root crew in the board window. ContextMenu and
+  Shift+F10 on a focused crew row do the same; only crew rows suppress the
+  native context menu. Each diagram's × hides that crew through the same set;
+  its agents remain running. The hover and accessible text explain the gesture
+  and whether the crew is shown, and selected rows carry `is-crew-selected` in
+  place. Selection is an insertion-ordered, in-memory set for the page's dialog
+  lifetime, retained across dismissal and reopen. A root absent from the next
+  reading is removed automatically; returning links do not reselect it.
+  The first selection shows the crew window and the last removal hides it.
+  The docked sidebar keeps its ordinary context menu and has no crew toggle.
+- **The dialog is capped at 75% of its window in both dimensions.** With no
+  selected crew it is a compact list column. From 1000px window width the list
+  is on the left and the crew window is on the right; the dialog width follows
+  the deepest open diagram, including frame padding, borders and scrollbar
+  allowance, up to the cap. Each diagram fits its own live depth, so removing
+  the deepest branch reduces its width. Below that window width the crew window
+  stacks under the list; both scroll within the cap without page overflow.
+  Its button and header mark use `/docs/images/crew.ico`, compensating for its
+  114px ink width on a 128px canvas. The docked logo and handle marks are unchanged.
 - The dialog polls only while it is open **and its document is visible**.
   Opening arms the poll, reads once, publishes the exclusivity claim below and
   moves focus to the surface rather than to a control in it; closing disarms the
@@ -1321,7 +1360,8 @@ unless the task explicitly changes this contract.
   var(--agent-sidebar-scale, 1))`, with the base owned solely by the CSS clamp
   `clamp(240px, 15%, 400px)`. Dragging measures the rendered border-box width
   divided by its current scale, never restating the clamp in JavaScript. The
-  edge button captures the pointer and listens for move/up/cancel on the window;
+  edge button occupies a reserved 6px strip, outside the content box on either
+  docked side, so it cannot cover the scrollbar. It captures the pointer and listens for move/up/cancel on the window;
   each move writes a scale clamped to 100..200. The drag captures its
   direction from the side at the press, so the handle always widens away from
   the grid; a side change under the pointer abandons the drag rather than
@@ -1332,11 +1372,11 @@ unless the task explicitly changes this contract.
   restored width changes. The sidebar stylesheet owns the 22px session × and
   a separate row for workspace word buttons beneath the band heading; shared
   `agent-dashboard.css` rules and palette tokens remain the styling owners.
-- Acting closes the dialog only when the act lands on this page: a row for the
-  workspace this window already is takes the dialog with it, because a surface
-  over the pane it just reached is in the way. A row for any other workspace
-  leaves it up, and so does a refusal, which is reported on it. The close verbs
-  never close it.
+- Acting closes the dialog only when the act lands on this page: a board node
+  or a list row for the workspace this window already
+  is takes the dialog with it, because a surface over the pane it just reached
+  is in the way. A node for any other workspace leaves it up, and so does a
+  refusal, which is reported on it. The close verbs never close it.
 - A row lands on the pane it names, not merely on the window. The workspace the
   reader is already in is applied directly through `applyWorkspaceFocusTarget`,
   because raising an already-raised window fires no `focus` event; every other
@@ -1397,23 +1437,17 @@ unless the task explicitly changes this contract.
   progress bar is the trailing column and a separate reading: only the agents
   that speak the progress sequence have one, so it must never widen the
   state's column.
-- The drawn row is therefore the dot, the agent's mark and name, the chat
-  title, `MCP` and `auto` — the two chips left on it, and both say what this
-  agent may *do*, which is what a reader choosing a row to instruct is deciding
-  between. What the pane runs *on* is still `paneTransportLabel()`'s single
-  word, and the dashboard states it as the last line of the row's own hover
-  rather than as a chip on the line: it is looked up when something is wrong
-  with a pane, not scanned down a card, and the width belongs to the title.
-  A chip may carry a hover of its own for a label the reader may not recognise;
-  one whose label is already the word carries none.
-- The docked sidebar's row drops the agent's *name* out of flow because its mark
-  already answers which agent it is, and it draws no `auto` chip — but it does
-  draw `MCP`, from `dashboardMcpTagHtml()`, the dialog's own builder handed in
-  through the runtime. Nothing else on that row says whether the agent can act
-  on GridVibe, which is what a reader picking a pane to instruct is deciding,
-  and picking one *while* working is what a docked panel is for. Every other
-  field on that row stays the dialog's answer asked for by name; a second copy
-  of any of them is how one pane comes to read two ways on two surfaces.
+- **Both lists draw one shared row.** Its visible columns are the status dot,
+  agent mark, chat title, crew chip where applicable and progress bar. The
+  agent's name remains in accessible text. MCP is the pane header's frame
+  (blue, red in override mode); auto-approval is a small warning-coloured `A`
+  pinned to the mark. `dashboardAgentMarkState()` supplies both lists with the
+  header's rules and hover sentences. `decorateMarks()` updates the mark's
+  `data-mcp`, `data-mcp-override` and `data-auto`, title and `dash-agent-flags`
+  only when they change. These decorations never enter the structure key or
+  move the row; flags remain in its accessible text. Transport and the full
+  directory remain in the row hover. `agent-sidebar-list` scopes the shared
+  list styling on both hosts; sidebar chrome keeps its own styles.
 - **The docked row of the pane being typed into wears the input-target ring.**
   The page's answer is `focusedTerminalSessionId()` in `terminals.js`: the
   session of the focused slot, read when asked, and only while that slot's card
@@ -1433,6 +1467,137 @@ unless the task explicitly changes this contract.
   ring (the token behind `--t-accent`) and never a fill. The dialog carries no
   ring, because it covers its own page's grid, and focus is never shared
   across windows.
+- **The reading carries who handed a task to whom as `links`**, a top-level
+  list beside `workspaces`, so it never enters the rows' structure key. Each
+  entry is built from `LINK_FIELDS` in `web/agent_results.py` by
+  `ResultStore.links_snapshot()`: an opaque `link_id` (minted per assignment,
+  never the `handoff_id`, which is a capability), requester and worker
+  session ids, `state`, `read`, `status`, `collected`, `handed_at`,
+  `reported_at`, the end-reason *key* (never the requester-facing sentence)
+  and `round`, plus the round's public `label` (an empty string when omitted).
+  The task text, the receipt and the handoff id never reach it.
+  **Only links between two composed agent panes are published**
+  (`compose_dashboard()`, the one place that decides it): a pane that closes,
+  or stops being an agent pane, takes its links out of the next reading, so
+  the board, the sidebar wires, the chip and the header counts lose it
+  together and no surface draws a ghost of it. An agent that exits while its
+  pane stays an agent pane keeps its row, and so its `ended` link.
+- **A round counts tasks handed to the same running agent.** A task that
+  starts an agent (split, launch, `set_pane_agent`) is round 1; only a
+  `send_task` follow-up advances it, reading the continued assignment's round
+  before the superseded one can be dropped (round 2 when it is already gone).
+  The count lives in memory only, like the rest of the store.
+- **`pane["waiting"]` overrides activity, after transport.** It is `crew`
+  while the agent is inside `wait_for_results`, `task` while it stands by
+  inside `wait_for_task`, and `""` otherwise; `crew` wins inside the overlap.
+  Both readings keep a `WAIT_GRACE_SECONDS` grace past each call so the loop
+  of bounded calls does not flicker, and only calls with a timeout above zero
+  open or extend it. `awaiting_task()`, which `send_task` reports from, stays
+  exact. `build_dashboard_snapshot()` reads both stores after releasing the
+  manager lock, each under its own lock only, never nested with
+  `connection_lock` or each other. Both surfaces draw the dotted waiting mark
+  with "Waiting on its crew" or "Standing by for its next task" as the state
+  word, through `waitingWord()`; a waiting pane draws no progress bar.
+- **Crews are one model, `web/static/js/agent-crews.js`**, loaded before
+  `dashboard-dialog.js` on both pages. `indexCrews()` makes a forest from
+  `links`: one edge per orchestrator–worker pair (the newest round wins, so a
+  follow-up never adds a wire), one parent per worker (the requester of its
+  newest link), and any loop broken at its earliest-handed link. Siblings and
+  roots follow list order, so collecting and re-tasking never reorders a crew.
+  `linkPhase()` is the only place a link's drawn state (`handed`, `working`,
+  `done`, `failed`, `blocked`, `ended`) is decided. **A report is drawn as its
+  status whether or not it has been collected**: `done` means the worker
+  reported success, and *collected* only says the orchestrator has taken
+  delivery of that report (`linkCollected()`), which the board puts in words
+  in the pill's hover and never in a second look. Nothing drawn is keyed by
+  `link_id`, which changes every round.
+- **Wires are decoration.** `createWireLayer()` keeps one `aria-hidden` SVG
+  inside its scroller, measures only endpoint rows, rewrites only a changed
+  picture, dims other crews in place, re-measures on resize and pauses through
+  `setPaused()` wherever the poll stands down for a hidden document. A phase
+  change rewrites the SVG and never a row. Colour and motion are never the
+  only signal: the crew is stated in text on the chip, the hovers and the
+  board. Wire styles use status tokens only. Motion belongs to work in
+  progress: a `working` wire flows, and a reported wire (`done` green,
+  `blocked` amber, `failed` red) is a solid line whose only motion is a slow,
+  slight pulse of its opacity; nothing travels along it. Reduced motion holds
+  every wire still. A narrow reading (the sidebar, and the board under its
+  breakpoint) draws **one bus per orchestrator**: a quiet trunk out of its
+  row, one spine in a lane of its own and a short branch into each worker, the
+  branch wearing that worker's phase. Trunk and branches reach into their own
+  rows, past the card's border, so a branch is seen to belong to its row. A
+  nested orchestrator's trunk leaves `NEST_OFFSET` below the middle of its row,
+  so the branch that arrives and the trunk that leaves are two lines.
+  `planBuses()` gives **every orchestrator a lane of its own**, nested crews
+  and crews far apart alike, up to `MAX_DISTINCT_LANES`, shortest span nearest
+  the cards, `LANE_STEP` apart and `LANE_INSET` out from the card edge: two
+  crews one card apart that shared a lane read as one trunk down the edge. Only
+  a column with more crews than the limit packs lanes by row overlap
+  (`assignLanes()`). Lanes are planned from each reading, so a smaller crew
+  never keeps the old width. A wide board draws a curve per link instead.
+- **Both lists lay crews on rows already drawn.** Its markup is drawn from
+  the reading with `waiting` cleared, so nothing from `links` or the waiting
+  reading enters it. `decorateCrews()` then fills the crew chip slot (the
+  dialog's `dashboardCrewChipHtml`, handed in through the runtime), the
+  worker's "Working for …" hover line (plus the round from round 2), the
+  reading and progress slots, and the highlight, each written only when it
+  changed. The panel opens its lane gutter (`has-crews`) only while an edge
+  exists, so a sidebar without crews keeps its exact width; the gutter is
+  exactly what the lanes in use need, which the wire layer measures and writes
+  as `--dash-wire-gutter` (the stylesheet's padding, with a first-paint
+  fallback) and removes with the last crew. The highlight dims a row's
+  children, never the row, so the input-target ring keeps its full strength.
+- **The dialog's crew board has its own structure key.** It sits in the
+  permanent `data-dashboard-crews` slot beside the shared list, which the board
+  never touches. Only selected roots are drawn, in selection order.
+  Its key holds membership and layout — never the phase and never `link_id` —
+  so a new member or a closed pane rewrites only the board slot, keeping the
+  focused node and the sideways scroll, while terminal titles, task labels,
+  pills, rounds, ages, readings and the crew header are written in place.
+  A terminal title or label change never enters this key. List rebuilds never
+  replace the board slot, so its node focus and scroll survive changes
+  elsewhere. Both scrollers keep their positions. Every node is a
+  `data-dashboard-action="pane"` button
+  with its row's target attributes; only listed panes appear. The board header
+  counts every member, including nested workers; a row's chip counts direct
+  workers. Only selected crews' links reach the board's wire layer. Below
+  `DASHBOARD_CREW_NARROW_PX` the board becomes one indented column with buses.
+- **A crew card names its pane and task on separate rows.** Its top row holds
+  the activity mark, agent icon and terminal title, using `dashboardPaneTitle()`
+  and the same display-title rule as the pane header. The title uses the agent
+  colour and contrast treatment from `agent-brand.css`, keeping exact brand
+  foregrounds legible in both themes. The second row is the worker link's
+  `label`, or `dashboardPaneLine()` when no label was supplied; an orchestrator
+  without an incoming link also uses its chat line. Both rows ellipsise within
+  the card. Task labels belong to their current round and are never inherited
+  by an unlabelled follow-up. Only this board row displays them: sidebar and
+  dialog list rows, crew headers and existing hover text keep their naming
+  rules. Initial terminal titles and labels are HTML-escaped; in-place changes
+  use `textContent`, preserving the node, focus, selection and scroll.
+  Session, phase pill, round and age share one non-wrapping metadata row; the
+  session name ellipsises with its full name in a hover, leaving the other
+  values visible. The frame's coloured status bars sit below its heading,
+  aligned on the left, with its hide button at the upper right.
+- **Crew highlighting belongs to the page, shared by both lists and the board.**
+  `agent-crews.js` owns `highlightState`. Hovering a pane row highlights its
+  root crew; pointer leave clears that temporary source and restores any
+  retained graph highlight. Row focus never selects a crew. Clicking empty
+  space in a diagram toggles its retained highlight; Enter or Space on the
+  frame itself does the same. Tile hover and focus affect only that tile, and
+  tile clicks retain their pane-navigation behavior. Opening another diagram
+  clears the prior graph highlight without hiding either diagram. Hiding the
+  highlighted diagram clears its highlight, including when focus returns to
+  its sidebar row; dismissing the dialog retains a selected graph's highlight.
+  Highlighted crews share their row and wire decorations; other drawn frames
+  dim only when the highlighted root is present on the board. Pane navigation
+  from a list, or clicking empty dashboard-body space outside a frame, clears
+  the retained graph highlight. Rebuilding a list clears its transient pointer
+  source before replacing rows; window blur or document hiding clears transient
+  sources. Snapshot reconciliation
+  drops removed roots and pane anchors; an older snapshot cannot revive them.
+  A page entering the back/forward cache suspends the dialog's list and keeps
+  its highlight subscription, because a restored page reuses that controller;
+  only a real unload disposes it.
 - Dashboard layout must remain usable without horizontal overflow at narrow
   widths. A polling update that changes only a row's title, hover, status,
   progress, or idle age updates that row in place, each field on its own
@@ -1722,16 +1887,37 @@ in `README.md`; state the rules a change has to keep.
   Every polling page is shown a split intent's request, so the split route
   `take`s an opaque `handoff_id` once, for its own source pane, after every other
   refusal and before the append, and binds it before the connector starts. A
-  launch pops each pane's `task` before anything reads the config, so no preset,
-  snapshot or saved-session normalizer ever sees one. A task needs a live calling
-  pane on the same machine (`same_machine`: both local, or the same SSH host, user
-  and port); nothing waives that. A launch reads it off where each tasked pane is
+  launch pops each pane's `task` and `task_label` before anything reads the
+  config, so no preset, snapshot or saved-session normalizer ever sees either.
+  A task needs a live calling pane on the same machine (`same_machine`: both
+  local, or the same SSH host, user and port); nothing waives that. A launch
+  reads it off where each tasked pane is
   about to open, after the origin's connection is applied — a local origin
   supplies none, so the body's own `connection_mode` and host are what is
   checked — and refuses before the destination is resolved. A gated relaunch validates its task before any
   gate and binds it through `ShellTransitionEffects.before_start` — after every
   refusal, after the old connection closed, before the new one starts — so a
   refused relaunch leaves nothing in the store and nothing on disk.
+- **A task's optional label is public metadata for one round.** `task_label`
+  is optional on `split_pane`, `set_pane_agent`, `send_task`, and each tasked
+  `launch_panes` entry. The sending agent supplies it explicitly; GridVibe
+  neither generates one nor inherits a parent or previous round's label.
+  The sidecar's `_task_label` and the shared HTTP `validate_task_label()` in
+  `web/agent_handoffs.py` enforce one printable line, at most
+  `MAX_TASK_LABEL_CHARS = 60` Unicode code points including any surrounding
+  spaces, and at least one non-whitespace character. Wrong types, blank or
+  overlong strings, nonprintable characters (including newline and tab), and
+  a label without a task are refused before any pane or assignment changes.
+  Accepted text is kept exactly; no trimming, stripping or truncation.
+  The HTTP check sits beside task validation in the split, launch, relaunch
+  and follow-up entry points; malformed labels are checked before relaunch
+  and follow-up gates. `HandoffStore.create()` and `create_followup()` carry
+  `label` through the bind into `ResultStore.expect()` and `LINK_FIELDS`.
+  Omission, or `null` at the validation boundary, records an empty label for
+  that round; the public tool schema declares an optional string. An unlabelled
+  follow-up falls back to the chat line on the board. The label is not a field in
+  `read_handoff` or `wait_for_task`, never reaches the startup command or split
+  intent request, and is not persisted in a preset or runtime snapshot.
 - **A handoff is one brief for one agent, in memory, and logged by size.** The
   store is capped for the unbound kind and TTL-bounded above a split's worst case;
   a bound handoff waits for a connection that starts its pane's agent, is
@@ -1749,8 +1935,9 @@ in `README.md`; state the rules a change has to keep.
   still waiting (`drop_bound`), a closed pane forgets its own, and nothing is
   persisted. A pane whose agent starts without the tools is marked
   `undeliverable` and told so on its output, never its input. Log lines carry ids,
-  a character count and a delivery — never the text, never a file path — and
-  `list_panes` publishes the state from a field list, never the text or path.
+  task and label character counts and a delivery — never either text, never a
+  file path — and `list_panes` publishes the state from a field list, never the
+  text or path.
 - **A report goes back only to the agent that asked, and nobody waits for one
   that cannot come.** Every bound handoff is an assignment in
   `web/agent_results.py`, recorded by `HandoffStore` under its own lock (the
@@ -2260,7 +2447,7 @@ in `README.md`; state the rules a change has to keep.
   controls together. Find bars keep the shared ↑/↓/× exception; any conversion
   converts all find bars. Reuse selectors/tokens instead of copying declarations.
   Supplied artwork with a palette of its own — the app logo, the dashboard
-  button's `active_ws.ico` — stays an `<img>` from `/docs/images/`; it is an
+  button's `crew.ico` — stays an `<img>` from `/docs/images/`; it is an
   identity, not a control glyph, and must not be converted to a stroke SVG.
 - A session's hue is `session-colour.js` and an agent's mark is
   `agent-glyphs.js`, each DOM-free, Node-tested and read by both the workspace

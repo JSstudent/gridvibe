@@ -51,6 +51,7 @@ from web.agent_handoffs import (
     pane_description,
     same_machine,
     validate_task,
+    validate_task_label,
 )
 from web.agent_handoffs import handoffs as agent_handoffs
 from web.agent_updates import request_update
@@ -624,12 +625,13 @@ def _requested_task(payload: Dict[str, Any]) -> Optional[str]:
     is: an agent that cannot fetch it, an ``mcp: false`` beside it, a control
     character, or a size past the ceiling.
     """
-    if payload.get("task") is None:
-        return None
     try:
-        text = validate_task(payload.get("task"))
+        text = validate_task(payload.get("task")) if payload.get("task") is not None else None
+        validate_task_label(payload.get("task_label"), text)
     except HandoffError as exc:
         raise PaneGateRefusal(exc.message, exc.status_code) from exc
+    if text is None:
+        return None
     agent_key = _normalize_agent_key(payload.get("agent"))
     refusal = task_refusal("agent", agent_key, payload.get("mcp"))
     if refusal:
@@ -842,7 +844,7 @@ def apply_agent_pane_relaunch(
         # A task is fetched through GridVibe's tools, so it turns them on --
         # an explicit `mcp: false` beside it was already refused above.
         relaunch["mcp"] = True
-        effects = _with_task_binding(effects, task, caller)
+        effects = _with_task_binding(effects, task, caller, payload.get("task_label") or "")
     overrides: Dict[str, Any] = {
         # Bounded by the same normalizer every other write of this field
         # uses (`create_session`, and the split route).
@@ -882,6 +884,7 @@ def _with_task_binding(
     effects: ShellTransitionEffects,
     task: str,
     caller: Any,
+    label: str = "",
 ) -> ShellTransitionEffects:
     """The same effects, plus binding the task just before the new shell starts.
 
@@ -900,6 +903,7 @@ def _with_task_binding(
             earlier(pane_session_id)
         agent_handoffs.create(
             task,
+            label=label,
             source_session_id=caller_session_id,
             session_id=pane_session_id,
             **origin,

@@ -77,6 +77,23 @@ ABSENT_TOOLS = (
 #: answer arriving later is never seen.
 CODEX_TOOL_TIMEOUT_SECONDS = 60.0
 
+
+class TaskLabelSchemaTestCase(unittest.TestCase):
+    def test_labels_are_optional_public_board_lines_on_all_four_tools(self):
+        specs = {spec["name"]: spec for spec in tool_specs()}
+        for name in ("split_pane", "set_pane_agent", "send_task", "launch_panes"):
+            with self.subTest(tool=name):
+                schema = specs[name]["inputSchema"]
+                if name == "launch_panes":
+                    schema = schema["properties"]["panes"]["items"]
+                label = schema["properties"]["task_label"]
+                self.assertEqual(label["type"], "string")
+                self.assertEqual(label["maxLength"], 60)
+                self.assertNotIn("task_label", schema.get("required", []))
+                for wording in ("shown to the person", "dashboard crew board", "private task text",
+                                "Only alongside 'task'", "never truncated", "never inherited"):
+                    self.assertIn(wording, label["description"])
+
 #: A pane stamped exactly at the depth budget, derived so the tests follow the default.
 AT_LIMIT = str(DEFAULT_MAX_AGENT_DEPTH)
 

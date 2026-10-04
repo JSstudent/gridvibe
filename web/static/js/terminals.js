@@ -1301,13 +1301,14 @@
             fragment.appendChild(grid.firstChild);
         }
 
-        const hasLocalSplitLayout = grid.className === 'layout-split-local';
+        const layoutClass = gridLayoutClass(grid.className);
+        const hasLocalSplitLayout = layoutClass === 'layout-split-local';
         cachedGroupViews.set(groupId, {
             groupId,
             terminals,
             sessionIds,
             fragment,
-            className: grid.className,
+            className: layoutClass,
             gridColumns: grid.style.getPropertyValue('--grid-columns'),
             gridRows: grid.style.getPropertyValue('--grid-rows'),
             splitGridColumns: grid.style.getPropertyValue('--split-grid-columns'),
@@ -1338,13 +1339,18 @@
 
     function restoreCachedGroupView(groupId) {
         const cached = cachedGroupViews.get(groupId);
-        if (!cached) {
+        if (!cached
+            || cached.fragment?.nodeType !== 11
+            || !hasPaneCards(cached.fragment, cached.terminals)
+            || !Array.isArray(cached.sessionIds)
+            || cached.sessionIds.length !== cached.terminals.length
+            || !Array.from(cached.sessionIds).every(Boolean)) {
             return false;
         }
 
         const grid = document.getElementById('terminalsGrid');
         grid.innerHTML = '';
-        grid.className = cached.className || '';
+        grid.className = gridLayoutClass(cached.className);
         if (cached.gridColumns) {
             grid.style.setProperty('--grid-columns', cached.gridColumns);
         } else {
@@ -1366,17 +1372,21 @@
             grid.style.removeProperty('--split-grid-rows');
         }
         grid.appendChild(cached.fragment);
+        /* The fragment's children now belong to the visible view. Disposal
+           would destroy those live panes; only retire the detached owner. */
+        cachedGroupViews.delete(groupId);
         grid.style.display = '';
 
         terminals = cached.terminals || [];
         sessionIds = cached.sessionIds || [];
-        splitSlotRects = cached.className === 'layout-split-local'
+        const hasLocalSplitLayout = gridLayoutClass(cached.className) === 'layout-split-local';
+        splitSlotRects = hasLocalSplitLayout
             ? cloneSplitSlotRects(cached.splitSlotRects)
             : null;
-        splitColumnWeights = cached.className === 'layout-split-local'
+        splitColumnWeights = hasLocalSplitLayout
             ? cloneSplitTrackWeights(cached.splitColumnWeights)
             : null;
-        splitRowWeights = cached.className === 'layout-split-local'
+        splitRowWeights = hasLocalSplitLayout
             ? cloneSplitTrackWeights(cached.splitRowWeights)
             : null;
         originalSplitSlotCount = Number(cached.originalSplitSlotCount || terminals.length || 0);
@@ -2356,7 +2366,7 @@
         if (visibleGroupId === groupId && gridBuilt) {
             const grid = document.getElementById('terminalsGrid');
             const rects = cloneSplitSlotRects(
-                grid?.className === 'layout-split-local'
+                gridLayoutClass(grid?.className) === 'layout-split-local'
                     ? ensureSplitSlotRects()
                     : fixedLayoutSlotRects(terminals.length, grid?.className || '')
             );
@@ -2457,7 +2467,7 @@
         const className = isVisible
             ? document.getElementById('terminalsGrid')?.className
             : cachedGroupViews.get(groupId)?.className;
-        return className === 'layout-split-local'
+        return gridLayoutClass(className) === 'layout-split-local'
             ? buildActiveWorkspaceLayoutSnapshot(groupId)
             : null;
     }
@@ -3379,6 +3389,20 @@
         }
         if (count >= 4) return 'layout-grid';
         return '';
+    }
+
+    /* Focus and broadcast decorate the grid without changing its layout. */
+    function gridLayoutClass(className) {
+        return String(className || '').split(/\s+/).find(name => name.startsWith('layout-')) || '';
+    }
+
+    function hasPaneCards(container, panes) {
+        const cards = Array.from(container?.children || []);
+        if (!Array.isArray(panes) || !panes.length || cards.length !== panes.length) {
+            return false;
+        }
+        const cardIds = new Set(cards.map(card => card.id));
+        return Array.from(panes).every((pane, index) => pane && cardIds.has(`tc-${index}`));
     }
 
     function cloneSplitSlotRects(rects = splitSlotRects) {
@@ -4451,7 +4475,7 @@
             if (cached) {
                 const cards = Array.from(cached.fragment?.children || []);
                 const ids = cached.sessionIds || [];
-                const rects = cached.className === 'layout-split-local'
+                const rects = gridLayoutClass(cached.className) === 'layout-split-local'
                     ? cloneSplitSlotRects(cached.splitSlotRects) || []
                     : fixedLayoutRectCoordinates(ids.length, cached.className || '');
                 entries = closeEntriesFromCards(cards, ids, rects);
@@ -7576,7 +7600,7 @@
         const cached = cachedGroupViews.get(groupId);
         if (cached && !cached.geometryStale) {
             const cachedIds = cachedGroupCardIds(cached).filter(Boolean);
-            const rects = cached.className === 'layout-split-local'
+            const rects = gridLayoutClass(cached.className) === 'layout-split-local'
                 ? cached.splitSlotRects
                 : fixedLayoutRectCoordinates(cachedIds.length, cached.className || '');
             const sameSessions = cachedIds.length === serverIds.length
@@ -9035,12 +9059,14 @@
             applyConfiguredSurfaceMode(data, { refit: gridBuilt });
             applyConfiguredAgentSidebarSide(data);
             const expectedLayoutClass = getLayoutClass(data.sessions.length, data.layout);
+            const currentLayoutClass = gridLayoutClass(grid.className);
             const usingCurrentView = (
                 gridBuilt
                 && visibleGroupId === requestedGroupId
                 && terminals.length === data.sessions.length
-                && (grid.className === expectedLayoutClass || grid.className === 'layout-split-local')
+                && (currentLayoutClass === expectedLayoutClass || currentLayoutClass === 'layout-split-local')
                 && hasMatchingSessionViews(sessionIds, terminals, data.sessions)
+                && hasPaneCards(grid, terminals)
             );
             let restoredFromCache = false;
 
@@ -9057,9 +9083,10 @@
             if (!usingCurrentView) {
                 const cached = cachedGroupViews.get(requestedGroupId);
                 if (cached) {
+                    const cachedLayoutClass = gridLayoutClass(cached.className);
                     const cachedMatches = (
                         cached.terminals?.length === data.sessions.length
-                        && (cached.className === expectedLayoutClass || cached.className === 'layout-split-local')
+                        && (cachedLayoutClass === expectedLayoutClass || cachedLayoutClass === 'layout-split-local')
                         && hasMatchingSessionViews(cached.sessionIds || [], cached.terminals || [], data.sessions)
                         && (!cached.geometryStale || adoptStoredGeometryForStaleView(
                             cached,
@@ -9069,7 +9096,8 @@
                     );
                     if (cachedMatches) {
                         restoredFromCache = restoreCachedGroupView(requestedGroupId);
-                    } else {
+                    }
+                    if (!restoredFromCache) {
                         dropCachedGroupView(requestedGroupId);
                     }
                 }
@@ -9674,11 +9702,14 @@
 
             const expectedLayoutClass = getLayoutClass(data.sessions.length, data.layout);
             const sessionViewsChanged = !hasMatchingSessionViews(sessionIds, terminals, data.sessions);
-            const currentLayoutClass = document.getElementById('terminalsGrid').className;
+            const grid = document.getElementById('terminalsGrid');
+            const currentLayoutClass = gridLayoutClass(grid.className);
             if (
                 terminals.length !== data.sessions.length
                 || (currentLayoutClass !== expectedLayoutClass && currentLayoutClass !== 'layout-split-local')
                 || sessionViewsChanged
+                || visibleGroupId !== activeGroupId
+                || !hasPaneCards(grid, terminals)
             ) {
                 await initialLoad();
                 return;

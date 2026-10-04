@@ -52,6 +52,20 @@ SECRET_BRIEF = "Rotate the staging key kept in vault/prod-7 and tell nobody."
 
 
 class TaskValidationTestCase(unittest.TestCase):
+    def test_public_label_validation_refuses_without_repairing(self):
+        self.assertEqual(agent_handoffs.MAX_TASK_LABEL_CHARS, 60)
+        self.assertEqual(agent_handoffs.validate_task_label(None), "")
+        for label in (" Review <parser> & tests ", "€" * 60, "🚀" * 60):
+            self.assertEqual(agent_handoffs.validate_task_label(label, "Task."), label)
+        with self.assertRaisesRegex(HandoffError, "only alongside"):
+            agent_handoffs.validate_task_label("Review")
+        for label in (42, True, [], {}, "", "  ", "x" * 61, "€" * 61, "🚀" * 61, "a\nb", "a\r\nb", "a\tb",
+                      "a\x00b", "a\x1bb", "a\x7fb", "a\u200bb", "a\u2028b",
+                      "a\u00a0b", "a\ud800b"):
+            with self.subTest(label=repr(label)), self.assertRaises(HandoffError) as caught:
+                agent_handoffs.validate_task_label(label, "Task.")
+            self.assertIn("task_label", caught.exception.message)
+
     def test_a_plain_task_is_returned_exactly_as_written(self):
         text = "Review the diff.\n\tThen fix the two bugs.  Keep spacing."
 

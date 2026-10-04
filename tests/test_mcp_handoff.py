@@ -75,6 +75,10 @@ def _spec(name):
 
 
 class SurfaceTestCase(unittest.TestCase):
+    def test_the_label_ceiling_matches_the_web_guard(self):
+        self.assertEqual(sidecar.MAX_TASK_LABEL_CHARS, agent_handoffs.MAX_TASK_LABEL_CHARS)
+        self.assertEqual(sidecar.MAX_TASK_LABEL_CHARS, 60)
+
     def test_every_verb_that_creates_or_relaunches_an_agent_takes_a_task(self):
         split = _spec("split_pane")["inputSchema"]["properties"]
         launch = _spec("launch_panes")["inputSchema"]["properties"]["panes"]["items"]["properties"]
@@ -129,6 +133,34 @@ class SurfaceTestCase(unittest.TestCase):
 
 
 class TaskRefusedBeforeHttpTestCase(unittest.TestCase):
+    def test_invalid_labels_never_reach_http_on_any_task_tool(self):
+        for label in (42, True, [], {}, "", "   ", "x" * 61, "€" * 61, "🚀" * 61,
+                      "a\nb", "a\r\nb", "a\tb", "a\x00b", "a\x1bb", "a\x7fb",
+                      "a\u200bb", "a\u2028b", "a\u00a0b", "a\ud800b"):
+            for name, args in (
+                ("split_pane", {"pane_id": "p", "kind": "agent", "agent": "codex", "task": BRIEF}),
+                ("launch_panes", {"panes": [{"kind": "agent", "agent": "codex", "task": BRIEF}]}),
+                ("set_pane_agent", {"pane_id": "p", "agent": "codex", "task": BRIEF}),
+                ("send_task", {"pane_id": "p", "task": BRIEF}),
+            ):
+                with self.subTest(label=repr(label), tool=name):
+                    target = args["panes"][0] if name == "launch_panes" else args
+                    target["task_label"] = label
+                    self.assertIn("task_label", self.refuse(name, args))
+
+    def test_a_label_without_a_task_is_refused_on_all_task_tools(self):
+        for name, args in (
+            ("split_pane", {"pane_id": "p", "kind": "agent", "agent": "codex"}),
+            ("launch_panes", {"panes": [{"kind": "agent", "agent": "codex"}]}),
+            ("set_pane_agent", {"pane_id": "p", "agent": "codex"}),
+            ("send_task", {"pane_id": "p"}),
+        ):
+            with self.subTest(tool=name):
+                target = args["panes"][0] if name == "launch_panes" else args
+                target["task_label"] = "Review"
+                expected = "send_task needs a 'task'" if name == "send_task" else "only alongside"
+                self.assertIn(expected, self.refuse(name, args))
+
     def refuse(self, name, arguments, environ=INSIDE_PANE):
         result = dispatch(
             name, arguments, client=client_for(RefusingOpener(self)),
@@ -196,6 +228,45 @@ class TaskRefusedBeforeHttpTestCase(unittest.TestCase):
 
 
 class TaskBodiesTestCase(unittest.TestCase):
+    def test_valid_labels_are_forwarded_exactly_on_every_task_tool(self):
+        for label in (" Review <parser> & tests ", "€" * 60, "🚀" * 60):
+            for name, args in (
+                ("split_pane", {"pane_id": "p", "kind": "agent", "agent": "codex", "task": BRIEF}),
+                ("launch_panes", {"panes": [{"kind": "agent", "agent": "codex", "task": BRIEF}]}),
+                ("set_pane_agent", {"pane_id": "p", "agent": "codex", "task": BRIEF}),
+                ("send_task", {"pane_id": "p", "task": BRIEF}),
+            ):
+                with self.subTest(label=label, tool=name):
+                    target = args["panes"][0] if name == "launch_panes" else args
+                    target["task_label"] = label
+                    opener = StubOpener([{"group_id": "g", "sessions": [], "handed": True}])
+                    result = dispatch(
+                        name, args, client=client_for(opener), identity=read_identity(INSIDE_PANE),
+                        pane_splitter=lambda client, session_id, axis, pane, **kw:
+                            client.split_intent(session_id, pane),
+                    )
+                    self.assertNotIn("error", result)
+                    body = json.loads(opener.requests[0].data.decode("utf-8"))
+                    forwarded = body["sessions"][0] if name == "launch_panes" else body
+                    self.assertEqual(forwarded["task_label"], label)
+                    self.assertEqual(forwarded["task"], BRIEF)
+
+    def test_unlabelled_rounds_send_no_label_in_any_body(self):
+        for name, args in (
+            ("split_pane", {"pane_id": "p", "kind": "agent", "agent": "codex", "task": BRIEF}),
+            ("launch_panes", {"panes": [{"kind": "agent", "agent": "codex", "task": BRIEF}]}),
+            ("set_pane_agent", {"pane_id": "p", "agent": "codex", "task": BRIEF}),
+            ("send_task", {"pane_id": "p", "task": BRIEF}),
+        ):
+            with self.subTest(tool=name):
+                opener = StubOpener([{"group_id": "g", "sessions": [], "handed": True}])
+                dispatch(name, args, client=client_for(opener), identity=read_identity(INSIDE_PANE),
+                         pane_splitter=lambda client, session_id, axis, pane, **kw:
+                             client.split_intent(session_id, pane))
+                body = json.loads(opener.requests[0].data.decode("utf-8"))
+                forwarded = body["sessions"][0] if name == "launch_panes" else body
+                self.assertNotIn("task_label", forwarded)
+
     def test_a_launch_pane_carries_its_task_and_turns_the_tools_on(self):
         opener = StubOpener([{"workspace_id": "ws-2", "group_id": "g", "sessions": []}])
 

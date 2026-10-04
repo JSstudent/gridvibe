@@ -22,9 +22,9 @@
    and carries its own palette, so it takes a radius of its own rather than
    inheriting a glyph's currentColor.
 
-   `--dash-icon-size` is the *mark*, not the box: active_ws.ico bakes padding
-   into its own canvas and inks about 0.61 of it across the entries a button
-   this size renders, so a box set to the mark draws under two thirds of it and
+   `--dash-icon-size` is the *mark*, not the box: crew.ico bakes padding
+   into its own canvas and inks about 0.89 of it across the entries a button
+   this size renders, so a box set to the mark uses a slightly smaller mark and
    the icon reads as a shrunken thumbnail beside anything that fills its own
    box. `--dash-icon-scale` is 1/that fraction: the box grows by it, the
    baked-in padding comes back out of the layout as a negative margin of half
@@ -43,7 +43,7 @@
    changes what the button says, never how big its mark is. */
 .dashboard-icon {
     --dash-icon-mark: var(--dash-icon-size, 18px);
-    --dash-icon-scale: 1.63;
+    --dash-icon-scale: 1.12;
     width: calc(var(--dash-icon-mark) * var(--dash-icon-scale));
     height: calc(var(--dash-icon-mark) * var(--dash-icon-scale));
     margin: calc(var(--dash-icon-mark) * (1 - var(--dash-icon-scale)) / 2);

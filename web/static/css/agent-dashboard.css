@@ -49,10 +49,15 @@
    `max-height: 100%` is what keeps that fixed height inside the shell's own
    padding on a very short window. */
 .dash-dialog {
+    --dash-crew-column: 180px;
+    --dash-crew-column-gap: 36px;
+    box-sizing: border-box;
     display: flex;
     flex-direction: column;
-    width: min(520px, 100%);
-    height: min(78vh, 820px);
+    width: min(380px, 75vw);
+    max-width: 75vw;
+    min-width: 0;
+    height: min(75vh, 820px);
     max-height: 100%;
     overflow: hidden;
     border: 1px solid var(--gv-dialog-border);
@@ -62,6 +67,13 @@
     box-shadow: var(--gv-dialog-shadow);
     font-family: 'Segoe UI', Roboto, -apple-system, BlinkMacSystemFont, sans-serif;
     font-size: 14px;
+}
+
+/* Crew boards stay within three quarters of their window. Wide windows size
+   the dialog to the deepest open diagram instead of leaving empty columns. */
+.dash-dialog.has-crews {
+    width: 75vw;
+    height: 75vh;
 }
 
 .dash-dialog:focus {
@@ -96,8 +108,9 @@
 }
 
 .dash-logo {
-    width: 30px;
-    height: 30px;
+    /* crew.ico inks 114 of its 128px canvas. This box paints a 26px mark. */
+    width: 29px;
+    height: 29px;
     border-radius: 7px;
     flex: 0 0 auto;
 }
@@ -443,18 +456,6 @@
 /* The agent's name. It never wraps and never shrinks below what it needs: it is
    the column the eye runs down, and a name that reflowed with the title beside
    it would stop being a column at all. */
-.dash-agent-name {
-    flex: 0 0 auto;
-    font-size: .74rem;
-    font-weight: 600;
-    letter-spacing: .01em;
-    color: var(--dash-agent-accent);
-    white-space: nowrap;
-}
-
-/* The row's first column, and a fixed 8px of it: one dot, with its word out of
-   flow, so every mark, name and title after it starts at the same offset on
-   every row in the card. */
 .dash-agent-reading { display: inline-flex; flex: 0 0 auto; }
 
 /* And the row's last, because a percentage is not the state: it is only ever on
@@ -484,49 +485,46 @@
 
 /* ── Tags ── */
 
-.dash-tag {
+.dash-agent-crew {
+    display: inline-flex;
     flex: 0 0 auto;
-    padding: 1px 6px;
-    border: 1px solid var(--gv-dialog-border);
-    border-radius: 999px;
-    font-size: .58rem;
-    font-weight: 600;
-    letter-spacing: .05em;
-    text-transform: uppercase;
-    color: var(--gv-dialog-muted);
+}
+
+.dash-agent-crew:empty {
+    display: none;
+}
+
+.dash-crew-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex: 0 0 auto;
+    padding: 3px 5px;
+    border-radius: 4px;
+    background: var(--gv-accent-soft);
+    color: var(--gv-accent);
+    font: 600 9.5px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-variant-numeric: tabular-nums;
     white-space: nowrap;
 }
 
-/* The auto-approval marker earns a hue: it is the one property of a running
-   agent that changes what it may do without asking. */
-.dash-tag-auto {
-    border-color: transparent;
-    background: var(--gv-warning-soft);
-    color: var(--gv-warning);
+.dash-crew-glyph {
+    width: 11px;
+    height: 11px;
+    flex: 0 0 auto;
 }
 
-/* GridVibe's own tools are a capability rather than a permission, so the marker
-   takes the accent and leaves the warning hue to `auto` above -- two tinted
-   chips of equal loudness on one row would flatten the one that is about what
-   an agent may do *without asking*. */
-.dash-tag-mcp {
-    border-color: transparent;
-    background: var(--gv-accent-soft);
-    color: var(--gv-accent);
-}
-
-/* The same chip for an agent in override mode, which acts on panes it did not
-   create without asking. The text stays `MCP`; only the hue changes, and the
-   chip's hover says why. */
-.dash-tag-mcp.is-override {
-    background: var(--gv-mcp-override-soft);
-    color: var(--gv-mcp-override);
-}
-
-.dash-tag-active {
-    border-color: transparent;
-    background: var(--gv-accent);
-    color: var(--gv-bg-app);
+/* The count in words, for a reader hearing the row: out of flow, like the
+   state word. */
+.dash-crew-word {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
 }
 
 /* ── The activity reading ──
@@ -634,6 +632,20 @@
     background: var(--gv-danger);
 }
 
+/* Waiting is blocked inside a tool call on another agent: an orchestrator in
+   `wait_for_results`, or a worker standing by in `wait_for_task`. It is not
+   work, so it never borrows working's green ring: a dotted accent ring that
+   turns once every few seconds, slow enough that the two never read alike. */
+.dash-state-waiting .dash-state-dot {
+    box-sizing: border-box;
+    width: 12px;
+    height: 12px;
+    background: none;
+    border: 2px dotted var(--gv-accent);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--gv-accent) 35%, transparent);
+    animation: dash-spin 3.2s linear infinite;
+}
+
 @keyframes dash-spin {
     to { transform: rotate(360deg); }
 }
@@ -690,6 +702,7 @@
 @media (prefers-reduced-motion: reduce) {
     /* Still, and still distinct: an open ring and three z's, not a dot. */
     .dash-state-working .dash-state-dot,
+    .dash-state-waiting .dash-state-dot,
     .dash-state-idle .dash-state-dot::before,
     .dash-state-idle .dash-state-dot::after,
     .dash-activity.dash-state-idle::after { animation: none; }
@@ -809,26 +822,497 @@
     color: var(--gv-accent);
 }
 
-/* A card narrow enough that the row's four columns cannot share one line. The
-   title takes the second line whole — it is the long one — and the mark, the
-   name and the shell stay together on the first, which is the column order the
-   wide layout has. Wrapping is what the row gives up before the title starts
-   being truncated to nothing. */
+/* Compact card headings can wrap their metadata beneath the session name. */
 @container (max-width: 380px) {
-    .dash-agent { flex-wrap: wrap; gap: 5px 8px; }
-    /* The title drops below; the dot keeps the head of the first line, which is
-       where it is looked for, and the bar stays on that line after the shell. */
-    .dash-agent-line { flex-basis: 100%; order: 1; }
     .dash-session-open { flex-wrap: wrap; }
     .dash-session-meta { flex-basis: 100%; margin-left: 0; }
 }
 
 @media (max-width: 500px) {
     .agent-dashboard-shell { padding: 10px; }
-    .dash-dialog { height: min(88vh, 820px); }
     .dash-titlebar { padding: 10px 12px; gap: 8px; }
     .dash-titlebar-right { width: 100%; justify-content: space-between; }
     .dash-body { padding: 12px; }
     .dash-workspace-head { flex-wrap: wrap; gap: 4px 8px; }
     .dash-workspace-actions { margin-left: 0; }
+}
+
+/* The permanent list and optional crew window have independent scrollers.
+   Narrow windows stack the board below the list, within the 75% cap. */
+.dash-dialog > .dash-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    overflow: hidden;
+    padding: 0;
+    scrollbar-gutter: auto;
+}
+
+.dash-dialog.has-crews > .dash-body {
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.dash-dialog-list {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.dash-crews-slot {
+    min-width: 0;
+    min-height: 0;
+    overflow: auto;
+    padding: 12px;
+    border-top: 1px solid var(--gv-dialog-border);
+    scrollbar-gutter: stable;
+}
+
+.dash-crews-slot[hidden] { display: none; }
+.dash-crews { margin: 0; padding: 0; border: 0; }
+.dash-crews-title { margin: 0; }
+
+@media (min-width: 1000px) {
+    .dash-dialog.has-crews {
+        /* List, frame padding, borders and scrollbars plus the diagram. */
+        width: min(75vw, calc(402px + var(--dash-crew-depths, 2) * var(--dash-crew-column)
+            + (var(--dash-crew-depths, 2) - 1) * var(--dash-crew-column-gap)));
+    }
+
+    .dash-dialog.has-crews > .dash-body {
+        grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+        grid-template-rows: minmax(0, 1fr);
+    }
+
+    .dash-dialog.has-crews .dash-crews-slot {
+        border-top: 0;
+        border-left: 1px solid var(--gv-dialog-border);
+        overflow-y: auto;
+    }
+}
+
+.dash-crews-board {
+    container: dash-crews / inline-size;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    overflow-x: auto;
+    overflow-y: hidden;
+}
+
+.dash-crew {
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: max-content;
+    max-width: calc(26px + var(--dash-crew-depths, 1) * var(--dash-crew-column)
+        + (var(--dash-crew-depths, 1) - 1) * var(--dash-crew-column-gap));
+    min-width: 0;
+    align-self: flex-start;
+    position: relative;
+    padding: 10px 12px 14px;
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: var(--gv-radius-m);
+    background: var(--gv-dialog-panel-soft);
+}
+
+.dash-crew-head,
+.dash-crew-node {
+    --dash-agent-accent: var(--agent-brand, var(--gv-accent));
+}
+
+.dash-crew-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    min-width: 0;
+    padding-right: 24px;
+}
+
+.dash-crew-title {
+    min-width: 0;
+    max-width: 260px;
+    overflow: hidden;
+    font-size: 12.5px;
+    font-weight: 600;
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.dash-crew-agent {
+    color: var(--dash-agent-accent);
+}
+
+.dash-crew-meta {
+    color: var(--gv-dialog-muted);
+    font-size: 11.5px;
+    white-space: nowrap;
+}
+
+/* One segment per worker, by the phase of its current round. */
+.dash-crew-segments {
+    display: flex;
+    gap: 3px;
+    margin-left: 28px;
+    flex-wrap: wrap;
+}
+
+.dash-crew-segment {
+    width: 22px;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--gv-dialog-border);
+}
+
+.dash-crew-segment.is-handed { background: color-mix(in srgb, var(--gv-accent) 35%, transparent); }
+.dash-crew-segment.is-working { background: var(--gv-accent); }
+.dash-crew-segment.is-done { background: var(--gv-success); }
+.dash-crew-segment.is-blocked { background: var(--gv-warning); }
+.dash-crew-segment.is-failed { background: var(--gv-danger); }
+.dash-crew-segment.is-ended { background: var(--gv-dialog-muted); }
+
+.dash-crew-grid {
+    display: grid;
+    grid-template-columns: repeat(var(--dash-crew-depths, 1), var(--dash-crew-column));
+    column-gap: var(--dash-crew-column-gap);
+    row-gap: 6px;
+}
+
+/* A parent spans its children's rows and sits at their centre. */
+.dash-crew-cell {
+    grid-column: var(--dash-crew-col, 1);
+    grid-row: var(--dash-crew-row, auto) / span var(--dash-crew-span, 1);
+    display: flex;
+    align-items: center;
+    min-width: 0;
+}
+
+.dash-crew-close {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 24px;
+    height: 24px;
+    border-radius: var(--gv-radius-s);
+}
+
+.dash-crews-slot.is-crew-highlight .dash-crew:not(.is-crew-member) {
+    opacity: .35;
+}
+
+.dash-crews-slot.is-crew-highlight .dash-crew.is-crew-member {
+    border-color: var(--gv-accent);
+    box-shadow: inset 0 0 0 1px var(--gv-accent);
+}
+
+.dash-crew:focus-visible {
+    outline: 2px solid var(--gv-accent);
+    outline-offset: -2px;
+}
+
+.dash-crew-node {
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 6px 8px;
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: 9px;
+    background: var(--gv-bg-app);
+    color: inherit;
+    font: inherit;
+    text-align: left;
+}
+
+button.dash-crew-node {
+    cursor: pointer;
+}
+
+button.dash-crew-node:hover,
+button.dash-crew-node:focus-visible {
+    border-color: var(--gv-accent);
+    outline: none;
+}
+
+.dash-crew-node.is-root {
+    border-color: color-mix(in srgb, var(--gv-accent) 45%, transparent);
+}
+
+.dash-crew-node-head {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+}
+
+.dash-crew-reading {
+    display: inline-flex;
+    flex: 0 0 auto;
+}
+
+.dash-crew-node .dash-agent-icon,
+.dash-crew-head .dash-agent-icon {
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
+}
+
+.dash-crew-name,
+.dash-crew-line {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    font-size: .78rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.dash-crew-name {
+    flex: 0 1 auto;
+    font-weight: 600;
+}
+
+.dash-crew-line {
+    font-weight: 400;
+}
+
+.dash-crew-node-meta {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: nowrap;
+    min-width: 0;
+}
+
+/* The session, as the tab strip colours it: a square of its hue and its name. */
+.dash-crew-session {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    color: color-mix(in srgb, var(--dash-session-color, var(--gv-dialog-muted)) 70%, var(--gv-dialog-text));
+    font: 500 10.5px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.dash-crew-session::before {
+    content: "";
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    margin-right: 5px;
+    border-radius: 2px;
+    background: var(--dash-session-color, var(--gv-dialog-muted));
+    vertical-align: middle;
+}
+
+.dash-crew-pill-slot,
+.dash-crew-round,
+.dash-crew-age {
+    display: inline-flex;
+    flex: 0 0 auto;
+}
+
+.dash-crew-pill-slot:empty,
+.dash-crew-round:empty,
+.dash-crew-age:empty {
+    display: none;
+}
+
+.dash-crew-pill {
+    padding: 3px 6px;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    font: 600 9.5px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: nowrap;
+}
+
+.dash-crew-pill.is-handed {
+    border: 1px dashed color-mix(in srgb, var(--gv-accent) 55%, transparent);
+    color: var(--gv-accent);
+}
+
+.dash-crew-pill.is-working {
+    background: var(--gv-accent-soft);
+    color: var(--gv-accent);
+}
+
+.dash-crew-pill.is-done {
+    background: var(--gv-success-soft);
+    color: var(--gv-success);
+}
+
+.dash-crew-pill.is-blocked {
+    background: var(--gv-warning-soft);
+    color: var(--gv-warning);
+}
+
+.dash-crew-pill.is-failed {
+    background: var(--gv-danger-soft);
+    color: var(--gv-danger);
+}
+
+.dash-crew-pill.is-waiting {
+    border-color: color-mix(in srgb, var(--gv-accent) 40%, transparent);
+    color: var(--gv-accent);
+}
+
+.dash-crew-pill.is-ended {
+    border-color: var(--gv-dialog-border);
+    color: var(--gv-dialog-muted);
+}
+
+/* The round and the age are read, not scanned: muted, and no pill. */
+.dash-crew-round,
+.dash-crew-age {
+    color: var(--gv-dialog-muted);
+    font-size: .64rem;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+/* Narrow: one column, indented by depth, with the buses in the gutter the
+   grid's left padding leaves. The wire layer writes the width the lanes need;
+   the fallback holds the space for the first paint. Equal to
+   `DASHBOARD_CREW_NARROW_PX`. */
+@container dash-crews (max-width: 380px) {
+    .dash-crew { width: 100%; max-width: none; align-self: stretch; }
+    .dash-crew-grid {
+        grid-template-columns: minmax(0, 1fr);
+        padding-left: var(--dash-wire-gutter, 16px);
+    }
+    .dash-crew-cell {
+        grid-column: 1;
+        grid-row: auto;
+        padding-left: calc(var(--dash-crew-depth, 0) * 18px);
+    }
+}
+
+/* ── Crew wires ──
+
+   Who handed a task to whom, drawn by `agent-crews.js` as one SVG inside the
+   scroller. It is a decoration: it never takes a pointer, never holds focus and
+   is hidden from assistive technology, because the rows already say in words
+   which crew they belong to. Colours are the status tokens and nothing else;
+   session hues already use the whole wheel. */
+
+.has-dash-wires {
+    position: relative;
+}
+
+/* One pixel, drawn past its own box: the wires sit inside the rows' extent, and
+   a layer sized to the content would feed back into the size it measured. */
+.dash-wires {
+    position: absolute;
+    left: 0;
+    top: 0;
+    z-index: 1;
+    width: 1px;
+    height: 1px;
+    overflow: visible;
+    pointer-events: none;
+}
+
+.dash-wire {
+    fill: none;
+    stroke: var(--gv-accent);
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.dash-wire-group {
+    transition: opacity .2s;
+}
+
+/* Outside the highlighted crew. */
+.dash-wire-group.is-dimmed {
+    opacity: .14;
+}
+
+/* Handed, not yet read. */
+.dash-wire.is-handed {
+    stroke-opacity: .6;
+    stroke-dasharray: 2 4;
+}
+
+/* Working: the dashes flow toward the worker. */
+.dash-wire.is-working {
+    stroke-dasharray: 6 6;
+    animation: dash-wire-flow .9s linear infinite;
+}
+
+/* ...and glow while the orchestrator sits waiting on it. */
+.dash-wire.is-working.is-awaited {
+    stroke-width: 2.1;
+    filter: drop-shadow(0 0 3px color-mix(in srgb, var(--gv-accent) 70%, transparent));
+}
+
+/* A report is a settled, solid line in its status colour, and its only motion
+   is a slow, slight pulse: nothing travels along it, and it looks the same
+   whether the orchestrator has collected it or not. */
+.dash-wire.is-done,
+.dash-wire.is-blocked,
+.dash-wire.is-failed {
+    stroke-width: 2;
+    animation: dash-wire-settle 3.6s ease-in-out infinite;
+}
+
+.dash-wire.is-done { stroke: var(--gv-success); }
+.dash-wire.is-blocked { stroke: var(--gv-warning); }
+.dash-wire.is-failed { stroke: var(--gv-danger); }
+
+/* The orchestrator's trunk and the crew's spine: the quiet part of a bus, so
+   the coloured branches are what is read. */
+.dash-wire.dash-wire-bus {
+    stroke: color-mix(in srgb, var(--gv-accent) 55%, transparent);
+    stroke-width: 1.5;
+}
+
+.dash-wire.is-ended {
+    stroke: var(--gv-dialog-muted);
+    stroke-dasharray: 1 4;
+}
+
+/* The dot at each end: accent where the task came from, the phase's own colour
+   where it went. */
+.dash-wire-end {
+    stroke: none;
+    fill: var(--gv-accent);
+}
+
+.dash-wire-end.is-done { fill: var(--gv-success); }
+.dash-wire-end.is-blocked { fill: var(--gv-warning); }
+.dash-wire-end.is-failed { fill: var(--gv-danger); }
+.dash-wire-end.is-ended { fill: var(--gv-dialog-muted); }
+
+@keyframes dash-wire-flow {
+    from { stroke-dashoffset: 12; }
+    to { stroke-dashoffset: 0; }
+}
+
+@keyframes dash-wire-settle {
+    0%, 100% { stroke-opacity: 1; }
+    50% { stroke-opacity: .62; }
+}
+
+/* The page stops polling while it is hidden, and the wires stop with it. */
+.dash-wires-paused .dash-wire {
+    animation-play-state: paused;
+}
+
+/* Still, and still readable from colour and dash pattern alone. */
+@media (prefers-reduced-motion: reduce) {
+    .dash-wire.is-working,
+    .dash-wire.is-done,
+    .dash-wire.is-blocked,
+    .dash-wire.is-failed { animation: none; }
 }

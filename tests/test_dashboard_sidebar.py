@@ -61,6 +61,7 @@ TEMPLATES = REPO_ROOT / "templates"
 AGENT_IDENTITY_JS = STATIC_JS / "agent-identity.js"
 AGENT_GLYPHS_JS = STATIC_JS / "agent-glyphs.js"
 SESSION_COLOUR_JS = STATIC_JS / "session-colour.js"
+AGENT_CREWS_JS = STATIC_JS / "agent-crews.js"
 DASHBOARD_DIALOG_JS = STATIC_JS / "dashboard-dialog.js"
 DASHBOARD_SIDEBAR_JS = STATIC_JS / "dashboard-sidebar.js"
 DASHBOARD_CLOSE_JS = STATIC_JS / "dashboard-close.js"
@@ -202,6 +203,11 @@ let fetchDelay = 0;
 let inputTargetAnswer = '';
 let inputTargetSource = () => inputTargetAnswer;
 
+/* The crew wire layer, recorded rather than drawn: `agent-crews.js` is
+   exercised against a DOM stub of its own (`test_agent_crews.py`), and what is
+   pinned here is when the column asks it to do what. */
+const wireCalls = { created: [], paints: [], highlights: [], paused: [] };
+
 const windowListeners = fakeListeners();
 const closeCalls = { requests: [], prompts: 0, notices: [], refreshes: 0 };
 let bridge = null;
@@ -238,6 +244,7 @@ const closeActions = dashboardClose.create({
     refresh: () => { closeCalls.refreshes += 1; }
 });
 const sidebar = GridVibeDashboardSidebar.create({
+    crewHighlight: GridVibeAgentCrews.highlightState,
     getCloseActions: () => closeActions,
     onBridgeReady: handler => windowListeners.addEventListener('pywebviewready', handler),
     addWindowListener: (type, handler) => windowListeners.addEventListener(type, handler),
@@ -275,7 +282,9 @@ const sidebar = GridVibeDashboardSidebar.create({
         line: dashboardPaneLine,
         hover: dashboardPaneHover,
         agentName: dashboardAgentName,
-        mcp: dashboardMcpTagHtml,
+        mark: dashboardAgentMarkState,
+        crewContext: dashboardCrewContext,
+        crewChip: dashboardCrewChipHtml,
         workspaceLabel: dashboardWorkspaceLabel,
         sessionColourStyle: dashboardSessionColourStyle,
         totals: dashboardTotalsText
@@ -289,6 +298,15 @@ const sidebar = GridVibeDashboardSidebar.create({
     report: () => { calls.reports += 1; },
     onLayoutChanged: () => { calls.layouts += 1; },
     inputTarget: () => inputTargetSource(),
+    createWireLayer: options => {
+        wireCalls.created.push({ mode: options.mode, container: options.container === body() });
+        return {
+            paint: reading => { wireCalls.paints.push(reading); },
+            highlight: crew => { wireCalls.highlights.push(crew); },
+            setPaused: on => { wireCalls.paused.push(on); },
+            dispose() {}
+        };
+    },
     logError: () => {}
 });
 
@@ -348,18 +366,10 @@ function parseAgentRows() {
             hover: attributes['title'] || '',
             agent: attributes['data-agent'] || '',
             key: attributes['data-dashboard-key'] || '',
-            /* What is *drawn*: the name lives in `dash-agent-who`, which is out
-               of flow, and the state word in `dash-state-word`, which always
-               was. The two column classes the dialog draws are asked about by
-               name so their absence is an assertion rather than an omission. */
-            name: grab('dash-agent-name'),
+            /* Accessible agent and state words accompany the visible mark. */
             who: grab('dash-agent-who'),
             line: grab('dash-agent-line'),
             state: /class="dash-activity dash-state-([a-z]+)"/.exec(inner)?.[1] || '',
-            tags: [...inner.matchAll(/<span class="dash-tag[^"]*"[^>]*>([\s\S]*?)<\/span>/g)]
-                .map(match => match[1].trim()),
-            tagClasses: [...inner.matchAll(/<span class="(dash-tag[^"]*)"[^>]*>/g)]
-                .map(match => match[1].split(/\s+/).filter(Boolean)),
             word: grab('dash-state-word'),
             glyph: glyph ? glyph[0] : '',
             hasBar: inner.includes('dash-progress-fill'),
@@ -490,8 +500,19 @@ function sidebarShown() {
 
 /* The drawn rows as elements: one object per row, kept for as long as the
    markup that drew it is -- so a decoration survives a reading that repaints
-   nothing and goes with its row on one that does, as it would on a page. */
+   nothing and goes with its row on one that does, as it would on a page. Each
+   carries its title from the markup and its (empty) crew chip slot, whose
+   writes are counted. */
 let drawnRows = { html: null, rows: [] };
+function fakeSlot() {
+    let html = '';
+    const slot = { writes: 0 };
+    Object.defineProperty(slot, 'innerHTML', {
+        get: () => html,
+        set: value => { html = String(value); slot.writes += 1; }
+    });
+    return slot;
+}
 function drawnAgentRows() {
     const html = body().innerHTML;
     if (drawnRows.html !== html) {
@@ -501,12 +522,78 @@ function drawnAgentRows() {
                 const element = fakeElement('');
                 element.dataset = row.dataset;
                 element.state = row.state;
+                element.title = row.hover;
+                element.crewSlot = /<span class="dash-agent-crew"><\/span>/.test(row.html)
+                    ? fakeSlot() : null;
+                /* The reading and the bar, as the markup drew them, so an
+                   in-place write is told apart from a rebuilt row. */
+                element.readingSlot = fakeSlot();
+                element.progressSlot = fakeSlot();
+                element.readingSlot.innerHTML = dashboardActivityHtml({
+                    ...fetchAnswer.workspaces.flatMap(w => w.groups).flatMap(g => g.panes)
+                        .find(p => p.session_id === row.dataset.sessionId), waiting: '' });
+                element.progressSlot.innerHTML = dashboardProgressHtml({
+                    ...fetchAnswer.workspaces.flatMap(w => w.groups).flatMap(g => g.panes)
+                        .find(p => p.session_id === row.dataset.sessionId), waiting: '' });
+                element.readingSlot.writes = 0;
+                element.progressSlot.writes = 0;
+                /* The agent's mark and the words kept beside it, as the markup
+                   drew them: empty of flags, with every write counted, so a
+                   frame turned on in place is told apart from a rebuilt row. */
+                element.icon = {
+                    dataset: {},
+                    title: '',
+                    writes: 0,
+                    removeAttribute(name) { if (name === 'title') this.title = ''; this.writes += 1; }
+                };
+                let iconTitle = '';
+                Object.defineProperty(element.icon, 'title', {
+                    get: () => iconTitle,
+                    set: value => { iconTitle = String(value); element.icon.writes += 1; },
+                    enumerable: true
+                });
+                element.flagsSlot = { writes: 0 };
+                let flagWords = '';
+                Object.defineProperty(element.flagsSlot, 'textContent', {
+                    get: () => flagWords,
+                    set: value => { flagWords = String(value); element.flagsSlot.writes += 1; }
+                });
+                element.querySelector = selector => ({
+                    '.dash-agent-crew': element.crewSlot,
+                    '.dash-agent-reading': element.readingSlot,
+                    '.dash-agent-progress': element.progressSlot,
+                    '.dash-agent-icon': element.icon,
+                    '.dash-agent-flags': element.flagsSlot
+                }[selector] || null);
+                element.closest = selector => (
+                    selector === '.dash-agent[data-session-id]' ? element : null
+                );
                 element.removeAttribute = function (name) { delete this.attributes[name]; };
                 return element;
             })
         };
     }
     return drawnRows.rows;
+}
+
+/* The drawn row for one session. */
+function drawnRow(sessionId) {
+    return drawnAgentRows().find(row => row.dataset.sessionId === sessionId) || null;
+}
+
+/* One assignment, as `GET /api/dashboard` lists it. */
+function link(requester, worker, extra) {
+    return Object.assign({
+        link_id: `${requester}-${worker}`,
+        requester_session_id: requester,
+        worker_session_id: worker,
+        state: 'working',
+        read: true,
+        status: '',
+        collected: false,
+        round: 1,
+        reason: ''
+    }, extra || {});
 }
 body().querySelectorAll = selector => (
     selector === '.dash-agent[data-session-id]' ? drawnAgentRows() : []
@@ -532,6 +619,7 @@ class DashboardSidebarNodeTestCase(unittest.TestCase):
             + AGENT_IDENTITY_JS.read_text(encoding="utf-8")
             + AGENT_GLYPHS_JS.read_text(encoding="utf-8")
             + SESSION_COLOUR_JS.read_text(encoding="utf-8")
+            + AGENT_CREWS_JS.read_text(encoding="utf-8")
             + DASHBOARD_DIALOG_JS.read_text(encoding="utf-8")
             + DASHBOARD_SIDEBAR_JS.read_text(encoding="utf-8")
             + HARNESS_STUBS
@@ -579,7 +667,6 @@ class DashboardSidebarRowTestCase(DashboardSidebarNodeTestCase):
         self.assertIn("/docs/images/agent/claude-code.svg", row["glyph"])
         self.assertEqual(row["state"], "working")
         # Not drawn, and the dialog's own column class is the one that is gone.
-        self.assertIsNone(row["name"])
         self.assertNotIn("dash-agent-name", row["html"])
         # Kept, out of flow, so the row still names its agent when it is heard.
         self.assertEqual(row["who"], "Claude Code")
@@ -596,18 +683,32 @@ class DashboardSidebarRowTestCase(DashboardSidebarNodeTestCase):
             ],
         )
 
-    def test_the_pane_running_with_gridvibe_tools_says_so_here_too(self):
-        """The one chip this row keeps, and the reason it is not the name.
-
-        The mark already answers which agent a row is; nothing else on it
-        answers whether that agent can create workspaces, launch panes and
-        split the grid — which is what a reader picking a pane to instruct is
-        deciding, and picking one *while* working is what this panel is for.
-        """
+    def test_the_row_draws_no_mcp_chip_and_no_tag_at_all(self):
+        """What a row may do is on its mark, not beside the title: the chip is
+        gone from the markup whatever the pane has, so the title keeps the
+        width."""
         result = self._run_node(
             """
             sidebarShown();
             fetchAnswer = snapshot([group([
+                pane({ agent_mcp: true, agent_mcp_override: true, agent_auto_mode: true }),
+                pane({ session_id: 's2', index: 1, agent_mcp: true })
+            ])]);
+            await sidebar.refresh();
+            report({ html: body().innerHTML });
+            """
+        )
+        self.assertNotIn("dash-tag", result["html"])
+        self.assertNotIn(">MCP<", result["html"])
+
+    def test_the_pane_running_with_gridvibe_tools_wears_the_headers_frame(self):
+        """The mark of a pane with GridVibe's tools is framed, by the rule the
+        pane header uses (`paneAgentMcpTag`): an agent, and the flag, whatever
+        the transport -- and never a pane that is no longer an agent."""
+        result = self._run_node(
+            """
+            sidebarShown();
+            const panes = [
                 pane({ agent_mcp: true }),
                 pane({ session_id: 's2', index: 1 }),
                 pane({
@@ -618,56 +719,165 @@ class DashboardSidebarRowTestCase(DashboardSidebarNodeTestCase):
                     session_id: 's4', index: 3, startup_mode: 'terminal',
                     agent_selection: '', agent_mcp: true
                 })
-            ])]);
+            ];
+            fetchAnswer = snapshot([group(panes)]);
             await sidebar.refresh();
-            report(parseAgentRows().map(row => ({
-                key: row.key, tags: row.tags, columns: row.columns
-            })));
+            report({
+                marks: panes.map(entry => {
+                    const icon = drawnRow(entry.session_id).icon;
+                    return {
+                        id: entry.session_id,
+                        framed: 'mcp' in icon.dataset,
+                        override: 'mcpOverride' in icon.dataset,
+                        rule: Boolean(GridVibeAgentIdentity.paneAgentMcpTag(entry)),
+                        title: icon.title,
+                        headerTitle: GridVibeAgentIdentity.paneAgentMcpTagTitle(entry)
+                    };
+                })
+            });
             """
         )
-        tags = {row["key"]: row["tags"] for row in result}
-        self.assertEqual(tags["pane:s1"], ["MCP"])
-        self.assertEqual(tags["pane:s2"], [])
-        # A remote pane's tools ride its own transport home, so it wears the
-        # chip exactly as a local one does.
-        self.assertEqual(tags["pane:s3"], ["MCP"])
-        # And a flag left behind on a pane that is no longer running an agent
-        # paints nothing, the same rule the pane header and the dialog apply.
-        self.assertEqual(tags["pane:s4"], [])
-        # The chip sits after the title and before the bar, so the four columns
-        # the eye runs along are still in the order they were.
-        self.assertEqual(
-            [row["columns"] for row in result][0][:4],
-            [
-                "dash-agent-reading",
-                "dash-agent-icon",
-                "dash-agent-who",
-                "dash-agent-line",
-            ],
-        )
+        by_id = {mark["id"]: mark for mark in result["marks"]}
+        self.assertTrue(by_id["s1"]["framed"])
+        self.assertFalse(by_id["s2"]["framed"])
+        # A remote pane's tools ride its own transport home: framed alike.
+        self.assertTrue(by_id["s3"]["framed"])
+        # A flag left behind on a pane that is no longer an agent frames nothing.
+        self.assertFalse(by_id["s4"]["framed"])
+        for mark in result["marks"]:
+            with self.subTest(pane=mark["id"]):
+                self.assertEqual(mark["framed"], mark["rule"])
+                self.assertFalse(mark["override"])
+                # The hover is the header's own sentence, word for word.
+                self.assertEqual(mark["title"], mark["headerTitle"])
+        self.assertIn("GridVibe tools", by_id["s1"]["title"])
 
-    def test_an_override_mode_pane_wears_the_dialogs_red_chip(self):
-        """The sidebar draws the dialog's chip, so override mode reaches it
-        with no reading of its own: same `MCP`, same `is-override`."""
+    def test_override_mode_turns_the_frame_red_and_the_hover_says_why(self):
         result = self._run_node(
             """
             sidebarShown();
             const red = pane({ agent_mcp: true, agent_mcp_override: true });
-            const plain = pane({ session_id: 's2', index: 1, agent_mcp: true });
-            fetchAnswer = snapshot([group([red, plain])]);
+            const blue = pane({ session_id: 's2', index: 1, agent_mcp: true });
+            const stray = pane({ session_id: 's3', index: 2, agent_mcp_override: true });
+            fetchAnswer = snapshot([group([red, blue, stray])]);
             await sidebar.refresh();
-            const rows = parseAgentRows();
+            const state = id => {
+                const icon = drawnRow(id).icon;
+                return { framed: 'mcp' in icon.dataset, override: 'mcpOverride' in icon.dataset, title: icon.title };
+            };
             report({
-                rows: rows.map(row => ({ tags: row.tags, classes: row.tagClasses })),
-                dialog: dashboardMcpTagHtml(red)
+                red: state('s1'), blue: state('s2'), stray: state('s3'),
+                headerRed: GridVibeAgentIdentity.paneAgentMcpTagTitle(red)
             });
             """
         )
-        self.assertEqual(result["rows"], [
-            {"tags": ["MCP"], "classes": [["dash-tag", "dash-tag-mcp", "is-override"]]},
-            {"tags": ["MCP"], "classes": [["dash-tag", "dash-tag-mcp"]]},
-        ])
-        self.assertIn('class="dash-tag dash-tag-mcp is-override"', result["dialog"])
+        self.assertTrue(result["red"]["framed"])
+        self.assertTrue(result["red"]["override"])
+        self.assertEqual(result["red"]["title"], result["headerRed"])
+        self.assertIn("override mode", result["red"]["title"])
+        self.assertTrue(result["blue"]["framed"])
+        self.assertFalse(result["blue"]["override"])
+        # The grant means nothing without the tools, as in the header.
+        self.assertFalse(result["stray"]["framed"])
+        self.assertFalse(result["stray"]["override"])
+
+    def test_auto_approval_is_a_pin_on_the_mark_and_says_so_in_words(self):
+        result = self._run_node(
+            """
+            sidebarShown();
+            fetchAnswer = snapshot([group([
+                pane({ agent_auto_mode: true }),
+                pane({ session_id: 's2', index: 1, agent_auto_mode: true, agent_mcp: true }),
+                pane({ session_id: 's3', index: 2 })
+            ])]);
+            await sidebar.refresh();
+            const state = id => {
+                const row = drawnRow(id);
+                return {
+                    auto: 'auto' in row.icon.dataset,
+                    framed: 'mcp' in row.icon.dataset,
+                    title: row.icon.title,
+                    words: row.flagsSlot.textContent
+                };
+            };
+            report({ plain: state('s1'), both: state('s2'), none: state('s3') });
+            """
+        )
+        self.assertTrue(result["plain"]["auto"])
+        self.assertFalse(result["plain"]["framed"])
+        self.assertIn("auto-approval", result["plain"]["title"])
+        self.assertIn("auto-approval", result["plain"]["words"])
+        # Both, on one mark: the frame and the pin, and a hover for each.
+        self.assertTrue(result["both"]["auto"])
+        self.assertTrue(result["both"]["framed"])
+        self.assertIn("GridVibe tools", result["both"]["title"])
+        self.assertIn("auto-approval", result["both"]["title"])
+        self.assertIn("GridVibe tools", result["both"]["words"])
+        self.assertIn("auto-approval", result["both"]["words"])
+        # Neither: nothing drawn and nothing said.
+        self.assertEqual(result["none"], {"auto": False, "framed": False, "title": "", "words": ""})
+
+    def test_colour_is_never_the_only_statement_of_the_frame(self):
+        """Blue and red are carried by the hover and the row's accessible name
+        too: the words are on the row, out of flow, for a reader who is hearing
+        it."""
+        result = self._run_node(
+            """
+            sidebarShown();
+            fetchAnswer = snapshot([group([
+                pane({ agent_mcp: true, agent_mcp_override: true })
+            ])]);
+            await sidebar.refresh();
+            report({ words: drawnRow('s1').flagsSlot.textContent, html: body().innerHTML });
+            """
+        )
+        self.assertIn("override mode", result["words"])
+        self.assertIn('<span class="dash-agent-flags"></span>', result["html"])
+
+    def test_a_frame_or_pin_changing_is_written_in_place_and_never_rebuilds_the_row(self):
+        result = self._run_node(
+            """
+            sidebarShown();
+            fetchAnswer = snapshot([group([pane(), pane({ session_id: 's2', index: 1 })])]);
+            await sidebar.refresh();
+            const row = drawnRow('s1');
+            const before = { html: body().innerHTML, writes: row.icon.writes, words: row.flagsSlot.writes };
+            fetchAnswer = snapshot([group([
+                pane({ agent_mcp: true, agent_auto_mode: true }), pane({ session_id: 's2', index: 1 })
+            ])]);
+            await sidebar.refresh();
+            const turnedOn = {
+                same: drawnRow('s1') === row,
+                framed: 'mcp' in row.icon.dataset,
+                auto: 'auto' in row.icon.dataset,
+                writes: row.icon.writes,
+                words: row.flagsSlot.writes
+            };
+            /* The same reading again writes nothing at all. */
+            await sidebar.refresh();
+            const quiet = { writes: row.icon.writes, words: row.flagsSlot.writes };
+            fetchAnswer = snapshot([group([
+                pane({ agent_mcp: true, agent_mcp_override: true }), pane({ session_id: 's2', index: 1 })
+            ])]);
+            await sidebar.refresh();
+            report({
+                before, turnedOn, quiet,
+                red: 'mcpOverride' in row.icon.dataset,
+                autoGone: 'auto' in row.icon.dataset,
+                sameAfter: drawnRow('s1') === row
+            });
+            """
+        )
+        self.assertEqual(result["before"]["writes"], 0)
+        self.assertTrue(result["turnedOn"]["same"])
+        self.assertTrue(result["turnedOn"]["framed"])
+        self.assertTrue(result["turnedOn"]["auto"])
+        self.assertGreater(result["turnedOn"]["writes"], 0)
+        self.assertEqual(result["quiet"], {"writes": result["turnedOn"]["writes"],
+                                           "words": result["turnedOn"]["words"]})
+        self.assertTrue(result["red"])
+        self.assertFalse(result["autoGone"])
+        self.assertTrue(result["sameAfter"])
 
     def test_every_other_field_is_the_dialogs_own_answer(self):
         """The naming rule, the transport tag, the state word, the hue and the
@@ -696,7 +906,7 @@ class DashboardSidebarRowTestCase(DashboardSidebarNodeTestCase):
                     glyphKey: dashboardAgentGlyphKey(reading),
                     activity: dashboardActivityHtml(reading),
                     progress: dashboardProgressHtml(reading),
-                    mcp: dashboardMcpTagHtml(reading)
+                    mcp: dashboardAgentMarkState(reading).mcp
                 },
                 totals: totals().textContent
             });
@@ -712,8 +922,8 @@ class DashboardSidebarRowTestCase(DashboardSidebarNodeTestCase):
         self.assertEqual(row["percent"], 42)
         # The chip is the dialog's builder too, so a pane without the tools
         # draws exactly what the dialog draws for it: nothing.
-        self.assertEqual(dialog["mcp"], "")
-        self.assertEqual(row["tags"], [])
+        self.assertFalse(dialog["mcp"])
+        self.assertNotIn("dash-tag", row["html"])
         # The shell the pane runs on left the line in the dialog too; it is the
         # last line of the hover on both surfaces.
         self.assertTrue(row["hover"].endswith("SSH"))
@@ -1016,7 +1226,7 @@ class DashboardSidebarSurfaceTestCase(DashboardSidebarNodeTestCase):
             body().querySelector = () => focusTarget;
             body().scrollTop = 88;
             fetchAnswer = snapshot([group([pane({
-                activity: activity({ title: 'Second' })
+                agent_selection: 'codex', activity: activity({ title: 'Second' })
             })])]);
             await sidebar.refresh();
             report({
@@ -1182,6 +1392,7 @@ TERMINAL_FOCUS_SOURCE = "\n".join(
             "resetFocusedTerminal",
             "focusPaneForArrival",
             "cacheVisibleGroupView",
+            "gridLayoutClass",
             "replaceSessionPaneMode",
             "firstAttachedPlainTerminalIndex",
             "focusActiveOrDefaultTerminal",
@@ -1413,7 +1624,7 @@ class DashboardSidebarInputTargetTestCase(DashboardSidebarNodeTestCase):
             const kept = drawnAgentRows()[0] === before
                 && before.classList.contains('is-input-target');
             fetchAnswer = snapshot([group([
-                pane({ activity: activity({ title: 'Second' }) }),
+                pane({ agent_selection: 'codex', activity: activity({ title: 'Second' }) }),
                 pane({ session_id: 's2', index: 1 })
             ])]);
             await sidebar.refresh();
@@ -1471,6 +1682,418 @@ class DashboardSidebarInputTargetTestCase(DashboardSidebarNodeTestCase):
         self.assertEqual(result["after"], ["working", "idle"])
         self.assertTrue(result["unchanged"])
         self.assertEqual(result["marks"], [["s2", "true"]])
+
+
+class DashboardSidebarCrewTestCase(DashboardSidebarNodeTestCase):
+    """Which agent handed a task to which, on the column.
+
+    Everything a crew adds is laid on rows already drawn: the lane gutter is a
+    class on the panel, the orchestrator's chip is written into its row's own
+    slot, a worker's hover gains one line, and hovering a crew's
+    row highlights it. None of it is in the markup a reading is compared by, so
+    a report, a phase change or a new round never rebuilds a row. Four panes:
+    an orchestrator (`s1`), two agents (`s2`, `s3`) and one more (`s4`)."""
+
+    READING = """
+        function crewReading(links, titles) {
+            const named = titles || {};
+            return snapshot([group([
+                pane({ activity: activity({ title: named.s1 || 'Plan the release', state: 'idle' }) }),
+                pane({ session_id: 's2', index: 1, agent_selection: 'codex',
+                    activity: activity({ title: named.s2 || 'Review the parser' }) }),
+                pane({ session_id: 's3', index: 2,
+                    activity: activity({ title: named.s3 || 'Write the tests' }) }),
+                pane({ session_id: 's4', index: 3,
+                    activity: activity({ title: named.s4 || 'On its own' }) })
+            ])], { links });
+        }
+        function members() {
+            return drawnAgentRows()
+                .filter(row => row.classList.contains('is-crew-member'))
+                .map(row => row.dataset.sessionId);
+        }
+    """
+
+    def test_removed_hover_element_clears_even_when_its_crew_survives(self):
+        result = self._run_node(self.READING + """
+            sidebarShown(); sidebar.wireRows();
+            fetchAnswer = crewReading([link('s1', 's2'), link('s1', 's3')]);
+            await sidebar.refresh();
+            body().fire('pointerover', { target: drawnRow('s2') });
+            const before = members();
+            fetchAnswer.workspaces[0].groups[0].panes.splice(1, 1);
+            fetchAnswer.links.splice(0, 1);
+            await sidebar.refresh(); // no pointerleave from the removed element
+            const removed = members();
+            fetchAnswer = crewReading([link('s1', 's2'), link('s1', 's3')]);
+            await sidebar.refresh();
+            report({ before, removed, returned: members() });
+        """)
+        self.assertEqual(result["before"], ["s1", "s2", "s3"])
+        self.assertEqual(result["removed"], [])
+        self.assertEqual(result["returned"], [])
+
+    def test_focus_does_not_highlight_a_crew_and_pointer_out_clears_it(self):
+        result = self._run_node(self.READING + """
+            sidebarShown(); sidebar.wireRows();
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await sidebar.refresh();
+            body().fire('focusin', { target: drawnRow('s2') });
+            const before = members();
+            focusIsInside = true;
+            body().fire('focusout', { relatedTarget: { closest: () => null } });
+            const heading = members();
+            body().fire('pointerover', { target: drawnRow('s1') });
+            body().fire('pointerout', { relatedTarget: null });
+            report({ before, heading, out: members() });
+        """)
+        self.assertEqual(result["before"], [])
+        self.assertEqual(result["heading"], [])
+        self.assertEqual(result["out"], [])
+
+    def test_shared_board_click_highlights_docked_rows_and_close_clears_it(self):
+        result = self._run_node(self.READING + """
+            sidebarShown(); sidebar.wireRows();
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            await sidebar.refresh();
+            GridVibeAgentCrews.highlightState.set('board-click', 's3', 'click', 's4');
+            const click = members();
+            body().fire('pointerover', { target: drawnRow('s2') });
+            const hovered = GridVibeAgentCrews.highlightState.get();
+            body().fire('pointerleave', {});
+            const left = members();
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await sidebar.refresh();
+            report({ click, hovered, left, closed: members(), state: GridVibeAgentCrews.highlightState.get() });
+        """)
+        self.assertEqual(result["click"], ["s3", "s4"])
+        self.assertEqual(result["hovered"], "s1")
+        self.assertEqual(result["left"], ["s3", "s4"])
+        self.assertEqual(result["closed"], [])
+        self.assertEqual(result["state"], "")
+
+    def test_new_wire_layer_inherits_an_existing_board_click(self):
+        result = self._run_node(self.READING + """
+            sidebarShown();
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            GridVibeAgentCrews.highlightState.set('board-click', 's3', 'click', 's4');
+            await sidebar.refresh();
+            report({ state: GridVibeAgentCrews.highlightState.get(), members: members(), wire: wireCalls.highlights.at(-1) });
+        """)
+        self.assertEqual(result["state"], "s3")
+        self.assertEqual(result["members"], ["s3", "s4"])
+        self.assertEqual(result["wire"], "s3")
+
+    def test_the_gutter_opens_only_while_there_is_a_crew(self):
+        result = self._run_node(
+            self.READING + """
+            sidebarShown();
+            fetchAnswer = crewReading([]);
+            await sidebar.refresh();
+            const none = shell().classList.contains('has-crews');
+            const markup = body().innerHTML;
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await sidebar.refresh();
+            const some = shell().classList.contains('has-crews');
+            const sameMarkup = body().innerHTML === markup;
+            fetchAnswer = crewReading([]);
+            await sidebar.refresh();
+            report({ none, some, sameMarkup, gone: shell().classList.contains('has-crews') });
+            """
+        )
+        self.assertFalse(result["none"])
+        self.assertTrue(result["some"])
+        # The gutter is the panel's class, not a row's markup.
+        self.assertTrue(result["sameMarkup"])
+        self.assertFalse(result["gone"])
+
+    def test_the_orchestrators_chip_is_the_dialogs_own_builder(self):
+        """`reported/total` per worker, a closed worker included, on the
+        orchestrator's row only, and stated in words for a reader hearing the
+        row."""
+        result = self._run_node(
+            self.READING + """
+            sidebarShown();
+            fetchAnswer = crewReading([
+                link('s1', 's2', { state: 'reported', status: 'done' }),
+                link('s1', 's3'),
+                link('s1', 's9', { state: 'reported', status: 'failed', collected: true })
+            ]);
+            await sidebar.refresh();
+            const reading = fetchAnswer;
+            report({
+                chip: drawnRow('s1').crewSlot.innerHTML,
+                dialog: dashboardCrewChipHtml(
+                    reading.workspaces[0].groups[0].panes[0],
+                    GridVibeAgentCrews.indexCrews(reading)
+                ),
+                others: ['s2', 's3', 's4'].map(id => drawnRow(id).crewSlot.innerHTML),
+                inMarkup: body().innerHTML.includes('dash-crew-chip'),
+                columns: parseAgentRows()[0].columns
+            });
+            """
+        )
+        self.assertEqual(result["chip"], result["dialog"])
+        self.assertIn('<span class="dash-crew-count" aria-hidden="true">2/3</span>', result["chip"])
+        self.assertIn('title="Handed tasks to 3 agents; 2 reported"', result["chip"])
+        self.assertIn(
+            '<span class="dash-crew-word">Handed tasks to 3 agents; 2 reported</span>',
+            result["chip"],
+        )
+        self.assertIn('class="dash-crew-glyph"', result["chip"])
+        self.assertEqual(result["others"], ["", "", ""])
+        self.assertFalse(result["inMarkup"])
+        # The slot sits after the title, before the bar.
+        columns = result["columns"]
+        self.assertEqual(
+            columns[columns.index("dash-agent-line") + 1], "dash-agent-crew"
+        )
+
+    def test_a_report_updates_the_chip_in_place(self):
+        """A report changes a chip, and nothing else: the row element, the
+        markup and the scroller all stay, and an unchanged poll writes
+        nothing."""
+        result = self._run_node(
+            self.READING + """
+            sidebarShown();
+            fetchAnswer = crewReading([link('s1', 's2'), link('s1', 's3')]);
+            await sidebar.refresh();
+            const row = drawnRow('s1');
+            const slot = row.crewSlot;
+            const markup = body().innerHTML;
+            const first = slot.innerHTML;
+            body().scrollTop = 55;
+            fetchAnswer = crewReading([
+                link('s1', 's2', { state: 'reported', status: 'done' }),
+                link('s1', 's3')
+            ]);
+            await sidebar.refresh();
+            const reported = {
+                sameRow: drawnRow('s1') === row,
+                sameMarkup: body().innerHTML === markup,
+                chip: slot.innerHTML,
+                writes: slot.writes,
+                scroll: body().scrollTop
+            };
+            await sidebar.refresh();
+            report({ first, reported, idleWrites: slot.writes,
+                workerWrites: drawnRow('s2').crewSlot.writes });
+            """
+        )
+        self.assertIn(">0/2<", result["first"])
+        self.assertTrue(result["reported"]["sameRow"])
+        self.assertTrue(result["reported"]["sameMarkup"])
+        self.assertIn(">1/2<", result["reported"]["chip"])
+        self.assertEqual(result["reported"]["writes"], 2)
+        self.assertEqual(result["reported"]["scroll"], 55)
+        self.assertEqual(result["idleWrites"], 2)
+        self.assertEqual(result["workerWrites"], 0)
+
+    def test_a_worker_hover_names_its_orchestrator_and_the_round_from_two(self):
+        result = self._run_node(
+            self.READING + """
+            sidebarShown();
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await sidebar.refresh();
+            const worker = drawnRow('s2');
+            const round1 = worker.title;
+            const orchestrator = drawnRow('s1').title;
+            const alone = drawnRow('s4').title;
+            const plain = dashboardPaneHover(fetchAnswer.workspaces[0].groups[0].panes[3]);
+            const markup = body().innerHTML;
+            fetchAnswer = crewReading([link('s1', 's2', { link_id: 'next-round', round: 2 })]);
+            await sidebar.refresh();
+            const round2 = worker.title;
+            const sameRow = drawnRow('s2') === worker && body().innerHTML === markup;
+            fetchAnswer = crewReading([link('s1', 's2', { round: 2 })], { s1: 'Ship it' });
+            await sidebar.refresh();
+            report({ round1, round2, sameRow, orchestrator, alone, plain,
+                renamed: drawnRow('s2').title });
+            """
+        )
+        self.assertEqual(
+            result["round1"].split("\n")[-2], "Working for Claude Code · Plan the release"
+        )
+        self.assertNotIn("round", result["round1"])
+        self.assertEqual(
+            result["round2"].split("\n")[-2],
+            "Working for Claude Code · Plan the release · round 2",
+        )
+        # Under the chat line and its path, above the shell, which stays the
+        # hover's last line.
+        self.assertTrue(result["round2"].endswith("SSH"))
+        self.assertTrue(result["sameRow"])
+        self.assertNotIn("Working for", result["orchestrator"])
+        self.assertEqual(result["alone"], result["plain"])
+        # The orchestrator's own line is read again on every reading.
+        self.assertIn("Working for Claude Code · Ship it · round 2", result["renamed"])
+
+    def test_only_hover_highlights_a_crew_and_the_input_ring_stays(self):
+        """Two crews. The highlighted one's rows are members, the panel says a
+        crew is highlighted, the wires are told which, and the row being typed
+        into keeps its ring whichever crew is lit. A reading that rebuilds the
+        rows puts the highlight straight back."""
+        result = self._run_node(
+            self.READING + """
+            storedSidebar = true;
+            inputTargetAnswer = 's3';
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            sidebar.wire();
+            await settle();
+            body().fire('pointerover', { target: drawnRow('s2') });
+            const hovered = {
+                panel: shell().classList.contains('is-crew-highlight'),
+                members: members(),
+                wires: wireCalls.highlights[wireCalls.highlights.length - 1],
+                ring: drawnRow('s3').classList.contains('is-input-target')
+            };
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')], { s2: 'Renamed' });
+            await sidebar.refresh();
+            const rebuilt = { members: members(), ring: drawnRow('s3').classList.contains('is-input-target') };
+            body().fire('pointerleave', {});
+            const left = { panel: shell().classList.contains('is-crew-highlight'), members: members(),
+                wires: wireCalls.highlights[wireCalls.highlights.length - 1] };
+            body().fire('focusin', { target: drawnRow('s4') });
+            const focused = { members: members(), wires: wireCalls.highlights[wireCalls.highlights.length - 1] };
+            body().fire('pointerover', { target: drawnRow('s1') });
+            const pointerWins = members();
+            body().fire('pointerover', { target: { closest: () => null } });
+            const backToFocus = members();
+            body().fire('focusout', { relatedTarget: null });
+            report({ hovered, rebuilt, left, focused, pointerWins, backToFocus,
+                cleared: { panel: shell().classList.contains('is-crew-highlight'), members: members() },
+                inMarkup: /is-crew-member|is-crew-highlight/.test(body().innerHTML) });
+            """
+        )
+        self.assertTrue(result["hovered"]["panel"])
+        self.assertEqual(result["hovered"]["members"], ["s1", "s2"])
+        self.assertEqual(result["hovered"]["wires"], "s1")
+        self.assertTrue(result["hovered"]["ring"])
+        self.assertEqual(result["rebuilt"]["members"], ["s1", "s2"])
+        self.assertTrue(result["rebuilt"]["ring"])
+        self.assertFalse(result["left"]["panel"])
+        self.assertEqual(result["left"]["members"], [])
+        self.assertEqual(result["left"]["wires"], "")
+        self.assertEqual(result["focused"]["members"], [])
+        self.assertEqual(result["focused"]["wires"], "")
+        self.assertEqual(result["pointerWins"], ["s1", "s2"])
+        self.assertEqual(result["backToFocus"], [])
+        self.assertFalse(result["cleared"]["panel"])
+        self.assertEqual(result["cleared"]["members"], [])
+        self.assertFalse(result["inMarkup"])
+
+    def test_the_wires_follow_every_reading_and_stand_down_with_the_poll(self):
+        result = self._run_node(
+            self.READING + """
+            storedSidebar = true;
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            sidebar.wire();
+            await settle();
+            await sidebar.refresh();
+            const painted = {
+                created: wireCalls.created,
+                paints: wireCalls.paints.length,
+                last: wireCalls.paints[wireCalls.paints.length - 1] === fetchAnswer
+            };
+            documentIsHidden = true;
+            visibilityListeners.fire('v');
+            documentIsHidden = false;
+            visibilityListeners.fire('v');
+            await settle();
+            sidebar.apply(false);
+            report({ painted, paused: wireCalls.paused, paints: wireCalls.paints.length });
+            """
+        )
+        self.assertEqual(result["painted"]["created"], [{"mode": "lane", "container": True}])
+        self.assertEqual(result["painted"]["paints"], 2)
+        self.assertTrue(result["painted"]["last"])
+        # Created running; held while the document is hidden; running again
+        # when it is back; held when the panel is shut.
+        self.assertEqual(result["paused"], [False, True, False, True])
+        self.assertEqual(result["paints"], 3)
+
+    def test_a_waiting_agent_wears_the_waiting_mark_and_says_why(self):
+        """Waiting overrides the activity reading, after the transport: an
+        orchestrator in `wait_for_results` and a worker standing by in
+        `wait_for_task` wear the one mark, in their own words, and no bar. It
+        is laid on the drawn row: the markup keeps the plain reading."""
+        result = self._run_node(
+            """
+            sidebarShown();
+            const panes = [
+                pane({ waiting: 'crew', activity: activity({ progress_state: 'indeterminate' }) }),
+                pane({ session_id: 's2', index: 1, waiting: 'task', activity: activity() }),
+                pane({ session_id: 's3', index: 2, waiting: 'crew', status: 'disconnected' }),
+                pane({ session_id: 's4', index: 3, waiting: '', activity: activity() })
+            ];
+            fetchAnswer = snapshot([group(panes)]);
+            await sidebar.refresh();
+            const shown = drawnAgentRows().map((row, index) => {
+                const reading = row.readingSlot.writes
+                    ? row.readingSlot.innerHTML : dashboardActivityHtml({ ...panes[index], waiting: '' });
+                return [
+                    /dash-state-([a-z]+)/.exec(reading)[1],
+                    /<span class="dash-state-word">([^<]*)<\\/span>/.exec(reading)[1],
+                    row.progressSlot.writes ? row.progressSlot.innerHTML.includes('dash-progress-fill') : null
+                ];
+            });
+            report({ shown, inMarkup: /dash-state-waiting/.test(body().innerHTML) });
+            """
+        )
+        self.assertEqual(result["shown"], [
+            # The bar the plain reading drew is taken off.
+            ["waiting", "Waiting on its crew", False],
+            ["waiting", "Standing by for its next task", None],
+            ["error", "Disconnected", None],
+            ["working", "Working", None],
+        ])
+        self.assertFalse(result["inMarkup"])
+
+    def test_entering_and_leaving_a_wait_rewrites_the_dot_not_the_row(self):
+        """An orchestrator enters `wait_for_results` and leaves it again many
+        times a task, so each flip rewrites its reading slot and its bar and
+        keeps the row, the markup and the scroller."""
+        result = self._run_node(
+            self.READING + """
+            sidebarShown();
+            const reading = waiting => {
+                const next = crewReading([link('s1', 's2')]);
+                next.workspaces[0].groups[0].panes[0] = pane({
+                    waiting,
+                    activity: activity({ title: 'Plan the release', progress_state: 'indeterminate' })
+                });
+                return next;
+            };
+            fetchAnswer = reading('');
+            await sidebar.refresh();
+            const row = drawnRow('s1');
+            const markup = body().innerHTML;
+            body().scrollTop = 40;
+            const steps = [];
+            for (const waiting of ['crew', 'task', '']) {
+                fetchAnswer = reading(waiting);
+                await sidebar.refresh();
+                steps.push({
+                    sameRow: drawnRow('s1') === row,
+                    sameMarkup: body().innerHTML === markup,
+                    word: /<span class="dash-state-word">([^<]*)<\\/span>/.exec(row.readingSlot.innerHTML)[1],
+                    bar: row.progressSlot.innerHTML.includes('dash-progress-fill')
+                });
+            }
+            const writes = row.readingSlot.writes;
+            await sidebar.refresh();
+            report({ steps, scroll: body().scrollTop, idle: row.readingSlot.writes === writes,
+                plain: row.readingSlot.innerHTML === dashboardActivityHtml(fetchAnswer.workspaces[0].groups[0].panes[0]) });
+            """
+        )
+        self.assertEqual(result["steps"], [
+            {"sameRow": True, "sameMarkup": True, "word": "Waiting on its crew", "bar": False},
+            {"sameRow": True, "sameMarkup": True, "word": "Standing by for its next task", "bar": False},
+            {"sameRow": True, "sameMarkup": True, "word": "Working", "bar": True},
+        ])
+        self.assertEqual(result["scroll"], 40)
+        self.assertTrue(result["idle"])
+        self.assertTrue(result["plain"])
 
 
 class DashboardSidebarInputTargetPageTestCase(DashboardSidebarNodeTestCase):
@@ -2918,6 +3541,47 @@ class DashboardSidebarPageTestCase(unittest.TestCase):
         self.assertIn("15%", width.group(1))
         self.assertIn("clamp(", width.group(1))
 
+    def test_resize_strip_is_reserved_outside_the_scroller_on_both_edges(self):
+        css = self._static("css/agent-dashboard-sidebar.css")
+        base = re.search(r"\n\.agent-sidebar \{([^}]*)\}", css).group(1)
+        right = re.search(r"body\.agent-sidebar-right \.agent-sidebar \{([^}]*)\}", css).group(1)
+        handle = re.search(r"\n\.agent-sidebar-resizer \{([^}]*)\}", css).group(1)
+        self.assertIn("--agent-sidebar-resize-strip: 6px;", base)
+        self.assertIn("padding-right: var(--agent-sidebar-resize-strip);", base)
+        self.assertIn("padding-right: 0;", right)
+        self.assertIn("padding-left: var(--agent-sidebar-resize-strip);", right)
+        self.assertIn("width: var(--agent-sidebar-resize-strip);", handle)
+
+    def test_the_mark_wears_the_headers_frame_and_the_auto_pin_from_tokens(self):
+        """The frame is the pane header's, down to its two colours: the same
+        accent and the same override token, so the surfaces cannot disagree. The
+        pin is drawn from an attribute, so it is a decoration and never markup."""
+        css = self._static("css/agent-dashboard-sidebar.css")
+        header = self._static("css/terminals.css")
+
+        def rule(source, selector):
+            found = re.search(re.escape(selector) + r" \{([^}]*)\}", source)
+            self.assertIsNotNone(found, selector)
+            return found.group(1)
+
+        frame = rule(css, ".agent-sidebar-list .dash-agent-icon[data-mcp]")
+        header_frame = rule(header, ".terminal-agent-icon[data-mcp]")
+        self.assertIn("outline: 1.5px solid var(--gv-accent);", frame)
+        # `--t-accent` is `--gv-accent`: the header's own spelling of the same token.
+        self.assertIn("outline: 1.5px solid var(--t-accent);", header_frame)
+        self.assertIn("outline-offset: 1.5px;", frame)
+        self.assertIn("outline-offset: 1.5px;", header_frame)
+        self.assertIn(
+            "outline-color: var(--gv-mcp-override);",
+            rule(css, ".agent-sidebar-list .dash-agent-icon[data-mcp][data-mcp-override]"),
+        )
+        pin = rule(css, ".agent-sidebar-list .dash-agent-icon[data-auto]::after")
+        self.assertIn("content: 'A';", pin)
+        self.assertIn("position: absolute;", pin)
+        self.assertIn("border: 1px solid var(--gv-warning);", pin)
+        # The chip is gone from the column's stylesheet.
+        self.assertNotIn(".agent-sidebar-list .dash-tag", css)
+
     def test_the_column_states_no_palette_of_its_own(self):
         """Guardrail 7: every colour is a shared token, the same ones the dialog
         reads, so the panel follows the page's light/dark preference without
@@ -2935,7 +3599,7 @@ class DashboardSidebarPageTestCase(unittest.TestCase):
         for the light theme, so the ring follows the theme with the pane."""
         css = self._static("css/agent-dashboard-sidebar.css")
         rule = re.search(
-            r"\.agent-sidebar \.dash-agent\.is-input-target\s*\{([^}]*)\}", css
+            r"\.agent-sidebar-list \.dash-agent\.is-input-target\s*\{([^}]*)\}", css
         )
         self.assertIsNotNone(rule)
         self.assertIn("box-shadow: inset 0 0 0 2px var(--gv-accent)", rule.group(1))
@@ -2948,6 +3612,47 @@ class DashboardSidebarPageTestCase(unittest.TestCase):
         self.assertRegex(light[:light.index("}")], r"--gv-accent:\s*#")
         # The terminal's active border reads the same token.
         self.assertIn("--t-accent: var(--gv-accent);", self._static("css/terminals.css"))
+
+    def test_the_crew_gutter_highlight_and_chip_are_drawn_as_planned(self):
+        """The gutter is more padding behind `has-crews` only, as wide as the
+        lanes in use say (`--dash-wire-gutter`, with a first-paint fallback). The
+        highlight dims a row's *contents*, never the row, so the input-target
+        ring (the row's own box-shadow) is never dimmed, and a crew row's ring
+        gives way to it. The chip is accent on accent-soft, mono 9.5px/600."""
+        css = self._static("css/agent-dashboard-sidebar.css")
+
+        def rule(selector, sheet=css):
+            found = re.search(re.escape(selector) + r"\s*\{([^}]*)\}", sheet)
+            self.assertIsNotNone(found, selector)
+            return found.group(1)
+
+        self.assertIn(
+            "padding-left: var(--dash-wire-gutter, 16px)",
+            rule(".agent-sidebar-list.has-crews .agent-sidebar-body"),
+        )
+        # With no crew the column keeps its own padding, whatever a stale
+        # property says: the gutter rule is behind `has-crews` alone.
+        self.assertNotIn("--dash-wire-gutter", rule(".agent-sidebar-list .agent-sidebar-body"))
+        self.assertIn(
+            "opacity: .32",
+            rule(".agent-sidebar-list.is-crew-highlight .dash-agent:not(.is-crew-member) > *"),
+        )
+        self.assertNotRegex(
+            css, r"is-crew-highlight \.dash-agent:not\(\.is-crew-member\)\s*\{"
+        )
+        self.assertIn(
+            "inset 0 0 0 1.5px color-mix(in srgb, var(--gv-accent) 75%, transparent)",
+            rule(".agent-sidebar-list.is-crew-highlight "
+                 ".dash-agent.is-crew-member:not(.is-input-target)"),
+        )
+
+        shared = self._static("css/agent-dashboard.css")
+        chip = rule(".dash-crew-chip", shared)
+        self.assertIn("background: var(--gv-accent-soft)", chip)
+        self.assertIn("color: var(--gv-accent)", chip)
+        self.assertIn("font: 600 9.5px/1", chip)
+        self.assertNotIn("border:", chip)
+        self.assertIn("display: none", rule(".dash-agent-crew:empty", shared))
 
     def test_the_module_is_loaded_after_the_dialog_whose_renderers_it_uses(self):
         html = self._page()

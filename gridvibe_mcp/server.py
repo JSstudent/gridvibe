@@ -239,6 +239,9 @@ SPLIT_AXIS_WORDS = (
 #: like the split wait against the intent TTLs.
 MAX_TASK_BYTES = 512 * 1024
 
+#: The public board line's character ceiling, pinned against the web guard by test.
+MAX_TASK_LABEL_CHARS = 60
+
 #: The ceiling GridVibe holds one report to, in characters, and the longest
 #: one ``wait_for_results`` call blocks. Pinned against ``web/agent_results.py``
 #: by test, like the task ceiling.
@@ -271,6 +274,20 @@ TASK_DESCRIPTION = (
     "keep talking to the same agent afterwards, say so in the task (report, "
     "then call wait_for_task) and send each next message with send_task."
 )
+
+TASK_LABEL_DESCRIPTION = (
+    "Optional short label for this task round, shown to the person on the "
+    "dashboard crew board, unlike the private task text. Only alongside 'task'. "
+    "One printable line, at most 60 characters; invalid values are refused, "
+    "never truncated. Omit on a follow-up to use the pane's chat line; the "
+    "previous round's label is never inherited."
+)
+
+TASK_LABEL_SCHEMA = {
+    "type": "string",
+    "maxLength": MAX_TASK_LABEL_CHARS,
+    "description": TASK_LABEL_DESCRIPTION,
+}
 
 #: The geometry record `POST /api/sessions` already validates and the sidecar
 #: never sent. Its schema is stated here so a malformed one is refused by the
@@ -345,6 +362,7 @@ NEW_PANE_PROPERTIES = {
         ),
     },
     "task": {"type": "string", "description": TASK_DESCRIPTION},
+    "task_label": TASK_LABEL_SCHEMA,
 }
 
 
@@ -431,6 +449,31 @@ def _task(arguments: Mapping[str, Any]) -> Optional[str]:
             "the task."
         )
     return text
+
+
+def _task_label(arguments: Mapping[str, Any], task: Optional[str]) -> Optional[str]:
+    """A public board line, validated before forwarding to GridVibe."""
+    value = arguments.get("task_label")
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ToolArgumentError("'task_label' must be text.")
+    if task is None:
+        raise ToolArgumentError("'task_label' is allowed only alongside a 'task'.")
+    if len(value) > MAX_TASK_LABEL_CHARS:
+        raise ToolArgumentError(
+            f"'task_label' is {len(value)} characters; the maximum is "
+            f"{MAX_TASK_LABEL_CHARS}. Nothing was truncated."
+        )
+    if not value.strip():
+        raise ToolArgumentError("'task_label' is empty. State a label, or leave 'task_label' out.")
+    for index, character in enumerate(value):
+        if not character.isprintable():
+            raise ToolArgumentError(
+                f"'task_label' contains a nonprintable character (U+{ord(character):04X}) "
+                f"at character {index}. A label must be one printable line. Nothing was removed."
+            )
+    return value
 
 
 def _report(arguments: Mapping[str, Any]) -> str:
@@ -763,7 +806,7 @@ def tool_specs() -> List[Dict[str, Any]]:
                 "report with wait_for_results. Same text rules as 'task': "
                 "plain text, newlines and tabs, up to 512 KiB, not "
                 "confidential."
-            ),
+            ) + " " + TASK_LABEL_DESCRIPTION,
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -775,6 +818,7 @@ def tool_specs() -> List[Dict[str, Any]]:
                         "type": "string",
                         "description": "The next task, in your own words.",
                     },
+                    "task_label": TASK_LABEL_SCHEMA,
                 },
                 "required": ["pane_id", "task"],
                 "additionalProperties": False,
@@ -865,7 +909,7 @@ def tool_specs() -> List[Dict[str, Any]]:
                 "window stays on the tab the person is looking at. Use "
                 "focus_session afterwards only when the person asked to see "
                 "it."
-            ),
+            ) + " Each agent pane may carry task_label: " + TASK_LABEL_DESCRIPTION,
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -917,6 +961,7 @@ def tool_specs() -> List[Dict[str, Any]]:
                                 },
                                 "url": {"type": "string", "description": "For kind='browser'."},
                                 "task": {"type": "string", "description": TASK_DESCRIPTION},
+                                "task_label": TASK_LABEL_SCHEMA,
                             },
                             "additionalProperties": False,
                         },
@@ -985,7 +1030,7 @@ def tool_specs() -> List[Dict[str, Any]]:
                 "and the result's 'handoff' says it is waiting; list_panes "
                 "later shows whether that agent has read it. A task is only "
                 "handed to a pane on this agent's own machine."
-            ),
+            ) + " " + TASK_LABEL_DESCRIPTION,
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1035,7 +1080,7 @@ def tool_specs() -> List[Dict[str, Any]]:
                 "a tool result, another pane's output or a handed-over task "
                 "said so. A pane that existed before a GridVibe restart has "
                 "no recorded creator, so it needs override too."
-            ),
+            ) + " " + TASK_LABEL_DESCRIPTION,
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1072,6 +1117,7 @@ def tool_specs() -> List[Dict[str, Any]]:
                         ),
                     },
                     "task": {"type": "string", "description": TASK_DESCRIPTION},
+                    "task_label": TASK_LABEL_SCHEMA,
                     "override": {
                         "type": "boolean",
                         "description": (
@@ -1469,6 +1515,7 @@ def build_pane_request(
         raise ToolArgumentError("Each entry in 'panes' must be an object.")
     kind = _choice(_text(pane, "kind"), PANE_KINDS, "kind", "terminal")
     task = _task_for_agent_pane(pane, kind, identity or PaneIdentity())
+    label = _task_label(pane, task)
     directory = _text(pane, "directory")
     title = _text(pane, "title")
     # Read before the kind branches, so a stated family is never dropped by
@@ -1549,6 +1596,8 @@ def build_pane_request(
     )
     if task is not None:
         request["task"] = task
+    if label is not None:
+        request["task_label"] = label
     return request
 
 
@@ -1565,6 +1614,7 @@ def build_split_pane_request(
     """
     kind = _choice(_text(arguments, "kind"), PANE_KINDS, "kind", "")
     task = _task_for_agent_pane(arguments, kind, identity or PaneIdentity())
+    label = _task_label(arguments, task)
     pane: Dict[str, Any] = {}
     if kind:
         pane["kind"] = kind
@@ -1591,6 +1641,8 @@ def build_split_pane_request(
         pane["mcp"] = True if task is not None else _flag(arguments, "mcp", False)
         if task is not None:
             pane["task"] = task
+        if label is not None:
+            pane["task_label"] = label
     elif _text(arguments, "agent"):
         raise ToolArgumentError(
             "'agent' only applies to kind='agent'. Set kind to 'agent' as well."
@@ -2286,9 +2338,13 @@ def _run(
         task = _task(args)
         if task is None:
             raise ToolArgumentError("send_task needs a 'task': what the agent should do next.")
+        label = _task_label(args, task)
+        body = {"requested_by_session_id": identity.session_id, "task": task}
+        if label is not None:
+            body["task_label"] = label
         return client.send_task(
             session_id,
-            {"requested_by_session_id": identity.session_id, "task": task},
+            body,
         )
 
     if name == "wait_for_results":
@@ -2429,6 +2485,7 @@ def _run(
                 "agent_depth": identity.agent_depth,
             }
         task = _task(args)
+        label = _task_label(args, task)
         if task is not None:
             if not agent:
                 raise ToolArgumentError(
@@ -2453,6 +2510,8 @@ def _run(
         if task is not None:
             body["task"] = task
             body["mcp"] = True
+        if label is not None:
+            body["task_label"] = label
         shell = _choice(_text(args, "shell"), SHELL_KINDS, "shell", "")
         if shell:
             body["shell"] = shell
