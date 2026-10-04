@@ -268,7 +268,8 @@
            onto a pane that is not a browser pane. Positional tab ids keep the
            rendered frame ids matching whichever object ends up live. */
         const livePane = browserPaneAt(index);
-        const pane = livePane || browserEnsureTabState({ _session: session }, session);
+        const pane = livePane?._session?.session_id === session?.session_id
+            ? livePane : browserEnsureTabState({ _session: session }, session);
         const active = browserActiveTab(pane);
         const activeUrl = active ? active.url : getBrowserSessionUrl(session);
         return `

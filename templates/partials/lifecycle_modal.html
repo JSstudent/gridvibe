@@ -12,6 +12,7 @@
         </div>
         <div id="lifecycleStatus" class="lifecycle-status modal-copy" role="status" aria-live="polite"></div>
         <div id="lifecycleChoices" class="lifecycle-choice-list">
+            <button id="lifecycleSynchronize" class="{{ lifecycle_button_class }}" type="button" hidden>Synchronize panes &amp; retry save</button>
             <button class="{{ lifecycle_button_class }}" type="button" data-lifecycle-save="none"></button>
             <button class="{{ lifecycle_button_class }}" type="button" data-lifecycle-save="workspaces"></button>
             <button class="{{ lifecycle_primary_class }}" type="button" data-lifecycle-save="sessions+workspaces"></button>

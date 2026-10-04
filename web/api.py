@@ -938,6 +938,9 @@ def prepare_application_lifecycle():
     save = str(data.get("save") or "").strip()
     if action not in LIFECYCLE_ACTIONS or save not in LIFECYCLE_SAVE_CHOICES:
         return jsonify({"error": "Unknown lifecycle action or save choice"}), 400
+    synchronize = data.get("synchronize", False)
+    if not isinstance(synchronize, bool):
+        return jsonify({"error": "'synchronize' must be a boolean"}), 400
 
     workspace_metadata = {}
     if save != LIFECYCLE_SAVE_NONE:
@@ -948,7 +951,11 @@ def prepare_application_lifecycle():
             live_snapshot,
             lambda workspace_id, request_id: socketio.emit(
                 "lifecycle_flush_requested",
-                {"request_id": request_id, "workspace_id": workspace_id},
+                {
+                    "request_id": request_id,
+                    "workspace_id": workspace_id,
+                    "synchronize": synchronize,
+                },
                 room=workspace_room(workspace_id),
             ),
         )

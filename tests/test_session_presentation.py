@@ -332,6 +332,10 @@ class GroupPresentationTransactionTestCase(unittest.TestCase):
         unknown["panes"][0]["session_id"] = "unknown"
         response, status = apply_group_presentation(self.manager, unknown)
         self.assertEqual(status, 400, response)
+        self.assertEqual(response["code"], "pane_membership_mismatch")
+        self.assertEqual(response["workspace_id"], "default")
+        self.assertEqual(response["group_id"], self.group.group_id)
+        self.assertEqual(set(response["pane_order"]), {self.browser.session_id, self.explorer.session_id})
         self.assertEqual(self.group.presentation_revision, 0)
 
 
@@ -1019,6 +1023,61 @@ class PresentationControllerTestCase(_NodeHarnessMixin, unittest.TestCase):
         self.assertFalse(result["rebasedWhileInFlight"])
         self.assertTrue(result["rebasedWhenIdle"])
         self.assertEqual(result["revision"], 40)
+
+    def test_membership_errors_fail_once_with_structured_recovery_context(self):
+        result = self._run_node(r"""
+            const { createPresentationController } = require(process.argv[2]);
+            let calls = 0;
+            const controller = createPresentationController({
+                describeGroup: () => ({ workspaceId: 'default', groupId: 'g', revision: 0,
+                    panes: [{ sessionId: 'old', mode: 'terminal' }] }),
+                sendGroup: () => { calls += 1; return { status: 400,
+                    code: 'pane_membership_mismatch', group_id: 'g', error: 'membership changed' }; }
+            });
+            (async () => {
+                let code;
+                try { await controller.flush(['g']); } catch (error) { code = error.result.code; }
+                console.log(JSON.stringify({ calls, code }));
+            })().catch(error => { console.error(error); process.exit(1); });
+        """)
+        self.assertEqual(result, {"calls": 1, "code": "pane_membership_mismatch"})
+
+    def test_revision_conflicts_cannot_keep_the_flush_waiting_forever(self):
+        result = self._run_node(r"""
+            const { createPresentationQueue } = require(process.argv[2]);
+            let calls = 0;
+            const queue = createPresentationQueue({ send: () => {
+                calls += 1; return { status: 409, presentation_revision: calls };
+            } });
+            (async () => {
+                queue.enqueue('g', { expected_revision: 0 });
+                let failed = false;
+                try { await queue.flush('g'); } catch (_) { failed = true; }
+                console.log(JSON.stringify({ calls, failed }));
+            })().catch(error => { console.error(error); process.exit(1); });
+        """)
+        self.assertEqual(result, {"calls": 3, "failed": True})
+
+    def test_a_forgotten_generation_cannot_send_or_repair_a_stale_snapshot(self):
+        result = self._run_node(r"""
+            const { createPresentationQueue } = require(process.argv[2]);
+            let calls = 0, errors = 0, release;
+            const queue = createPresentationQueue({
+                send: () => { calls += 1; return new Promise(resolve => { release = resolve; }); },
+                onError: () => { errors += 1; queue.enqueue('g', { stale: true }); }
+            });
+            (async () => {
+                queue.enqueue('g', { first: true });
+                await new Promise(resolve => setImmediate(resolve));
+                queue.enqueue('g', { stale: true });
+                const pending = queue.flush('g').catch(() => 'superseded');
+                queue.forget('g');
+                release({ status: 400, error: 'old failure' });
+                await new Promise(resolve => setImmediate(resolve));
+                console.log(JSON.stringify({ calls, errors, pending: await pending }));
+            })().catch(error => { console.error(error); process.exit(1); });
+        """)
+        self.assertEqual(result, {"calls": 1, "errors": 0, "pending": "superseded"})
 
 
 if __name__ == "__main__":

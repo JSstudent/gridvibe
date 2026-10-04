@@ -5,6 +5,144 @@ Closed issues are moved here from [`docs/testing_issues.md`](../../testing_issue
 
 ## Closed Issues
 
+### Issue ID: ISSUE-2026-063
+- Title: Pane ID mismatch blocks Save & Close without a synchronization action
+- Priority: High
+- Status: Closed
+- Closed: 2026-10-04
+- Area: `sessions/manager.py`, `web/static/js/terminals.js`, `web/static/js/session-persistence.js`, `web/static/js/lifecycle.js`, `web/lifecycle.py`
+- Assignee: Unassigned
+- Tags: `session`, `workspace`, `ui`, `socketio`, `reliability`, `tests`
+- Reported: 2026-10-04
+
+Description:
+The user reports that Save & Close is blocked by a pane identity mismatch.
+The close dialog offers another save attempt or continuing without saving,
+but provides no explicit way to synchronize the pane list and save the
+currently open workspace. The validation and failed-save close gate are
+confirmed in code. The operation that originally caused the user's frontend
+and backend pane lists to diverge remains unverified; pane splits, closes,
+replacements, cached tabs and concurrent updates are investigation targets,
+not established causes.
+
+Steps to reproduce:
+1. Open GridVibe with a live session group containing at least two panes.
+2. In a controlled frontend/backend integration harness, retain the group's
+   old frontend pane list while removing or replacing one pane in the backend.
+   Use the current presentation revision so the identity check is reached.
+   This creates the mismatch deterministically; the user's live trigger is
+   still unknown, and this harness reproduction has not yet been executed.
+3. Request application close and choose Save open workspaces & close or
+   Save open sessions + workspaces & close, causing the presentation flush.
+4. Observe the pane ID error and check the dialog for a synchronization action.
+   Retry while the mismatch persists and compare with continuing without saving.
+
+Expected behavior:
+The failure dialog offers an explicit Synchronize panes & retry save action.
+It reconciles the displayed and cached groups with the actual live sessions,
+preserves current presentation for surviving panes, shows any membership
+changes, and retries the originally selected save-and-close option. Closing
+proceeds only after the requested save succeeds. All open groups/workspaces
+remain covered, including background tabs and other participating windows.
+
+Actual behavior / logs:
+User-reported message on 2026-10-04:
+
+```text
+Pane ids do not match the live session group Choose an option to try again or continue without saving.
+```
+
+- `SessionManager.apply_group_presentation()` compares `set(pane_order)` with
+  the group's live session IDs and returns `outcome: invalid` with the first
+  sentence above when they differ. It rejects the update before mutation.
+- `flushLivePresentation()` sends presentation for the visible and cached
+  groups; `attachFlushResponder()` reports a failed flush acknowledgement
+  when this operation fails.
+- `lifecycle.js` displays the second sentence through `showFailure()` and
+  retains the dialog. Its choices are no save, workspaces, and sessions plus
+  workspaces, with a separate cancel action; there is no synchronize button.
+- Keeping the application open after a failed requested save is intentional.
+  The defect is the missing recovery path. This report confirms the code
+  behavior and records the user's live symptom; no independent live UI
+  reproduction or attribution of the original mismatch has been performed.
+
+### Proposed solution:
+Add an in-page recovery action to the lifecycle failure dialog for a structured
+pane-membership mismatch, rather than matching the human-readable error text.
+Return bounded mismatch context identifying the affected workspace/group and
+the current membership/revision. Investigate how the stale pane list arose
+and fix that synchronization path as well as adding recovery.
+
+Reuse the owning window's group/session refresh and the existing presentation
+queue to reconcile visible and cached views. Capture current presentation
+before refreshing, retain it only for matching live pane identities and modes,
+discard stale writes for removed/replaced panes, and initialize newly discovered
+live panes from their valid server state. Reconcile order and split geometry
+to the resulting complete live membership. Surface added/removed panes to the
+user; never silently omit a still-live pane just because its DOM view is absent,
+close running sessions, or treat a reused grid slot as the same pane. Preserve
+surviving terminals, explorer drafts, scroll and focus during recovery.
+
+After reconciliation, build a fresh whole-group snapshot at the current revision,
+flush it through the shared barrier, and retry the user's selected save scope.
+Bound recovery attempts and retain an actionable failure if membership changes
+again, a group moves/disappears, another window fails, or persistence fails.
+Preserve exact membership validation, revision checks, window ownership, manual
+save semantics and the successful-save requirement for exit. Saving the current
+open state must not become a bypass that captures stale backend presentation.
+No durable schema migration is expected; update lifecycle/presentation contracts
+and user-facing documentation when the behavior ships.
+
+Add focused backend and behavioral Node/integration coverage for removed,
+added and replaced panes, stale cached groups, revision conflicts, changes
+during synchronization, repeated retries, multiple windows, both save scopes,
+and persistence failure after recovery. Assert that current presentation for
+surviving panes is saved, all live panes are accounted for, failed saves leave
+the app open, and successful synchronization permits Save & Close. Verify the
+reported sequence in browser and native modes once its live trigger is known.
+
+Resolution:
+Verified and fixed on 2026-10-04. A confirmed synchronization gap was the
+background group refresh adopting a current presentation revision while its
+cached pane membership remained stale. Cached membership now reconciles on
+refresh, and visible membership changes retain surviving pane objects/cards
+instead of rebuilding every sibling. Surviving callbacks keep their original
+slots; live counts ignore vacant slots and additions use fresh objects. Current
+visual order, explorer drafts, scroll, terminal buffers and focus survive.
+Removal geometry reuses the close reducer, while additions use complete live
+geometry. New cached browser controls bind after attachment and browser rendering
+checks session identity before borrowing tab state.
+
+The manager returns bounded structured pane_membership_mismatch context before
+mutation. That code reaches the shared lifecycle dialog through the presentation
+queue and authenticated flush acknowledgement. Synchronize panes & retry save
+retains the selected save scope and asks every participating window to settle
+old writes, refetch its visible/cached groups, reconcile, report added/removed
+counts, and flush fresh whole-group presentation at the current revision. Each
+click makes one synchronization attempt within a 3.5-second window budget.
+Retired queue generations cannot send or repair stale writes; repeated revision
+conflicts are bounded. Exact membership validation, revisions, window ownership,
+manual-save semantics and the successful-save requirement for exit remain intact.
+There is no durable schema migration.
+
+Validation: 489 focused and adjacent tests passed, including the new
+`tests/test_pane_synchronization.py` Flask/Node integration reproduction and
+behavioral coverage in `tests/test_lifecycle.py`,
+`tests/test_session_presentation.py` and `tests/test_session_view_cache.py`.
+Removed, added and replaced panes, stale background caches, repeated recovery,
+retained drafts/scroll/focus, both save scopes, multiple responding windows,
+revision conflicts, discarded queue generations and persistence failure after
+recovery are covered. Failed synchronization/window acknowledgements or saves
+leave the application open without a teardown decision; successful recovery
+captures every live pane and the survivor's current explorer tabs. Adjacent
+split, close, room-join and presentation/save tests passed, as did the
+repository-wide Ruff linter.
+
+The user's original live trigger remains unconfirmed. The controlled stale-list
+reproduction and shared browser/native recovery code are verified; a physical
+browser/native reproduction of the original trigger has not been performed.
+
+
 ### Issue ID: ISSUE-2026-061
 - Title: External file creation in ignored folders leaves explorer listings stale
 - Priority: Medium

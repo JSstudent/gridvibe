@@ -197,6 +197,11 @@ Window chrome takes the same path through `POST /api/workspace-presentation`.
   nothing is queued or in flight.
 - The payload carries **no** launch, credential, or status field. The route
   rejects them, and so should the client that builds them.
+- An identity mismatch returns `code: pane_membership_mismatch` with bounded
+  workspace/group membership and revision context, before mutation. Visible and
+  cached view reconciliation retains surviving objects and their callback slots;
+  live counts ignore vacant slots. New panes use their server state and their
+  own objects. Removed queue generations cannot publish or retry stale snapshots.
 
 ---
 
@@ -248,6 +253,17 @@ hear. Every explicit save and the exit transaction therefore flush first.
    (`window.gridvibeFlushLivePresentation`) and answers `lifecycle_flush_ack`
    with its chrome metadata.
 4. Only then is the capture taken.
+
+A membership failure propagates its structured code through the acknowledgement
+and offers **Synchronize panes & retry save** in the close/restart dialog. The
+retry keeps the original save choice and sends `synchronize: true` through this
+same room-scoped handshake. Every window reconciles its visible and cached groups
+before flushing, reports membership changes, and retains current presentation,
+drafts, focus and scroll for surviving identities and modes. Removals reuse close
+geometry; additions use complete live geometry. One bounded synchronization is
+attempted per click; group movement/disappearance, concurrent changes, a failed
+window or a failed durable write keeps the application open. This adds no durable
+field or schema migration.
 
 Failure categories are distinct and reported as such: `client_stale` (a socket
 that died while the loss is still fresh), `client_timeout`, `client_emit`,

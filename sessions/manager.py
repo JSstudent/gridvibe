@@ -16,6 +16,7 @@ from web.session_presentation import (
     DEFAULT_EXPLORER_MD_FONT,
     DEFAULT_EXPLORER_MD_PRESET,
     DEFAULT_EXPLORER_SOURCE_FONT,
+    MAX_STORED_SESSION_PANES,
     PANE_PRESENTATION_FIELDS,
     deep_copy_presentation,
     normalize_agent_sidebar_scale,
@@ -1499,7 +1500,12 @@ class SessionManager:
             if set(pane_order) != set(current_sessions):
                 return {
                     "outcome": "invalid",
+                    "code": "pane_membership_mismatch",
                     "error": "Pane ids do not match the live session group",
+                    "workspace_id": workspace_id,
+                    "group_id": group_id,
+                    "presentation_revision": group.presentation_revision,
+                    "pane_order": list(current_sessions)[:MAX_STORED_SESSION_PANES],
                 }
             if set(pane_updates) != set(current_sessions):
                 return {

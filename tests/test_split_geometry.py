@@ -855,6 +855,7 @@ def _js_const_source(script: str, *names: str) -> str:
 # and a case that reads one back are talking about the same grid.
 RESTORE_SOURCE = "\n\n".join(
     [
+        f"var livePaneCount = require({json.dumps(str(TERMINALS_JS.with_name('session-persistence.js')))}).livePaneCount;",
         _js_function_source(SHARED_JS.read_text(encoding="utf-8"), "getGridMetrics"),
         _js_const_source(
             TERMINALS_JS.read_text(encoding="utf-8"),

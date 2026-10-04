@@ -33,6 +33,7 @@
                     scheduled: false,
                     timer: null,
                     revision: null,
+                    conflicts: 0,
                     waiters: []
                 });
             }
@@ -105,6 +106,7 @@
                     server: cloneSnapshot(serverSnapshot)
                 });
             }
+            if (groups.get(groupId) !== state) return;
             if (rebased !== undefined && rebased !== null) {
                 if (state.revision !== null && Object.prototype.hasOwnProperty.call(rebased, 'expected_revision')) {
                     rebased.expected_revision = state.revision;
@@ -118,6 +120,7 @@
         }
 
         async function drain(groupId, state) {
+            if (groups.get(groupId) !== state) return;
             if (state.inFlight || state.pending === undefined) {
                 settleWaiters(state);
                 return;
@@ -137,12 +140,20 @@
             let failure = null;
             try {
                 const response = await responsePayload(await task);
+                if (groups.get(groupId) !== state) return;
                 if (response.status === 409) {
+                    state.conflicts += 1;
+                    if (state.conflicts > MAX_CONSECUTIVE_REPAIRS) {
+                        throw new Error('Presentation keeps changing. Try saving again.');
+                    }
                     await handleConflict(groupId, state, requestSnapshot, response);
                 } else if (response.status >= 400) {
                     const message = response.body && response.body.error;
-                    throw new Error(message || `Presentation update failed (${response.status})`);
+                    const error = new Error(message || `Presentation update failed (${response.status})`);
+                    error.result = response.body;
+                    throw error;
                 } else {
+                    state.conflicts = 0;
                     if (
                         response.body
                         && Number.isInteger(response.body.presentation_revision)
@@ -155,6 +166,7 @@
                     }
                 }
             } catch (error) {
+                if (groups.get(groupId) !== state) return;
                 failure = error;
                 if (typeof options.onError === 'function') {
                     options.onError(groupId, error, cloneSnapshot(requestSnapshot));
@@ -163,6 +175,7 @@
                 state.inFlight = null;
             }
 
+            if (groups.get(groupId) !== state) return;
             if (state.pending !== undefined) {
                 schedule(groupId, state, false);
             }
@@ -171,6 +184,7 @@
 
         function enqueue(groupId, snapshot, enqueueOptions) {
             const [key, state] = stateFor(groupId);
+            if (isIdle(state)) state.conflicts = 0;
             state.latest = cloneSnapshot(snapshot);
             state.pending = cloneSnapshot(snapshot);
             const continuous = Boolean(enqueueOptions && enqueueOptions.continuous);
@@ -220,7 +234,9 @@
             const state = groups.get(key);
             if (!state) return false;
             if (state.timer) clearTimeout(state.timer);
-            state.waiters.splice(0).forEach(waiter => waiter.resolve(undefined));
+            state.waiters.splice(0).forEach(waiter => waiter.reject(
+                new Error('Pane presentation changed during saving. Retry saving.')
+            ));
             groups.delete(key);
             return true;
         }
@@ -411,6 +427,49 @@
        asking the server to capture a snapshot. */
     const MAX_CONSECUTIVE_REPAIRS = 2;
 
+    function livePaneCount(panes) {
+        return (panes || []).filter(Boolean).length;
+    }
+
+    /* Slots are callback addresses, not visual order. Leave surviving panes at
+       their original slots so their terminals, editor DOM and async owners stay
+       intact. Removed slots can be reused only by newly created pane objects. */
+    function planPaneSynchronization(ids, panes, sessions) {
+        const live = new Map();
+        for (const session of sessions || []) {
+            if (!session?.session_id || live.has(session.session_id)) {
+                throw new Error('The live pane list is invalid. Retry synchronization.');
+            }
+            live.set(session.session_id, session);
+        }
+        const kind = session => ['explorer', 'browser'].includes(session?.startup_mode)
+            ? session.startup_mode : 'terminal';
+        const retained = new Map();
+        const removed = [];
+        (panes || []).forEach((pane, slot) => {
+            const session = live.get(ids[slot]);
+            if (session && kind(session) === (pane._paneType || kind(pane._session))
+                && (kind(session) !== 'explorer'
+                    || session.explorer_root_directory === pane._session?.explorer_root_directory)) {
+                retained.set(session.session_id, slot);
+            } else {
+                removed.push({ slot, sessionId: ids[slot] });
+            }
+        });
+        const occupied = new Set(retained.values());
+        const entries = Array.from(live.values()).map(session => {
+            const reused = retained.has(session.session_id);
+            let slot = retained.get(session.session_id);
+            if (!reused) {
+                slot = 0;
+                while (occupied.has(slot)) slot += 1;
+                occupied.add(slot);
+            }
+            return { session, slot, reused };
+        });
+        return { entries, removed };
+    }
+
     function createPresentationController(options) {
         const opts = options || {};
         if (typeof opts.describeGroup !== 'function') {
@@ -450,6 +509,7 @@
             onAccepted: groupId => repairs.delete(groupId),
             onError: (groupId, error) => {
                 report('group', error, groupId);
+                if (error.result?.code === 'pane_membership_mismatch') return;
                 repair('group', groupId, options => noteGroupChange(groupId, options));
             }
         });
@@ -556,6 +616,8 @@
         buildGroupPresentationPayload,
         buildWorkspacePresentationPayload,
         CONTINUOUS_UPDATE_FLOOR_MS,
-        MAX_CONSECUTIVE_REPAIRS
+        MAX_CONSECUTIVE_REPAIRS,
+        livePaneCount,
+        planPaneSynchronization
     };
 }));

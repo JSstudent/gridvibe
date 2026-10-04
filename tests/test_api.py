@@ -18126,26 +18126,25 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
     def test_terminals_joins_rooms_for_every_pane(self):
         """Finding 1.1 step 3 — room-scoped session_status requires explorer
         and browser panes to join their session rooms like terminal panes."""
+        from tests.test_pane_connecting_overlay import _js_function_source
+        from tests.test_session_view_cache import SessionViewCacheTestCase
+
         terminals = self.client.get("/static/js/terminals.js").get_data(as_text=True)
         # Every path that puts a live session on screen joins its room, whatever
         # kind of pane it is — the initial load, a pane replaced in place, and a
         # pane created by a split.
-        for function_name in (
-            "function replacePaneWithTerminal(index, session) {",
-            # Named without its parameter list: the split gained a third
-            # parameter describing the pane it creates, and this test is about
-            # the room join inside it, not about the signature.
-            "async function splitTerminalPane(",
-        ):
+        for function_name in ("replacePaneWithTerminal", "splitTerminalPane"):
             with self.subTest(function=function_name):
-                body = terminals[terminals.index(function_name):]
-                self.assertIn("socket.emit('join_session'", body[:body.index("\n    }\n")])
-        # The initial-load join loop must not filter sessions by pane type.
-        load_join = terminals[terminals.index("data.sessions.forEach(session => {"):]
-        load_join = load_join[:load_join.index("});")]
-        self.assertNotIn("isExplorerSession", load_join)
-        self.assertNotIn("isBrowserSession", load_join)
-        self.assertIn("socket.emit('join_session'", load_join)
+                self.assertIn("socket.emit('join_session'", _js_function_source(terminals, function_name))
+        result = SessionViewCacheTestCase()._run_node("""
+            gridBuilt = false;
+            visibleGroupId = '';
+            SESSIONS = ['terminal', 'explorer', 'browser'].map((mode, index) =>
+                session(index, 'connected', { startup_mode: mode }));
+            await initialLoad();
+            report({ rooms: calls.rooms });
+        """)
+        self.assertEqual(result["rooms"], [["join_session", f"s{index}"] for index in range(1, 4)])
 
     def test_terminals_monster_functions_are_decomposed(self):
         """Finding 6.5 — buildGrid/_startVoice delegate to focused helpers.

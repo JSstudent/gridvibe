@@ -957,6 +957,19 @@ unless the task explicitly changes this contract.
   Reject launch/credential/status fields. The client queue keeps one write in
   flight, coalesces latest state, applies a one-second floor during continuous
   changes, rebases conflicts, bounds repair and supplies the flush barrier.
+- Membership refusal carries `code: pane_membership_mismatch`, workspace/group
+  ids, current revision and bounded live ids; exact membership validation remains
+  mandatory. Reconciliation retains matching pane identities and modes at their
+  original callback slots. Slot arrays may contain holes: live counts exclude
+  them, reads locate panes by session id, and new panes reuse vacant slots with
+  new objects. Surviving cards, terminal buffers, editor drafts and scroll stay
+  intact. Surviving visual order stays local; removals use the close geometry
+  reducer, and additions use complete live geometry. Background group refreshes
+  reconcile cached membership before a fresh revision can accompany stale cards.
+  New cached controls bind only after attachment; browser rendering checks
+  session identity before borrowing an existing pane's tab state. Retired queue
+  generations cannot send, accept revisions or schedule repairs, and repeated
+  revision conflicts fail within the queue's repair bound.
 - `agent_sidebar_open` and `agent_sidebar_scale` are optional workspace chrome
   fields: omitting either leaves that dimension alone. The scale is an integer
   percent from 100 to 200, normalized in `web/session_presentation.py` beside
@@ -1024,6 +1037,16 @@ unless the task explicitly changes this contract.
   save reusable presets before one all-live runtime capture, report partial
   failures, and require the successful one-use decision for browser/native teardown.
   A failed requested save leaves the app open unless the user chooses no-save.
+- A structured membership failure offers **Synchronize panes & retry save**.
+  The selected save scope is retained; its retry sets `synchronize: true` on the
+  existing lifecycle flush request to every participating window. Each window
+  settles old group writes, refetches visible and cached groups, checks ownership,
+  reconciles membership, reports added/removed counts and flushes fresh whole-group
+  presentation at the current revisions. Synchronization has a 3.5-second window
+  budget and one attempt per click. A missing/moved group or missing view, another
+  membership change, an unreachable window or a persistence failure remains an
+  actionable refusal; no teardown decision is issued before the requested save
+  succeeds. Browser and native close/restart share this recovery path.
 - Window ids stay in per-window `sessionStorage`; reload replaces its record.
   Registrations are bounded. Fresh disconnection is `client_stale`; past a bounded
   grace it is departed. A drop during flush resolves immediately; deliberate leave
