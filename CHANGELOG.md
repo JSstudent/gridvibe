@@ -4,6 +4,8 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+## 1.15.1 - 2026-10-05
+
 - **(fix) Save and close can recover from an outdated pane list.** The failure dialog offers **Synchronize panes & retry save** for a structured membership mismatch, then retries the chosen save scope across participating windows. Visible and cached tabs retain surviving pane objects, terminal state, explorer drafts, scroll and focus while accounting for added and removed live panes. Background membership refreshes now reconcile their cached views before saving. Failed synchronization or persistence keeps the app open. The rules live in [Presentation persistence](docs/engineering_contracts.md#presentation-persistence) and [Workspace lifecycle and windows](docs/engineering_contracts.md#workspace-lifecycle-and-windows).
 
 - **(fix) Files lists discover external changes in ignored folders and non-Git roots.** Directory Preview and the expanded Files tree now discover external creation, deletion and rename independently of Git pin/Follow. Bounded checks preserve pending changes through interaction and failures, reject stale responses, and preserve scroll, filters, tabs and editor drafts. Large or slow directories remain fully browsable and need manual membership refresh. The rule lives in [Explorer filesystem and transfers](docs/engineering_contracts.md#explorer-filesystem-and-transfers).
