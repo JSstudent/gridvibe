@@ -61,6 +61,8 @@ async function run({ previous, active, groups }) {
         activeGroupId: active,
         visibleGroupId: active,
         sessionGroups: [],
+        paneSynchronization: null,
+        cachedGroupViews: new Map(),
         fetch: async () => ({ ok: true, json: async () => ({ groups }) }),
         handleWorkspaceGone: async () => {},
         applyTopbarVisibility: () => {},

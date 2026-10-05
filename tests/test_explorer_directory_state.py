@@ -321,7 +321,8 @@ class DirectoryStateRouteTestCase(unittest.TestCase):
         self.addCleanup(self.temp_dir.cleanup)
 
     def _root(self):
-        return Path(self.temp_dir.name)
+        # The explorer resolves its root; a Windows 8.3 temp name must not differ from it.
+        return Path(self.temp_dir.name).resolve()
 
     def _session(self, root):
         response = self.client.post(

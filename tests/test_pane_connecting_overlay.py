@@ -173,6 +173,7 @@ var sessionGroups = [];
 var knownGroupIds = [];
 var socket = null;
 var cachedGroupViews = new Map();
+var backgroundRefreshGenerations = new Map();
 var SESSIONS = [];
 
 /* ── Everything the two load paths call and this test does not decide ── */

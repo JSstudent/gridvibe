@@ -21,6 +21,7 @@ class ResizeBridgeTestCase(unittest.TestCase):
 const vm = require('vm');
 const geometry = require(process.argv[1]);
 const bridgeSource = process.argv[2];
+const persistence = require(process.argv[3]);
 const results = {};
 async function run(kind) {
     const events = [];
@@ -82,6 +83,7 @@ async function run(kind) {
         redrawAttachedTerminals: () => {events.push('redraw');},
         affectedResizeIndices: () => [0,1],
         getGroupById: () => group,
+        livePaneCount: persistence.livePaneCount,
         console
     };
     vm.runInNewContext(bridgeSource, context);
@@ -103,7 +105,8 @@ async function run(kind) {
 """
         result = subprocess.run(
             [NODE, "-e", script,
-             str(ROOT / "web/static/js/split-geometry.js"), bridge],
+             str(ROOT / "web/static/js/split-geometry.js"), bridge,
+             str(ROOT / "web/static/js/session-persistence.js")],
             capture_output=True, text=True, timeout=20,
         )
         self.assertEqual(result.returncode, 0, result.stderr)

@@ -577,6 +577,7 @@
     const lifecycleWindowId = getLifecycleWindowId();
     let resizeObservers = [];
     let cachedGroupViews = new Map();
+    const backgroundRefreshGenerations = new Map();
     let sessionRouteMap = new Map();
     let visibleGroupId = '';
     let nativeFullscreen = false;
@@ -1427,6 +1428,7 @@
         (cached.sessionIds || []).forEach(cancelExplorerFilesystemUiForSession);
         (cached.sessionIds || []).forEach(forgetExplorerSessionMarkdownAppearance);
         workspaceSaveTargets.delete(groupId);
+        backgroundRefreshGenerations.delete(groupId);
         clearFitTimers(cached.terminals || []);
         disconnectObservers(cached.resizeObservers || []);
         if (socket) {
@@ -9601,10 +9603,17 @@
             const cached = cachedGroupViews.get(group.group_id);
             if (!cached || !Array.isArray(group.pane_order) || backgroundTabHeld(group.group_id)
                 || hasMatchingSessionIds(cached.sessionIds, group.pane_order.map(session_id => ({ session_id })))) continue;
+            /* The cache is mutated in place, so identity alone cannot tell an
+               older overlapping refresh from the newest one; only the latest
+               request for a group may apply its membership. */
+            const generation = (backgroundRefreshGenerations.get(group.group_id) || 0) + 1;
+            backgroundRefreshGenerations.set(group.group_id, generation);
             await presentationController()?.settleGroup(group.group_id).catch(() => {});
             const response = await fetch(getSessionApiPath(group.group_id));
             const record = await response.json();
-            if (!response.ok || !record.group || cachedGroupViews.get(group.group_id) !== cached) continue;
+            if (!response.ok || !record.group
+                || backgroundRefreshGenerations.get(group.group_id) !== generation
+                || cachedGroupViews.get(group.group_id) !== cached) continue;
             presentationController()?.forgetGroup(group.group_id);
             synchronizeGroupView(group.group_id, record);
             adoptSplitGroupRecord(record.group);
