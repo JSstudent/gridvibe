@@ -2566,6 +2566,9 @@
     }
 
     function synchronizeGroupView(groupId, data) {
+        /* Any older background read was issued against a membership this
+           synchronization is about to replace; it must not apply afterward. */
+        backgroundRefreshGenerations.set(groupId, (backgroundRefreshGenerations.get(groupId) || 0) + 1);
         const visible = groupId === visibleGroupId;
         const cached = visible ? null : cachedGroupViews.get(groupId);
         if (!visible && !cached) return { added: 0, removed: 0 };
@@ -2583,6 +2586,13 @@
         plan.entries.sort((a, b) => (rank.get(a.session.session_id) ?? Infinity)
             - (rank.get(b.session.session_id) ?? Infinity));
         let model = groupRecordModel(data.group, data.sessions.map(session => session.session_id));
+        /* Cards keep local order while the record's rectangles follow server
+           order; pair each rectangle with its pane by identity. */
+        const rectBySession = new Map(model.ids.map((id, index) => [id, model.rects[index]]));
+        model = {
+            ...model,
+            rects: plan.entries.map(entry => rectBySession.get(entry.session.session_id)),
+        };
         if (plan.entries.every(entry => rank.has(entry.session.session_id))) {
             const current = new Set(plan.entries.map(entry => entry.session.session_id));
             const reduced = window.GridVibeCloseGeometry.reduceCloseGeometry(
