@@ -123,6 +123,7 @@ from web.config import (  # noqa: F401 - compatibility re-exports
 )
 from web.dashboard import build_dashboard_snapshot
 from web.explorer import (  # noqa: F401 - some names re-exported for backwards compatibility
+    EXPLORER_DIRECTORY_STATE_MAX_ENTRIES,
     EXPLORER_FILE_PREVIEW_MAX_BYTES,
     ExplorerRouteError,
     _acquire_ssh_sftp,
@@ -173,6 +174,8 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _resolve_remote_explorer_candidate_path,
     _sftp_request_error_types,
     _SftpExplorerBackend,
+    directory_revision,
+    directory_state_payload,
     get_explorer_file_payload,
     get_explorer_file_preview_payload,
     get_explorer_file_state_payload,
@@ -935,6 +938,9 @@ def prepare_application_lifecycle():
     save = str(data.get("save") or "").strip()
     if action not in LIFECYCLE_ACTIONS or save not in LIFECYCLE_SAVE_CHOICES:
         return jsonify({"error": "Unknown lifecycle action or save choice"}), 400
+    synchronize = data.get("synchronize", False)
+    if not isinstance(synchronize, bool):
+        return jsonify({"error": "'synchronize' must be a boolean"}), 400
 
     workspace_metadata = {}
     if save != LIFECYCLE_SAVE_NONE:
@@ -945,7 +951,11 @@ def prepare_application_lifecycle():
             live_snapshot,
             lambda workspace_id, request_id: socketio.emit(
                 "lifecycle_flush_requested",
-                {"request_id": request_id, "workspace_id": workspace_id},
+                {
+                    "request_id": request_id,
+                    "workspace_id": workspace_id,
+                    "synchronize": synchronize,
+                },
                 room=workspace_room(workspace_id),
             ),
         )
@@ -1152,6 +1162,13 @@ def get_explorer_entries(session_id: str):
     def handler(backend: Any) -> Dict[str, Any]:
         root_path, current_path = backend.resolve_dir(requested_path)
         entries = backend.list_entries(root_path, current_path)
+        # Ordinary browsing stays complete. Only the cheap poll is bounded;
+        # oversized listings carry no token. Capture raw membership before Git
+        # decoration adds synthetic deleted entries.
+        revision = (
+            directory_revision(entries)
+            if len(entries) <= EXPLORER_DIRECTORY_STATE_MAX_ENTRIES else None
+        )
         git_context, git_statuses = _get_git_context(backend, root_path, current_path)
         _attach_git_status_to_entries(backend, root_path, git_context, git_statuses, entries)
         _append_deleted_git_entries(backend, root_path, current_path, git_context, git_statuses, entries)
@@ -1163,6 +1180,7 @@ def get_explorer_entries(session_id: str):
             "parent_path": backend.parent_explorer_path(root_path, current_path),
             "git": git_context,
             "entries": entries,
+            "directory_revision": revision,
         }
 
     return _explorer_route_response(session, handler)
@@ -1591,6 +1609,31 @@ def save_explorer_file(session_id: str):
         )
 
     return _explorer_route_response(session, handler)
+
+
+@app.route('/api/explorer/<session_id>/directory/state', methods=['GET'])
+def get_explorer_directory_state(session_id: str):
+    """Return a cheap, Git-independent change token for one browsed directory.
+
+    Polled by the filesystem change listener (explorer-git-watch.js) so a child
+    created, deleted or renamed outside GridVibe — an agent's output, an external
+    editor, anything inside a Git-ignored folder or a root with no repository —
+    shows up in the directory Preview and the expanded Files tree. One bounded
+    readdir, no Git, no file content: an unchanged directory costs one cheap
+    enumeration and nothing else.
+    """
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found", "code": "session_not_found"}), 404
+    requested_path = request.args.get("path", "")
+    known = request.args.get("known", "")
+
+    def handler(backend: Any) -> Dict[str, Any]:
+        state = directory_state_payload(backend, requested_path)
+        revision = state["revision"]
+        return {**state, "changed": bool(revision) and revision != known}
+
+    return _with_no_store(_explorer_route_response(session, handler))
 
 
 @app.route('/api/explorer/<session_id>/file/state', methods=['GET'])

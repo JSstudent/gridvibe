@@ -577,6 +577,7 @@
     const lifecycleWindowId = getLifecycleWindowId();
     let resizeObservers = [];
     let cachedGroupViews = new Map();
+    const backgroundRefreshGenerations = new Map();
     let sessionRouteMap = new Map();
     let visibleGroupId = '';
     let nativeFullscreen = false;
@@ -1232,7 +1233,7 @@
 
     function setCurrentWorkspaceLabel(label) {
         currentWorkspaceLabel = String(label || '').trim();
-        updateSessionChrome(terminals.length);
+        updateSessionChrome(livePaneCount(terminals));
     }
 
     function updateSessionChrome(count, groupId = activeGroupId) {
@@ -1258,12 +1259,12 @@
        confirmation handing the line back after its timer) can never disagree
        with what is actually on screen. */
     function renderSessionLine() {
-        if (!terminals.length) {
+        if (!livePaneCount(terminals)) {
             document.getElementById('sessionLabel').textContent =
                 sessionGroups.length ? 'No terminals in this session' : 'No sessions';
             return;
         }
-        updateSessionChrome(terminals.length);
+        updateSessionChrome(livePaneCount(terminals));
     }
 
     function cacheVisibleGroupView(groupId = visibleGroupId) {
@@ -1344,7 +1345,7 @@
             || !hasPaneCards(cached.fragment, cached.terminals)
             || !Array.isArray(cached.sessionIds)
             || cached.sessionIds.length !== cached.terminals.length
-            || !Array.from(cached.sessionIds).every(Boolean)) {
+            || cached.terminals.some((pane, slot) => !cached.sessionIds[slot])) {
             return false;
         }
 
@@ -1379,6 +1380,12 @@
 
         terminals = cached.terminals || [];
         sessionIds = cached.sessionIds || [];
+        terminals.forEach((pane, slot) => {
+            if (pane?._synchronizationNeedsControls) {
+                wirePaneControls(document.getElementById(`tc-${slot}`), slot);
+                delete pane._synchronizationNeedsControls;
+            }
+        });
         const hasLocalSplitLayout = gridLayoutClass(cached.className) === 'layout-split-local';
         splitSlotRects = hasLocalSplitLayout
             ? cloneSplitSlotRects(cached.splitSlotRects)
@@ -1389,9 +1396,9 @@
         splitRowWeights = hasLocalSplitLayout
             ? cloneSplitTrackWeights(cached.splitRowWeights)
             : null;
-        originalSplitSlotCount = Number(cached.originalSplitSlotCount || terminals.length || 0);
+        originalSplitSlotCount = Number(cached.originalSplitSlotCount || livePaneCount(terminals) || 0);
         visibleGroupId = groupId;
-        gridBuilt = terminals.length > 0;
+        gridBuilt = livePaneCount(terminals) > 0;
         terminals.forEach(terminal => {
             if (terminal) {
                 terminal._fitReady = false;
@@ -1421,6 +1428,7 @@
         (cached.sessionIds || []).forEach(cancelExplorerFilesystemUiForSession);
         (cached.sessionIds || []).forEach(forgetExplorerSessionMarkdownAppearance);
         workspaceSaveTargets.delete(groupId);
+        backgroundRefreshGenerations.delete(groupId);
         clearFitTimers(cached.terminals || []);
         disconnectObservers(cached.resizeObservers || []);
         if (socket) {
@@ -2368,16 +2376,16 @@
             const rects = cloneSplitSlotRects(
                 gridLayoutClass(grid?.className) === 'layout-split-local'
                     ? ensureSplitSlotRects()
-                    : fixedLayoutSlotRects(terminals.length, grid?.className || '')
+                    : fixedLayoutSlotRects(livePaneCount(terminals), grid?.className || '')
             );
             const size = getSplitGridSize(rects);
             return buildWorkspaceLayoutSnapshotFromState(
-                terminals.length,
+                livePaneCount(terminals),
                 grid?.className || '',
                 rects,
                 normalizeSplitTrackWeights(splitColumnWeights, size.columns),
                 normalizeSplitTrackWeights(splitRowWeights, size.rows),
-                originalSplitSlotCount || terminals.length
+                originalSplitSlotCount || livePaneCount(terminals)
             );
         }
 
@@ -2387,12 +2395,12 @@
         }
 
         return buildWorkspaceLayoutSnapshotFromState(
-            cached.terminals?.length || 0,
+            livePaneCount(cached.terminals),
             cached.className || '',
             cached.splitSlotRects,
             cached.splitColumnWeights,
             cached.splitRowWeights,
-            cached.originalSplitSlotCount || cached.terminals?.length || 0
+            cached.originalSplitSlotCount || livePaneCount(cached.terminals)
         );
     }
 
@@ -2551,6 +2559,178 @@
             descriptor.workspaceLayout = geometry;
         }
         return descriptor;
+    }
+
+    function livePaneCount(panes) {
+        return window.GridVibeSessionPersistence.livePaneCount(panes);
+    }
+
+    function synchronizeGroupView(groupId, data) {
+        /* Any older background read was issued against a membership this
+           synchronization is about to replace; it must not apply afterward. */
+        backgroundRefreshGenerations.set(groupId, (backgroundRefreshGenerations.get(groupId) || 0) + 1);
+        const visible = groupId === visibleGroupId;
+        const cached = visible ? null : cachedGroupViews.get(groupId);
+        if (!visible && !cached) return { added: 0, removed: 0 };
+        const panes = visible ? terminals : cached.terminals;
+        const ids = visible ? sessionIds : cached.sessionIds;
+        const container = visible ? document.getElementById('terminalsGrid') : cached.fragment;
+        const plan = window.GridVibeSessionPersistence.planPaneSynchronization(ids, panes, data.sessions);
+        if (plan.entries.some(entry => entry.reused && !container.querySelector(`#tc-${entry.slot}`))) {
+            throw new Error('A pane view is missing. Reload this workspace and retry saving.');
+        }
+        const changed = plan.removed.length || plan.entries.some(entry => !entry.reused);
+        if (!changed) return { added: 0, removed: 0 };
+        const previousOrder = Array.from(container.children).map(card => ids[Number(card.dataset.slot)]);
+        const rank = new Map(previousOrder.map((id, index) => [id, index]));
+        plan.entries.sort((a, b) => (rank.get(a.session.session_id) ?? Infinity)
+            - (rank.get(b.session.session_id) ?? Infinity));
+        let model = groupRecordModel(data.group, data.sessions.map(session => session.session_id));
+        /* Cards keep local order while the record's rectangles follow server
+           order; pair each rectangle with its pane by identity. */
+        const rectBySession = new Map(model.ids.map((id, index) => [id, model.rects[index]]));
+        model = {
+            ...model,
+            rects: plan.entries.map(entry => rectBySession.get(entry.session.session_id)),
+        };
+        if (plan.entries.every(entry => rank.has(entry.session.session_id))) {
+            const current = new Set(plan.entries.map(entry => entry.session.session_id));
+            const reduced = window.GridVibeCloseGeometry.reduceCloseGeometry(
+                captureCloseGroupSnapshot(groupId), previousOrder.filter(id => !current.has(id))
+            );
+            if (reduced.ok && reduced.model.entries.length === plan.entries.length) {
+                model = {
+                    rects: reduced.model.entries.map(entry => entry.rect),
+                    columnWeights: reduced.model.columnWeights,
+                    rowWeights: reduced.model.rowWeights,
+                    baseCount: reduced.model.originalSplitSlotCount,
+                };
+            }
+        }
+        const focused = document.activeElement;
+        const viewports = new Map(panes.filter(Boolean).map(pane => [pane, captureTerminalViewportState(pane)]));
+        if (visible) {
+            clearActiveGridResize();
+            clearResizeHandles();
+            if (plan.removed.some(entry => entry.slot === _focusedTerminalIndex)) resetFocusedTerminal();
+        }
+        plan.removed.forEach(({ slot, sessionId }) => {
+            const pane = panes[slot];
+            pane?._resizeObserver?.disconnect();
+            if (visible) resizeObservers = resizeObservers.filter(observer => observer !== pane?._resizeObserver);
+            cancelExplorerFilesystemUiForSession(sessionId);
+            forgetExplorerSessionMarkdownAppearance(sessionId);
+            clearFitTimers([pane]);
+            if (isExplorerPaneInstance(pane)) explorerReleasePaneWork(pane);
+            if (isBrowserPaneInstance(pane)) browserDisposePane(pane);
+            pane?.term?.dispose();
+            socket?.emit('leave_session', { session_id: sessionId });
+            clearSessionRoutes([sessionId]);
+            container.querySelector(`#tc-${slot}`)?.remove();
+            delete panes[slot];
+            delete ids[slot];
+        });
+        const added = plan.entries.filter(entry => !entry.reused);
+        plan.entries.forEach(({ session, slot, reused }) => {
+            if (!reused) {
+                const pane = createPaneInstance(session);
+                pane._session = session;
+                panes[slot] = pane;
+                ids[slot] = session.session_id;
+                const card = buildPaneCard(session, slot);
+                card.style.setProperty('--session-color', tabColourForGroup(groupId));
+                container.appendChild(card);
+                if (visible) wirePaneControls(card, slot);
+                else pane._synchronizationNeedsControls = true;
+                wirePaneInputForwarding(pane, slot);
+                socket?.emit('join_session', { session_id: session.session_id });
+            } else {
+                panes[slot]._session = session;
+            }
+            setSessionRoute(session.session_id, groupId, slot);
+        });
+        // Surviving panes keep their visual order. A removal uses the same
+        // absorb rule as the close button; additions use complete live geometry.
+        const cards = new Map(Array.from(container.children).map(card => [Number(card.dataset.slot), card]));
+        plan.entries.forEach(({ slot }) => {
+            const card = cards.get(slot);
+            // insertBefore only when needed; an unmoved editor keeps its focus.
+            const position = plan.entries.findIndex(entry => entry.slot === slot);
+            if (container.children[position] !== card) container.insertBefore(card, container.children[position] || null);
+        });
+        if (visible) {
+            const decorations = container.className.split(/\s+/).filter(name => !name.startsWith('layout-'));
+            splitSlotRects = model.rects;
+            splitColumnWeights = model.columnWeights;
+            splitRowWeights = model.rowWeights;
+            originalSplitSlotCount = model.baseCount;
+            applySplitSlotGeometry({ fit: false });
+            container.classList.add(...decorations);
+            added.forEach(({ session, slot }) => {
+                setStatus(slot, session.status);
+                if (session.status !== 'connected') return;
+                if (isExplorerSession(session)) syncExplorerPane(slot);
+                else if (isBrowserSession(session)) document.getElementById(`ph-${slot}`)?.remove();
+                else attachTerminal(slot);
+            });
+            viewports.forEach((state, pane) => {
+                if (panes.includes(pane)) restoreTerminalViewportState(pane, state);
+            });
+            if (focused?.isConnected && document.activeElement !== focused) focused.focus({ preventScroll: true });
+            gridBuilt = livePaneCount(panes) > 0;
+            updateSessionChrome(livePaneCount(panes), groupId);
+        } else {
+            writeCachedGroupGeometry(cached, plan.entries.map(entry => entry.session.session_id), model);
+        }
+        return { added: added.length, removed: plan.removed.length };
+    }
+
+    let paneSynchronization = null;
+    async function synchronizeLivePanes() {
+        if (paneSynchronization) return paneSynchronization;
+        const abort = new AbortController();
+        let timer;
+        const deadline = new Promise((_, reject) => {
+            timer = setTimeout(() => {
+                abort.abort();
+                reject(new Error('Pane synchronization timed out. Retry saving.'));
+            }, 3500);
+        });
+        const work = (async () => {
+            const controller = presentationController();
+            const rendered = Array.from(new Set([visibleGroupId, ...cachedGroupViews.keys()])).filter(Boolean);
+            const changes = { added: 0, removed: 0 };
+            for (const groupId of rendered) {
+                const owner = groupId === visibleGroupId ? terminals : cachedGroupViews.get(groupId)?.terminals;
+                await backgroundTabSettled(groupId);
+                // A replacement generation owns the fresh snapshot. Finish the
+                // old queue first; discarded generations cannot enqueue repairs.
+                await controller.settleGroup(groupId).catch(() => {});
+                if (abort.signal.aborted) return;
+                const response = await fetch(getSessionApiPath(groupId), { signal: abort.signal });
+                const data = await response.json();
+                if (abort.signal.aborted) return;
+                if (owner !== (groupId === visibleGroupId ? terminals : cachedGroupViews.get(groupId)?.terminals)) {
+                    throw new Error('The displayed session changed during synchronization. Retry saving.');
+                }
+                if (!response.ok || !data.group || !data.sessions?.length) {
+                    throw new Error('A session group moved or closed. Refresh the workspace and retry saving.');
+                }
+                controller.forgetGroup(groupId);
+                const delta = synchronizeGroupView(groupId, data);
+                changes.added += delta.added;
+                changes.removed += delta.removed;
+                adoptSplitGroupRecord(data.group);
+                controller.setGroupRevision(groupId, data.group.presentation_revision);
+                // The membership change may have invalidated an older close's
+                // restore plan. The retained cards already hold current state.
+                closeGeometryCoordinator.invalidate(groupId);
+            }
+            showTerminalToast(`Panes synchronized: ${changes.added} added, ${changes.removed} removed.`, 'info');
+        })();
+        paneSynchronization = Promise.race([work, deadline]);
+        try { return await paneSynchronization; }
+        finally { clearTimeout(timer); paneSynchronization = null; }
     }
 
     function postPresentation(url, payload, signal) {
@@ -3398,11 +3578,11 @@
 
     function hasPaneCards(container, panes) {
         const cards = Array.from(container?.children || []);
-        if (!Array.isArray(panes) || !panes.length || cards.length !== panes.length) {
+        if (!Array.isArray(panes) || !livePaneCount(panes) || cards.length !== livePaneCount(panes)) {
             return false;
         }
         const cardIds = new Set(cards.map(card => card.id));
-        return Array.from(panes).every((pane, index) => pane && cardIds.has(`tc-${index}`));
+        return panes.every((pane, index) => pane && cardIds.has(`tc-${index}`));
     }
 
     function cloneSplitSlotRects(rects = splitSlotRects) {
@@ -3661,7 +3841,7 @@
         const grid = document.getElementById('terminalsGrid');
         const groups = getResizeTrackGroups(axis, lineIndex);
         if (!grid || !Array.isArray(splitSlotRects) || !groups) {
-            return terminals.map((_, index) => index);
+            return terminals.flatMap((pane, index) => pane ? [index] : []);
         }
         const changed = new Set([...groups.before, ...groups.after]);
         return Array.from(grid.children)
@@ -4326,7 +4506,7 @@
     const SPLIT_BLOCKED_BY_SIZE = 'size';
 
     function getSplitBlockers(index, rect) {
-        if (window.innerWidth <= 700 || terminals.length >= MAX_SPLIT_TERMINALS) {
+        if (window.innerWidth <= 700 || livePaneCount(terminals) >= MAX_SPLIT_TERMINALS) {
             return {
                 vertical: SPLIT_BLOCKED_BY_WINDOW,
                 horizontal: SPLIT_BLOCKED_BY_WINDOW
@@ -4477,7 +4657,7 @@
                 const ids = cached.sessionIds || [];
                 const rects = gridLayoutClass(cached.className) === 'layout-split-local'
                     ? cloneSplitSlotRects(cached.splitSlotRects) || []
-                    : fixedLayoutRectCoordinates(ids.length, cached.className || '');
+                    : fixedLayoutRectCoordinates(livePaneCount(cached.terminals), cached.className || '');
                 entries = closeEntriesFromCards(cards, ids, rects);
                 columnWeights = cloneSplitTrackWeights(cached.splitColumnWeights);
                 rowWeights = cloneSplitTrackWeights(cached.splitRowWeights);
@@ -4595,7 +4775,7 @@
        caller with no pane to read — the pane cap, which refuses before any
        rectangle is looked at — passes none and gets the character floor, which
        is what this always said. */
-    function getSplitDisabledReason(axis, blocker = '', count = terminals.length) {
+    function getSplitDisabledReason(axis, blocker = '', count = livePaneCount(terminals)) {
         if (window.innerWidth <= 700) {
             return 'Splitting is disabled on narrow screens';
         }
@@ -4664,11 +4844,11 @@
     }
 
     function hasMatchingSessionIds(existingIds, sessions) {
-        if (!Array.isArray(existingIds) || !Array.isArray(sessions) || existingIds.length !== sessions.length) {
+        if (!Array.isArray(existingIds) || !Array.isArray(sessions) || existingIds.filter(Boolean).length !== sessions.length) {
             return false;
         }
 
-        return existingIds.every((sessionId, index) => sessionId === sessions[index]?.session_id);
+        return sessions.every(session => existingIds.includes(session.session_id));
     }
 
     function hasMatchingSessionViews(existingIds, existingTerminals, sessions) {
@@ -4676,10 +4856,15 @@
             return false;
         }
 
-        return sessions.every((session, index) => (
-            isExplorerPaneInstance(existingTerminals[index]) === isExplorerSession(session)
-            && isBrowserPaneInstance(existingTerminals[index]) === isBrowserSession(session)
-        ));
+        return sessions.every(session => {
+            const index = existingIds.indexOf(session.session_id);
+            return (
+                isExplorerPaneInstance(existingTerminals[index]) === isExplorerSession(session)
+                && isBrowserPaneInstance(existingTerminals[index]) === isBrowserSession(session)
+                && (!isExplorerSession(session)
+                    || existingTerminals[index]?._session?.explorer_root_directory === session.explorer_root_directory)
+            );
+        });
     }
 
     /* ─────────────────────────────────────────────
@@ -5594,7 +5779,7 @@
             const t = createPaneInstance(session);
             t._session = session;
             terminals.push(t);
-            sessionIds.push(null);
+            sessionIds.push(session.session_id);
 
             const card = buildPaneCard(session, i);
             wirePaneControls(card, i);
@@ -7328,7 +7513,7 @@
         if (!sourceSessionId || !sourceTerminal || !sourceCard || !grid) {
             return { ok: false, error: 'That pane is not open in this window.' };
         }
-        if (terminals.length >= MAX_SPLIT_TERMINALS) {
+        if (livePaneCount(terminals) >= MAX_SPLIT_TERMINALS) {
             updateAllSplitButtonStates();
             return { ok: false, error: getSplitDisabledReason(axis) };
         }
@@ -7417,11 +7602,12 @@
                 return { ok: true, session, index: null, note: SPLIT_NOT_PLACED_NOTE };
             }
 
-            const newIndex = terminals.length;
+            let newIndex = 0;
+            while (terminals[newIndex]) newIndex += 1;
             const terminal = makeTerminal();
             terminal._session = session;
-            terminals.push(terminal);
-            sessionIds.push(session.session_id);
+            terminals[newIndex] = terminal;
+            sessionIds[newIndex] = session.session_id;
             setSessionRoute(session.session_id, activeGroupId, newIndex);
 
             const newCard = createSplitTerminalCard(sourceCard, session, index, newIndex);
@@ -7450,7 +7636,7 @@
 
             adoptSplitGroupRecord(data.group);
 
-            updateSessionChrome(terminals.length, activeGroupId);
+            updateSessionChrome(livePaneCount(terminals), activeGroupId);
             updateAllSplitButtonStates();
             /* The group gained a pane and a custom rectangle set. Rebase on the
                revision the split response carries, then publish the geometry —
@@ -8218,8 +8404,8 @@
                 if (!payload) return refuse('The page could not capture this session.');
                 payload.expected_revision = expectedRevision;
                 payload.workspace_layout = buildWorkspaceLayoutSnapshotFromState(
-                    terminals.length, grid.className, rects, nextColumns, nextRows,
-                    originalSplitSlotCount || terminals.length
+                    livePaneCount(terminals), grid.className, rects, nextColumns, nextRows,
+                    originalSplitSlotCount || livePaneCount(terminals)
                 );
                 writeStarted = true;
                 const saved = await postPresentation('/api/session-presentation', payload);
@@ -8938,6 +9124,7 @@
        Initial load — build grid, set up sessions
     ───────────────────────────────────────────── */
     async function initialLoad() {
+        if (paneSynchronization) await paneSynchronization.catch(() => {});
         const loadToken = ++activeLoadToken;
         const label = document.getElementById('sessionLabel');
         const grid  = document.getElementById('terminalsGrid');
@@ -9058,12 +9245,16 @@
 
             applyConfiguredSurfaceMode(data, { refit: gridBuilt });
             applyConfiguredAgentSidebarSide(data);
+            if (visibleGroupId === requestedGroupId && hasPaneCards(grid, terminals)
+                && !hasMatchingSessionViews(sessionIds, terminals, data.sessions)) {
+                synchronizeGroupView(requestedGroupId, data);
+            }
             const expectedLayoutClass = getLayoutClass(data.sessions.length, data.layout);
             const currentLayoutClass = gridLayoutClass(grid.className);
             const usingCurrentView = (
                 gridBuilt
                 && visibleGroupId === requestedGroupId
-                && terminals.length === data.sessions.length
+                && livePaneCount(terminals) === data.sessions.length
                 && (currentLayoutClass === expectedLayoutClass || currentLayoutClass === 'layout-split-local')
                 && hasMatchingSessionViews(sessionIds, terminals, data.sessions)
                 && hasPaneCards(grid, terminals)
@@ -9085,7 +9276,7 @@
                 if (cached) {
                     const cachedLayoutClass = gridLayoutClass(cached.className);
                     const cachedMatches = (
-                        cached.terminals?.length === data.sessions.length
+                        livePaneCount(cached.terminals) === data.sessions.length
                         && (cachedLayoutClass === expectedLayoutClass || cachedLayoutClass === 'layout-split-local')
                         && hasMatchingSessionViews(cached.sessionIds || [], cached.terminals || [], data.sessions)
                         && (!cached.geometryStale || adoptStoredGeometryForStaleView(
@@ -9110,7 +9301,8 @@
             }
 
             const attachedIndices = [];
-            data.sessions.forEach((session, i) => {
+            data.sessions.forEach(session => {
+                const i = sessionIds.indexOf(session.session_id);
                 if (!terminals[i]) {
                     return;
                 }
@@ -9371,6 +9563,7 @@
     }
 
     async function loadSessionGroups() {
+        if (paneSynchronization) await paneSynchronization.catch(() => {});
         const response = await fetch(
             `/api/session-groups?workspace_id=${encodeURIComponent(currentWorkspaceId)}`
         );
@@ -9413,6 +9606,29 @@
            than from whatever this window last remembered. */
         adoptPresentationRevisions(data);
         knownGroupIds = sessionGroups.map(group => group.group_id);
+        // Background tabs have browser-owned presentation too. Updating only
+        // their revision leaves an old cached membership attached to a fresh
+        // revision, which makes the next whole-group save fail validation.
+        for (const group of sessionGroups) {
+            const cached = cachedGroupViews.get(group.group_id);
+            if (!cached || !Array.isArray(group.pane_order) || backgroundTabHeld(group.group_id)
+                || hasMatchingSessionIds(cached.sessionIds, group.pane_order.map(session_id => ({ session_id })))) continue;
+            /* The cache is mutated in place, so identity alone cannot tell an
+               older overlapping refresh from the newest one; only the latest
+               request for a group may apply its membership. */
+            const generation = (backgroundRefreshGenerations.get(group.group_id) || 0) + 1;
+            backgroundRefreshGenerations.set(group.group_id, generation);
+            await presentationController()?.settleGroup(group.group_id).catch(() => {});
+            const response = await fetch(getSessionApiPath(group.group_id));
+            const record = await response.json();
+            if (!response.ok || !record.group
+                || backgroundRefreshGenerations.get(group.group_id) !== generation
+                || cachedGroupViews.get(group.group_id) !== cached) continue;
+            presentationController()?.forgetGroup(group.group_id);
+            synchronizeGroupView(group.group_id, record);
+            adoptSplitGroupRecord(record.group);
+            presentationController()?.setGroupRevision(group.group_id, record.group.presentation_revision);
+        }
         previousGroupIds
             .filter(groupId => !knownGroupIds.includes(groupId))
             .forEach(groupId => {
@@ -9680,8 +9896,10 @@
     async function refreshStatuses() {
         /* Nothing to reconcile against a workspace that no longer exists — the
            window is closing, and every read would 400. */
-        if (workspaceGone) return;
+        if (workspaceGone || paneSynchronization) return;
         if (!gridBuilt) { initialLoad(); return; }
+        const owner = terminals;
+        const groupId = visibleGroupId;
         try {
             const groupChanged = await loadSessionGroups();
             if (groupChanged) {
@@ -9695,17 +9913,21 @@
 
             const resp = await fetch(getSessionApiPath());
             const data = await resp.json();
+            if (paneSynchronization || owner !== terminals || groupId !== visibleGroupId || activeGroupId !== groupId) return;
             if (!data.sessions || data.sessions.length === 0) {
                 await resetSessionView();
                 return;
             }
 
+            const grid = document.getElementById('terminalsGrid');
+            if (hasPaneCards(grid, terminals) && !hasMatchingSessionViews(sessionIds, terminals, data.sessions)) {
+                synchronizeGroupView(groupId, data);
+            }
             const expectedLayoutClass = getLayoutClass(data.sessions.length, data.layout);
             const sessionViewsChanged = !hasMatchingSessionViews(sessionIds, terminals, data.sessions);
-            const grid = document.getElementById('terminalsGrid');
             const currentLayoutClass = gridLayoutClass(grid.className);
             if (
-                terminals.length !== data.sessions.length
+                livePaneCount(terminals) !== data.sessions.length
                 || (currentLayoutClass !== expectedLayoutClass && currentLayoutClass !== 'layout-split-local')
                 || sessionViewsChanged
                 || visibleGroupId !== activeGroupId
@@ -9715,7 +9937,8 @@
                 return;
             }
 
-            data.sessions.forEach((session, i) => {
+            data.sessions.forEach(session => {
+                const i = sessionIds.indexOf(session.session_id);
                 if (!terminals[i]) {
                     return;
                 }
@@ -9947,6 +10170,7 @@
         GridVibeLifecycle.attachFlushResponder(socket, {
             workspaceId: currentWorkspaceId,
             flush: flushLivePresentation,
+            synchronize: synchronizeLivePanes,
             metadata: async () => ({
                 active_group_id: activeGroupId,
                 native_zoom_factor: await getCurrentWorkspaceNativeZoomFactor(),

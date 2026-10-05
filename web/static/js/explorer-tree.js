@@ -93,6 +93,11 @@
             return [];
         }
 
+        pane._explorerTreeEpoch = (pane._explorerTreeEpoch || 0) + 1;
+        const treeEpoch = pane._explorerTreeEpoch;
+        const rootEpoch = pane._explorerRootEpoch || 0;
+        const rootRevision = pane._explorerRootRevision || '';
+        const children = pane._explorerTreeChildren;
         pane._explorerTreeLoading.add(key);
         pane._explorerTreeErrors.delete(key);
         if (!cached) {
@@ -106,10 +111,15 @@
             // pane re-enters explorer mode from a deeper terminal cwd.
             const response = await fetch(`${entriesUrl}?path=${encodeURIComponent(key)}`);
             const data = await response.json();
+            if (terminals[index] !== pane || sessionIds[index] !== sessionId
+                || (pane._explorerRootEpoch || 0) !== rootEpoch
+                || (pane._explorerRootRevision || '') !== rootRevision
+                || pane._explorerTreeChildren !== children) return [];
             if (!response.ok) {
                 throw new Error(data.error || 'Failed to load directory');
             }
             updateExplorerFilesystemRootRevision(index, data.root_revision || '');
+            recordExplorerDirectoryRevision(pane, key, data.directory_revision || '', 'tree');
             const entries = (Array.isArray(data.entries) ? data.entries : []).filter(entry => !entry.deleted);
             pane._explorerTreeChildren.set(key, entries);
             return entries;
@@ -119,7 +129,8 @@
             return [];
         } finally {
             pane._explorerTreeLoading.delete(key);
-            renderExplorerTreePanel(index);
+            if (terminals[index] === pane && sessionIds[index] === sessionId
+                && pane._explorerTreeEpoch >= treeEpoch) renderExplorerTreePanel(index);
         }
     }
 
@@ -579,6 +590,7 @@
 
         ensureExplorerTreeState(pane);
         if (pane._explorerTreeExpanded.has(path)) {
+            pane._explorerTreeEpoch = (pane._explorerTreeEpoch || 0) + 1;
             pane._explorerTreeExpanded.delete(path);
             renderExplorerTreePanel(index);
             notePanePresentationChanged(index);
@@ -586,6 +598,7 @@
         }
 
         pane._explorerTreeExpanded.add(path);
+        pane._explorerTreeEpoch = (pane._explorerTreeEpoch || 0) + 1;
         pane._explorerTreeErrors.delete(path);
         renderExplorerTreePanel(index);
         await loadExplorerTreeChildren(index, path);
@@ -622,6 +635,7 @@
     /* Drop a folder and everything expanded beneath it, so re-opening it later
        gives a collapsed folder instead of restoring the old subtree. */
     function collapseExplorerTreeSubtree(pane, path) {
+        pane._explorerTreeEpoch = (pane._explorerTreeEpoch || 0) + 1;
         const prefix = `${path}/`;
         pane._explorerTreeExpanded.forEach(value => {
             if (value === path || value.startsWith(prefix)) {
@@ -644,6 +658,7 @@
         }
 
         ensureExplorerTreeState(pane);
+        pane._explorerTreeEpoch = (pane._explorerTreeEpoch || 0) + 1;
         const siblings = explorerTreeSiblingDirectories(pane, path);
         if (!siblings.length) {
             return;
@@ -938,6 +953,7 @@
         }
 
         ensureExplorerTreeState(pane);
+        pane._explorerTreeEpoch = (pane._explorerTreeEpoch || 0) + 1;
         /* An upload, a delete, a rename or a Git action reloads the tree under
            a reader who never asked to be moved. The expansion already survives
            it — nothing here touches `_explorerTreeExpanded` — and the offset
@@ -1017,9 +1033,8 @@
     /* The tree nodes a re-render would actually paint: the root plus every
        expanded directory whose children are cached, shallowest first. Bounded
        because each node costs one `/entries` (one `git status` on a subtree) —
-       a deeply expanded tree refreshes its visible top and leaves the rest to
-       the manual Refresh, which is strictly better than today's fully stale
-       tree. */
+       the Git-decoration refresh covers its shallowest nodes. The independent
+       membership watch rotates through deeper loaded nodes separately. */
     function explorerTreeQuietRefreshKeys(pane) {
         const keys = [''];
         [...pane._explorerTreeExpanded]
@@ -1031,44 +1046,96 @@
 
     /* Refetch the visible tree nodes into a scratch map, then swap them in one
        render — unlike reloadExplorerTree, the panel never empties, never shows
-       `Loading...`, and keeps its scroll offset and expansion state. */
-    async function refreshExplorerTreeQuiet(index) {
+       `Loading...`, and keeps its scroll offset and expansion state. `paths`
+       scopes the refetch to exactly the directories whose state the independent
+       directory poll found changed (its dirty set); omitted, the bounded
+       shallowest-first plan below is used by the Git-decoration consumer. */
+    async function refreshExplorerTreeQuiet(index, paths, owner) {
         const pane = terminals[index];
         const sessionId = sessionIds[index];
         if (!pane || !sessionId || !pane._explorerTreeSidebarOpen) {
             return true;
         }
         ensureExplorerTreeState(pane);
+        owner = owner || captureExplorerDirectoryOwner(index);
+        if (!explorerDirectoryOwnerCurrent(index, owner, { tree: true })) return false;
         if (!pane._explorerTreeChildren.size) {
             return true; // Never loaded: the watcher does not bootstrap it.
         }
+        const keys = (Array.isArray(paths)
+            ? paths.filter(path => pane._explorerTreeChildren.has(path)
+                && (path === '' || pane._explorerTreeExpanded.has(path)))
+            : explorerTreeQuietRefreshKeys(pane))
+            .sort((left, right) => left.split('/').length - right.split('/').length || left.localeCompare(right))
+            .slice(0, EXPLORER_FS_WATCH_MAX_TREE_NODES);
+        if (!keys.length) {
+            return true;
+        }
         const fetched = new Map();
+        const revisions = new Map();
         let changed = false;
-        for (const key of explorerTreeQuietRefreshKeys(pane)) {
+        const removed = new Set();
+        for (const key of keys) {
+            if ([...removed].some(path => key === path || key.startsWith(path + '/'))) continue;
             const data = await explorerFetchEntriesQuiet(index, key);
-            if (terminals[index] !== pane || sessionIds[index] !== sessionId) {
+            if (!explorerDirectoryOwnerCurrent(index, owner, { tree: true })) {
                 return false;
             }
-            if (!data) {
+            if (!data || (data.root_revision || '') !== owner.root) {
                 return false;
             }
             const entries = (Array.isArray(data.entries) ? data.entries : [])
                 .filter(entry => !entry.deleted);
             fetched.set(key, entries);
+            revisions.set(key, data.directory_revision || '');
+            const directories = new Set(entries.filter(entry => entry.type === 'directory').map(entry => entry.path));
+            for (const old of pane._explorerTreeChildren.get(key) || []) {
+                if (old.type === 'directory' && !directories.has(old.path)) removed.add(old.path);
+            }
             if (explorerEntriesSignature(entries)
                 !== explorerEntriesSignature(pane._explorerTreeChildren.get(key))) {
                 changed = true;
             }
         }
-        if (!changed) {
-            return true;
-        }
+        if (!explorerDirectoryApplyAllowed(index, owner, true)) return false;
         const metrics = captureScrollMetrics(document.getElementById(`explorer-tree-panel-${index}`));
+        const scratch = new Map(pane._explorerTreeChildren);
+        const obsolete = new Set();
         fetched.forEach((entries, key) => {
-            pane._explorerTreeChildren.set(key, entries);
-            pane._explorerTreeErrors.delete(key);
+            const surviving = new Set(entries.filter(entry => entry.type === 'directory')
+                .map(entry => entry.path));
+            for (const old of pane._explorerTreeChildren.get(key) || []) {
+                if (old.type !== 'directory' || surviving.has(old.path)) continue;
+                for (const cachedPath of scratch.keys()) {
+                    if (cachedPath === old.path || cachedPath.startsWith(old.path + '/')) {
+                        scratch.delete(cachedPath);
+                        obsolete.add(cachedPath);
+                    }
+                }
+            }
+            scratch.set(key, entries);
         });
-        renderExplorerTreePanel(index);
-        applyScrollMetrics(document.getElementById(`explorer-tree-panel-${index}`), metrics);
+        const previous = pane._explorerTreeChildren;
+        pane._explorerTreeChildren = scratch;
+        try {
+            if (changed) {
+                renderExplorerTreePanel(index);
+                applyScrollMetrics(document.getElementById(`explorer-tree-panel-${index}`), metrics);
+            }
+        } catch (error) {
+            pane._explorerTreeChildren = previous;
+            return false;
+        }
+        obsolete.forEach(path => {
+            explorerDirectoryBaselines(pane, 'tree').delete(path);
+            pane._explorerTreeExpanded.delete(path);
+            pane._explorerTreeErrors.delete(path);
+        });
+        revisions.forEach((revision, key) => {
+            if (scratch.has(key)) {
+                pane._explorerTreeErrors.delete(key);
+                recordExplorerDirectoryRevision(pane, key, revision, 'tree');
+            }
+        });
         return true;
     }

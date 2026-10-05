@@ -6436,7 +6436,7 @@ class WorkspaceGoneWindowTestCase(unittest.TestCase):
         # A window that cannot close itself (a hand-opened browser tab) must not
         # keep re-reading a workspace that will never come back.
         self.assertIn("if (statusRefreshTimer || workspaceGone) return;", terminals_js)
-        self.assertIn("if (workspaceGone) return;", terminals_js)
+        self.assertIn("if (workspaceGone || paneSynchronization) return;", terminals_js)
 
 
 class MultiWorkspaceDialogChromeTestCase(unittest.TestCase):

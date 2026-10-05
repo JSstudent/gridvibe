@@ -66,6 +66,10 @@ def _between(source: str, start: str, end: str) -> str:
 
 
 def _run_node_file(script: str) -> dict:
+    script = (
+        f"const persistence = require({json.dumps(str(STATIC_JS / 'session-persistence.js'))});\n"
+        "var livePaneCount = persistence.livePaneCount;\n" + script
+    )
     with TemporaryDirectory() as directory:
         path = Path(directory) / "harness.js"
         path.write_text(script, encoding="utf-8")
@@ -655,6 +659,8 @@ BRIDGE_HARNESS = r"""
 function build(options) {
     const calls = [];
     const context = {
+        livePaneCount: persistence.livePaneCount,
+        paneSynchronization: null,
         sessionIds: options.visible || ['pane-a'],
         backgroundSplit: options.module === null ? null : {
             holds: id => id === 'pane-c',
@@ -776,6 +782,8 @@ async function run(interrupt, options = {}) {
     /* Whether the tab was held when the request went out. */
     let heldAtRequest = null;
     const context = {
+        livePaneCount: persistence.livePaneCount,
+        paneSynchronization: null,
         backgroundSplit,
         backgroundTab: tab,
         SPLIT_REQUEST_TIMEOUT_MS: 20,
@@ -1026,6 +1034,7 @@ async function run(scenario) {
     let reads = 0;
     const context = {
         activeLoadToken: 0,
+        paneSynchronization: null,
         activeGroupId: 'g-2',
         workspaceGone: false,
         LOAD_HELD_READ_ATTEMPTS,

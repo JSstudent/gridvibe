@@ -38,7 +38,7 @@ class _LifecycleModalParser(HTMLParser):
         if self._choices_depth:
             if tag == "div":
                 self._choices_depth += 1
-            elif tag == "button":
+            elif tag == "button" and "data-lifecycle-save" in attributes:
                 self.choice_values.append(attributes.get("data-lifecycle-save"))
         elif tag == "div" and element_id == "lifecycleChoices":
             self._choices_depth = 1
@@ -1731,6 +1731,83 @@ class LifecycleClientTestCase(unittest.TestCase):
         )
 
         self.assertEqual(result, {"calls": 2, "firstFailed": True, "token": "done"})
+
+    def test_recovery_button_retries_the_original_scope_and_keeps_failed_saves_open(self):
+        for save in ("workspaces", "sessions+workspaces"):
+            with self.subTest(save=save):
+                result = self._run_node(f"""
+                    const lifecycle = require({json.dumps(str(self.MODULE))});
+                    const classes = new Set();
+                    const classList = {{ add: n => classes.add(n), remove: n => classes.delete(n), toggle() {{}} }};
+                    const button = () => ({{ hidden: true, listeners: {{}},
+                        addEventListener(n, cb) {{ this.listeners[n] = cb; }}, replaceChildren() {{}} }});
+                    const recovery = button();
+                    const buttons = ['none', 'workspaces', 'sessions+workspaces'].map(save => ({{ ...button(), dataset: {{ lifecycleSave: save }} }}));
+                    const nodes = {{
+                        lifecycleModal: {{ classList, setAttribute() {{}} }},
+                        lifecycleStatus: {{ classList, textContent: '' }},
+                        lifecycleSynchronize: recovery,
+                        lifecycleChoices: {{ querySelectorAll: () => buttons, querySelector: () => button() }},
+                        lifecycleCancel: button()
+                    }};
+                    global.document = {{ getElementById: id => nodes[id], querySelector: () => ({{ classList }}) }};
+                    const requests = [], ready = [];
+                    lifecycle.openModal({{
+                        action: 'close', onReady: token => ready.push(token),
+                        fetchImpl: async (_url, options) => {{
+                            requests.push(JSON.parse(options.body));
+                            const attempt = requests.length;
+                            return {{ ok: attempt === 3, json: async () => attempt === 3
+                                ? {{ ready_to_exit: true, decision_token: 'saved' }}
+                                : {{ errors: [{{ code: attempt === 1 ? 'pane_membership_mismatch' : 'disk_full', error: 'Localized error text' }}] }} }};
+                        }}
+                    }});
+                    (async () => {{
+                        await buttons.find(button => button.dataset.lifecycleSave === {json.dumps(save)}).listeners.click();
+                        const offered = !recovery.hidden;
+                        await recovery.listeners.click();
+                        const stillOpen = classes.has('visible') && ready.length === 0;
+                        await buttons.find(button => button.dataset.lifecycleSave === {json.dumps(save)}).listeners.click();
+                        console.log(JSON.stringify({{ offered, stillOpen, requests, ready, closed: !classes.has('visible') }}));
+                    }})().catch(error => {{ console.error(error); process.exit(1); }});
+                """)
+                self.assertTrue(result["offered"])
+                self.assertTrue(result["stillOpen"])
+                self.assertTrue(result["closed"])
+                self.assertEqual(result["ready"], ["saved"])
+                self.assertEqual([request["save"] for request in result["requests"]], [save] * 3)
+                self.assertEqual([request["synchronize"] for request in result["requests"]], [False, True, False])
+
+    def test_every_recovery_responder_synchronizes_before_flushing_and_reports_a_new_mismatch(self):
+        result = self._run_node(f"""
+            const lifecycle = require({json.dumps(str(self.MODULE))});
+            const events = [], acks = [], handlers = [];
+            for (const id of ['first', 'second']) {{
+                lifecycle.attachFlushResponder({{
+                    on: (_name, callback) => handlers.push(callback), emit: (_name, payload) => acks.push(payload)
+                }}, {{ workspaceId: 'default',
+                    synchronize: async () => events.push(`${{id}}:synchronize`),
+                    flush: async () => {{
+                        events.push(`${{id}}:flush`);
+                        if (id === 'second') {{
+                            const error = new Error('Changed again');
+                            error.result = {{ code: 'pane_membership_mismatch', group_id: 'g' }};
+                            return {{ ok: false, error }};
+                        }}
+                        return {{ ok: true }};
+                    }}
+                }});
+            }}
+            (async () => {{
+                for (const handler of handlers) await handler({{ request_id: 'r', workspace_id: 'default', synchronize: true }});
+                console.log(JSON.stringify({{ events, acks }}));
+            }})().catch(error => {{ console.error(error); process.exit(1); }});
+        """)
+        self.assertEqual(result["events"], ["first:synchronize", "first:flush", "second:synchronize", "second:flush"])
+        self.assertTrue(result["acks"][0]["ok"])
+        self.assertFalse(result["acks"][1]["ok"])
+        self.assertEqual(result["acks"][1]["code"], "pane_membership_mismatch")
+        self.assertEqual(result["acks"][1]["group_id"], "g")
 
     def test_modal_keeps_one_choice_list_after_failure_and_cancel_closes_it(self):
         result = self._run_node(

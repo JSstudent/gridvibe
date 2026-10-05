@@ -13,11 +13,15 @@ import tests  # noqa: E402,F401
 
 
 def _pretty_case_name(test_case) -> str:
+    method_name = getattr(test_case, "_testMethodName", None)
+    if method_name is None:
+        # A setUpClass/setUpModule failure reports an `_ErrorHolder`, not a case.
+        return test_case.id()
+
     class_name = test_case.__class__.__name__
     if class_name.endswith("TestCase"):
         class_name = class_name[:-8]
 
-    method_name = test_case._testMethodName
     if method_name.startswith("test_"):
         method_name = method_name[5:]
 

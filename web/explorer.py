@@ -1059,6 +1059,81 @@ def _fs_root_revision(root_path: str) -> str:
     return hashlib.sha256(str(root_path or "").encode("utf-8")).hexdigest()[:16]
 
 
+# Named ceiling for the cheap directory-state read (GET .../directory/state and
+# the `directory_revision` an ordinary /entries response computes alongside it).
+# One directory may not be fingerprinted from a truncated prefix: past this many
+# children the reader enumerates no further and refuses to claim a current
+# revision instead of hashing a partial directory as if it were the whole one.
+EXPLORER_DIRECTORY_STATE_MAX_ENTRIES = 4096
+EXPLORER_DIRECTORY_STATE_MAX_SECONDS = 2.0
+
+
+def directory_revision(entries: List[Dict[str, Any]]) -> str:
+    """Return a deterministic, Git-independent fingerprint of a directory's children.
+
+    The token covers each child's name plus its rendered type and entry kind, so
+    child creation, deletion and rename all change it — including children Git
+    would ignore, ordinary untracked children, and roots with no Git repository
+    at all. It never invokes Git, never reads a child's content, and never
+    depends on a directory mtime (remote SFTP rounds those to whole seconds and
+    would miss a same-second replacement). Computed from the raw backend listing,
+    before any Git decoration or synthetic deleted entry, so the identity it
+    describes is the filesystem exactly as the cheap poll will re-read it.
+    """
+    signature = sorted(
+        (
+            str(entry.get("name") or ""),
+            str(entry.get("type") or ""),
+            str(entry.get("entry_kind") or ""),
+        )
+        for entry in entries
+    )
+    material = json.dumps(signature, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(material).hexdigest()[:16]
+
+
+def _bounded_directory_entries(iterator: Any, payload: Any, max_entries: int,
+                               deadline: float, before_read: Any = None) -> Tuple[List[Dict[str, Any]], bool]:
+    """Shared streaming budget; inspect at most one child beyond the cap.
+
+    A slow final read or EOF also invalidates completeness. The caller owns and
+    closes the iterator, including when a read or payload conversion fails.
+    """
+    entries: List[Dict[str, Any]] = []
+    while time.monotonic() < deadline:
+        if before_read is not None:
+            before_read(max(0.001, deadline - time.monotonic()))
+        try:
+            entry = next(iterator)
+        except StopIteration:
+            return entries, time.monotonic() < deadline
+        if len(entries) >= max_entries or time.monotonic() >= deadline:
+            return entries, False
+        entries.append(payload(entry))
+    return entries, False
+
+
+def directory_state_payload(backend: Any, requested_path: Any) -> Dict[str, Any]:
+    """Compose the cheap directory-state response, shared local/remote policy.
+
+    Resolves the requested path under the explorer root and fingerprints one
+    bounded streaming listing. Ordinary /entries remains complete and computes
+    the same token from raw membership within the entry cap. ``revision`` is
+    empty on overflow or elapsed-budget expiry; a partial read never describes
+    the directory's current revision.
+    """
+    root_path, current_path = backend.resolve_dir(requested_path)
+    entries, complete = backend.list_entries_bounded(
+        root_path, current_path, EXPLORER_DIRECTORY_STATE_MAX_ENTRIES
+    )
+    return {
+        "path": backend.rel_explorer_path(root_path, current_path),
+        "root_revision": _fs_root_revision(root_path),
+        "revision": directory_revision(entries) if complete else "",
+        "complete": complete,
+    }
+
+
 def _local_fs_stat_dict(stat_result: Any) -> Dict[str, Any]:
     """Normalize a local lstat result for shared mutation policy."""
     kind = _explorer_entry_kind(
@@ -2037,6 +2112,23 @@ class _LocalExplorerBackend:
                 entries.append(_explorer_entry_payload(root_path, entry))
         return entries
 
+    def list_entries_bounded(
+        self, root_path: str, directory_path: str, max_entries: int
+    ) -> Tuple[List[Dict[str, Any]], bool]:
+        """Enumerate one directory up to ``max_entries`` children, lazily.
+
+        ``scandir`` is an iterator, so the enumeration itself is bounded: a
+        directory larger than the ceiling is stopped at the ceiling rather than
+        walked to its end. ``complete`` is False in that case and the caller must
+        not fingerprint the truncated prefix as the directory's current state.
+        """
+        deadline = time.monotonic() + EXPLORER_DIRECTORY_STATE_MAX_SECONDS
+        with os.scandir(directory_path) as iterator:
+            return _bounded_directory_entries(
+                iterator, lambda entry: _explorer_entry_payload(root_path, entry),
+                max_entries, deadline,
+            )
+
     def stat_file(self, file_path: str) -> Tuple[Optional[int], Optional[float]]:
         stat_result = os.stat(file_path, follow_symlinks=False)
         return stat_result.st_size, stat_result.st_mtime
@@ -2303,6 +2395,46 @@ class _SftpExplorerBackend:
             _remote_explorer_entry_payload(root_path, directory_path, entry)
             for entry in self.sftp.listdir_attr(directory_path)
         ]
+
+    def list_entries_bounded(
+        self, root_path: str, directory_path: str, max_entries: int
+    ) -> Tuple[List[Dict[str, Any]], bool]:
+        """Enumerate one remote directory up to ``max_entries`` children.
+
+        Only streaming transports support cheap fingerprinting. One read-ahead
+        request and the shared entry/time budget bound work; the leased channel
+        retains its I/O timeout and is released by the route owner.
+        """
+        listdir_iter = getattr(self.sftp, "listdir_iter", None)
+        if not callable(listdir_iter):
+            return [], False
+
+        deadline = time.monotonic() + EXPLORER_DIRECTORY_STATE_MAX_SECONDS
+        get_channel = getattr(self.sftp, "get_channel", None)
+        channel = get_channel() if callable(get_channel) else None
+        original_timeout = channel.gettimeout() if channel is not None else None
+        iterator = listdir_iter(directory_path, read_aheads=1)
+
+        def bound_read(remaining: float) -> None:
+            if channel is not None:
+                channel.settimeout(
+                    min(remaining, original_timeout) if original_timeout is not None else remaining
+                )
+
+        try:
+            return _bounded_directory_entries(
+                iterator,
+                lambda entry: _remote_explorer_entry_payload(root_path, directory_path, entry),
+                max_entries, deadline, bound_read,
+            )
+        finally:
+            try:
+                close = getattr(iterator, "close", None)
+                if callable(close):
+                    close()
+            finally:
+                if channel is not None:
+                    channel.settimeout(original_timeout)
 
     def stat_file(self, file_path: str) -> Tuple[Optional[int], Optional[float]]:
         stat_result = self.sftp.stat(file_path)

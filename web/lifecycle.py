@@ -375,13 +375,15 @@ class LifecycleCoordinator:
                 )
             else:
                 error = str(data.get("error") or "Presentation flush failed")
-                pending["errors"].append(
-                    {
-                        "workspace_id": workspace_id,
-                        "category": "client_flush",
-                        "error": error[:_MAX_CLIENT_ERROR_LENGTH],
-                    }
-                )
+                record = {
+                    "workspace_id": workspace_id,
+                    "category": "client_flush",
+                    "error": error[:_MAX_CLIENT_ERROR_LENGTH],
+                }
+                if data.get("code") == "pane_membership_mismatch":
+                    record["code"] = "pane_membership_mismatch"
+                    record["group_id"] = str(data.get("group_id") or "")[:64]
+                pending["errors"].append(record)
             self._condition.notify_all()
             return True
 

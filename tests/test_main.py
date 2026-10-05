@@ -125,6 +125,16 @@ class ResolveServerSettingsTestCase(unittest.TestCase):
 class LogPolishTestCase(unittest.TestCase):
     """Deep-dive 9.2/9.3 — ANSI-free log file, voice-status polls suppressed."""
 
+    def test_directory_state_poll_logging_suppresses_only_success(self):
+        log_filter = main._SuppressPollLogs()
+        for status in (200, 204, 400, 404, 500):
+            with self.subTest(status=status):
+                record = _log_record(
+                    f'"GET /api/explorer/s1/directory/state?path=docs&known=x HTTP/1.1" {status} -'
+                )
+                self.assertEqual(log_filter.filter(record), status >= 300)
+        self.assertTrue(log_filter.filter(_log_record('"GET /api/explorer/s1/entries HTTP/1.1" 200 -')))
+
     def test_poll_filter_suppresses_voice_status_requests(self):
         log_filter = main._SuppressPollLogs()
         suppressed = _log_record(

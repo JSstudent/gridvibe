@@ -35,8 +35,6 @@ from tests.test_background_split import (
 )
 from tests.test_split_geometry import RESTORE_SOURCE, RESTORE_STUBS, _js_const_source
 
-SESSION_PERSISTENCE_JS = TERMINALS_JS.parent / "session-persistence.js"
-
 TRACK_SOURCE_NAMES = ("getSharedGridEdgeSegments", "getResizeTrackGroups")
 
 MODULE_HARNESS = r"""
@@ -622,7 +620,6 @@ CACHED_GEOMETRY_SOURCE_NAMES = (
 
 CACHED_GEOMETRY_BODY = r"""
 const backgroundTabModule = require(TAB_PATH);
-const persistence = require(PERSISTENCE_PATH);
 /* The page's one tab instance; none until a case makes one. */
 var backgroundTab = null;
 const tick = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -1152,7 +1149,6 @@ class BackgroundResizeCachedViewTestCase(unittest.TestCase):
                     RESTORE_STUBS,
                     f"const BACKGROUND_SPLIT_PATH = {json.dumps(str(BACKGROUND_SPLIT_JS))};",
                     f"const TAB_PATH = {json.dumps(str(BACKGROUND_TAB_JS))};",
-                    f"const PERSISTENCE_PATH = {json.dumps(str(SESSION_PERSISTENCE_JS))};",
                     lifted,
                     ADAPTER_STUBS,
                     CACHED_GEOMETRY_BODY,

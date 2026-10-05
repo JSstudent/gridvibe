@@ -2,8 +2,8 @@
        Explorer change listener. A file changed outside GridVibe refreshes in
        the *viewer* only — the editor buffer stays untouchable.
 
-       One page-level scheduler runs two independent per-pane requests while
-       the page is visible, feeding three surfaces:
+       One page-level scheduler runs three independent per-pane checks while
+       the page is visible, feeding the same surfaces:
 
        1. Repository state — poll the cheap GET /api/explorer/<id>/git/state
           semantic-revision endpoint. An unchanged revision costs one
@@ -20,20 +20,31 @@
                modified outside GridVibe appears there with its `?`/`M` badge
                instead of waiting for a manual refresh. Only panes inside a
                Git worktree have this consumer: the revision *is* the signal,
-               so an ignored or non-repository file is picked up exactly when
-               Git itself would report it.
+               while the independent directory poll below discovers membership
+               changes in ignored folders and non-Git roots.
        2. Open file — while the viewer is showing a file, poll the cheaper
           GET /api/explorer/<id>/file/state (one `stat`, no read). A changed
           token re-reads the file and updates the viewer in place, so a file
           edited outside GridVibe stops going stale in the tab the user is
           actually looking at.
+       3. Directory state — poll GET /api/explorer/<id>/directory/state (one
+          bounded readdir, no Git, no content) for the browsed directory and
+          every loaded, expanded Files-tree directory. This is the
+          *independent*, Git-free change signal (ISSUE-2026-061): a child
+          created, deleted or renamed outside GridVibe — inside an ignored
+          folder or a root with no repository — advances its fingerprint where
+          `git status` reports nothing. Each /entries load records the
+          fingerprint as the baseline, so the same-path poll detects a change
+          that lands between a surface load and the first poll. Git pin/Follow
+          scope never chooses which directories this checks; neither
+          `_explorerGitContext.available` nor any Git state gates it.
 
        Every apply is deferred while the user is interacting (commit message
        focused, IME composition, context menu or modal open, pointer down,
        reading a scrolled sidebar/tree, an active text selection).
 
        Invariants: read-only; the editor buffer is never touched, because a
-       pane with an open editor is ineligible and the editor keeps its own
+       file viewer with an open editor is ineligible and the editor keeps its own
        save-conflict flow; every apply goes through one narrow quiet door
        (refreshExplorerGitRepoQuiet / refreshExplorerOpenFileQuiet /
        refreshExplorerFilesystemSurfacesQuiet) and never through
@@ -53,9 +64,16 @@
     const EXPLORER_GIT_WATCH_BACKOFF_MS = [10000, 20000, 30000];
     const EXPLORER_GIT_WATCH_MAX_FAILURES = 5;        // then suspend
     const EXPLORER_GIT_WATCH_CHURN_LIMIT = 3;         // consecutive changes
+    const EXPLORER_GIT_WATCH_EDIT_SETTLE_MS = 800;    // bounded typing settle window
+    // Directory state check: how many directories one pass polls. Mirrors
+    // EXPLORER_FS_WATCH_MAX_TREE_NODES in explorer-tree.js so the tree-quiet
+    // refresh and this poll agree on a bounded per-pass plan.
+    const EXPLORER_DIR_WATCH_MAX_TREE_NODES = 16;
     let explorerGitWatchTimer = null;
     let explorerGitWatchRunning = false;
     let explorerGitWatchPointerDown = false;
+    let explorerGitWatchEditUntil = 0;                // genuine-edit deadline (Date.now ms)
+    let explorerGitWatchInteractionResumed = true;
 
     function explorerGitWatchBaseMs(pane) {
         return pane?._session?.mode === 'ssh'
@@ -260,6 +278,9 @@
        to (or decides about) a row that must not move, and a pointer that is
        down is a drag, a selection, or a click in progress. */
     function explorerWatchInteractionActive() {
+        if (document.visibilityState !== 'visible') {
+            return true;
+        }
         if (document.getElementById('explorer-ctx-menu')) {
             return true;
         }
@@ -282,26 +303,63 @@
         return explorerGitWatchPointerDown;
     }
 
+    /* A genuine, bounded edit in the panel: an editable control the user is
+       typing into, composing in, or holding an active selection in. Idle focus
+       — a button they tabbed to, or an input they stopped typing in — is NOT
+       editing and must not hold a pending update. The settle deadline is armed
+       only by actual input/keyboard/selection events, so it is bounded and
+       cannot be re-armed simply because focus returns to a control that stays
+       inside the panel. */
+    function explorerGitWatchTextEditingActive(panel) {
+        const active = document.activeElement;
+        if (!active || !panel.contains(active)) {
+            return false;
+        }
+        if (!active.matches || !active.matches('input, textarea, [contenteditable]')) {
+            return false;
+        }
+        if (Date.now() < explorerGitWatchEditUntil) {
+            return true;
+        }
+        // A selection the user is still making (the page has focus) is an edit;
+        // a remembered selection is not, and must not re-arm the gate when
+        // focus returns to the retained input.
+        if (explorerGitWatchInteractionResumed && document.hasFocus?.()) {
+            return typeof active.selectionStart === 'number'
+                && active.selectionStart !== active.selectionEnd;
+        }
+        return false;
+    }
+
     /* Deferral gates (plan §6.2) — postpone the apply, never drop it. A panel
        re-render replaces innerHTML wholesale, so it must not happen while the
        user is typing, composing, choosing from a menu/modal, dragging, or
-       reading a scrolled panel. */
+       reading a scrolled panel. Retained DOM focus alone is not interaction:
+       a focused persistent button (or a text control left idle between
+       keystrokes) must not hold a pending update while the page is otherwise
+       visible but not interacted with. */
     function explorerGitWatchDeferralActive(index, pane) {
         const panel = document.getElementById(`explorer-git-panel-${index}`);
         if (!panel) {
             return false;
         }
-        const active = document.activeElement;
-        if (active && panel.contains(active)) {
+        if (pane._explorerGitComposing) {
             return true;
         }
-        if (pane._explorerGitComposing) {
+        if (explorerGitWatchTextEditingActive(panel)) {
             return true;
         }
         if (explorerWatchInteractionActive()) {
             return true;
         }
-        return panel.matches(':hover') && panel.scrollTop > 0;
+        const selection = window.getSelection?.();
+        if (explorerGitWatchInteractionResumed && document.hasFocus?.()
+            && selection && !selection.isCollapsed
+            && (panel.contains(selection.anchorNode) || panel.contains(selection.focusNode))) {
+            return true;
+        }
+        return explorerGitWatchInteractionResumed && document.hasFocus?.()
+            && panel.matches(':hover') && panel.scrollTop > 0;
     }
 
     /* Viewer deferral gates. Scroll position, view mode and the search query
@@ -403,14 +461,29 @@
     }
 
     function explorerGitWatchFlushPending(index) {
+        if (document.visibilityState !== 'visible') {
+            return;
+        }
         const pane = terminals[index];
         if (!pane || !pane._explorerGitWatchPending) {
+            return;
+        }
+        const { data, scopePath, scopeKind } = pane._explorerGitWatchPending;
+        /* A deferral outlives a navigation: the pending payload belongs to the
+           scope it was fetched under, never whatever the pane is asking about by
+           the time a deferred flush runs. Under another scope it is dropped, not
+           applied — labelling old data with the new scope would make the pane
+           look loaded for a scope it has never asked the server about. */
+        if (
+            scopePath !== explorerGitRequestedScope(pane)
+            || scopeKind !== explorerGitRequestedScopeKind(pane)
+        ) {
+            pane._explorerGitWatchPending = null;
             return;
         }
         if (explorerGitWatchDeferralActive(index, pane)) {
             return;
         }
-        const { data, scopePath, scopeKind } = pane._explorerGitWatchPending;
         pane._explorerGitWatchPending = null;
         // A GridVibe Git action may have applied this exact state meanwhile.
         if (data.revision && data.revision === pane._explorerGitRevision) {
@@ -531,19 +604,315 @@
         }
     }
 
+    /* Independent directory state watch (ISSUE-2026-061) ──────────────────
+       The third, Git-free check the scheduler runs. Where the /git/state poll
+       only sees what Git reports, this one sees the directory as the filesystem
+       has it — ignored children, ordinary untracked children, and roots with no
+       repository all count. Its targets are the browsed directory plus every
+       loaded, expanded tree directory, never chosen by Git pin/Follow scope and
+       never gated on `_explorerGitContext.available`. It has its own
+       in-flight/due/backoff/failure state so a broken Git poll cannot take the
+       filesystem freshness down with it, and vice versa. */
+
+    /* The directories the poll checks, deduplicated and shallowest-first for
+       the tree half. Only *loaded* tree directories are watched — the poll
+       never bootstraps a node the tree has not fetched. */
+    function explorerDirectoryWatchTargets(pane) {
+        if (!pane) {
+            return [];
+        }
+        const targets = [];
+        const children = pane._explorerTreeChildren instanceof Map
+            ? pane._explorerTreeChildren
+            : null;
+        const expanded = pane._explorerTreeExpanded instanceof Set
+            ? pane._explorerTreeExpanded
+            : new Set();
+        if (pane._explorerMode === 'directory') {
+            targets.push(String(pane._explorerPath || ''));
+        }
+        if (pane._explorerTreeSidebarOpen && children && children.has('')) {
+            if (!targets.includes('')) {
+                targets.push('');
+            }
+            const ordered = [...expanded].sort(
+                (left, right) => left.split('/').length - right.split('/').length
+            );
+            for (const path of ordered) {
+                if (children.has(path) && !targets.includes(path)) {
+                    targets.push(path);
+                }
+            }
+        }
+        return targets;
+    }
+
+    /* A bounded, rotating window over the targets. Past the per-pass ceiling
+       the window starts at a cursor that advances every pass, so a large
+       expanded tree's deeper nodes are eventually checked instead of being
+       permanently excluded beyond the first `EXPLORER_FS_WATCH_MAX_TREE_NODES`. */
+    function explorerDirectoryWatchWindow(pane) {
+        const targets = explorerDirectoryWatchTargets(pane);
+        const limit = EXPLORER_DIR_WATCH_MAX_TREE_NODES;
+        if (targets.length <= limit) {
+            return { paths: targets, advance: 0, total: targets.length };
+        }
+        const cursor = pane._explorerDirWatchCursor || 0;
+        const paths = [];
+        for (let i = 0; i < limit; i += 1) {
+            paths.push(targets[(cursor + i) % targets.length]);
+        }
+        return { paths, advance: limit, total: targets.length };
+    }
+
+    function explorerDirectoryWatchNextDelay(pane) {
+        return explorerWatchNextDelay(
+            pane, pane._explorerDirWatchLastMs, pane._explorerDirWatchChanges
+        );
+    }
+
+    function explorerDirectoryWatchBackoff(pane) {
+        return explorerWatchBackoff(
+            pane._explorerDirWatchFailures, explorerDirectoryWatchNextDelay(pane)
+        );
+    }
+
+    function explorerDirectoryWatchEligible(index) {
+        const pane = terminals[index];
+        if (!pane || !isExplorerPaneInstance(pane) || !sessionIds[index]) {
+            return false;
+        }
+        if (!explorerDirectoryWatchTargets(pane).length) {
+            return false;
+        }
+        // A GridVibe filesystem/Git action refreshes what it touched; an open
+        // editor may still refresh its tree (the quiet re-list never touches the
+        // file viewer or editor buffer).
+        if (pane._explorerGitActionBusy || pane._explorerFsBusy) {
+            return false;
+        }
+        if (pane._explorerDirWatchInFlight || pane._explorerDirWatchSuspended) {
+            return false;
+        }
+        return true;
+    }
+
+    function explorerDirectoryWatchOnFailure(pane, status) {
+        if (status === 'session_not_found') {
+            // The session is gone; suspend immediately and silently.
+            pane._explorerDirWatchFailures = EXPLORER_GIT_WATCH_MAX_FAILURES;
+        } else {
+            pane._explorerDirWatchFailures = (pane._explorerDirWatchFailures || 0) + 1;
+        }
+        if (pane._explorerDirWatchFailures >= EXPLORER_GIT_WATCH_MAX_FAILURES) {
+            pane._explorerDirWatchSuspended = true;
+        }
+    }
+
+    function queueExplorerDirectoryChange(pane, path) {
+        const pending = pane._explorerDirWatchPending || { paths: new Set(), versions: new Map() };
+        pending.versions = pending.versions || new Map();
+        pane._explorerDirWatchSerial = (pane._explorerDirWatchSerial || 0) + 1;
+        pending.paths.add(path);
+        pending.versions.set(path, pane._explorerDirWatchSerial);
+        pane._explorerDirWatchPending = pending;
+    }
+
+    /* Deferred apply: hold the newest dirty-directory set through interaction
+       and the shared FS/Git busy flags, then re-list the selected directories
+       through the ordinary quiet path. It never advances a baseline on its own;
+       the quiet re-list re-records each directory's fresh revision. */
+    async function explorerDirectoryWatchFlushPending(index) {
+        if (document.visibilityState !== 'visible') {
+            return;
+        }
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        const pending = pane?._explorerDirWatchPending;
+        if (!pane || !sessionId || !pending || !pending.paths || !pending.paths.size) {
+            return;
+        }
+        if (pane._explorerDirWatchSuspended || (pane._explorerDirWatchFailures
+            && Date.now() < (pane._explorerDirWatchNextAt || 0))) return;
+        if (pane._explorerGitActionBusy || pane._explorerFsBusy || pane._explorerFsWatchRefreshing) {
+            return;
+        }
+        if (explorerFsWatchDeferralActive(index)) {
+            return;
+        }
+        const owner = captureExplorerDirectoryOwner(index);
+        const targets = new Set(explorerDirectoryWatchTargets(pane));
+        for (const path of pending.paths) {
+            if (!targets.has(path)) pending.paths.delete(path);
+        }
+        const dirs = [...pending.paths].slice(0, EXPLORER_DIR_WATCH_MAX_TREE_NODES);
+        if (!dirs.length) {
+            pane._explorerDirWatchPending = null;
+            return;
+        }
+        const versions = new Map(dirs.map(path => [path, pending.versions?.get(path)]));
+        const applied = await refreshExplorerFilesystemSurfacesQuiet(index, { dirs });
+        if (!explorerDirectoryOwnerCurrent(index, owner)) {
+            return;
+        }
+        if (applied) {
+            pane._explorerDirWatchFailures = 0;
+            // A poll may have queued a newer version during the fetch.
+            if (pane._explorerDirWatchPending === pending) {
+                for (const path of dirs) {
+                    if (pending.versions?.get(path) === versions.get(path)) {
+                        pending.paths.delete(path);
+                        pending.versions?.delete(path);
+                    }
+                }
+                if (!pending.paths.size) pane._explorerDirWatchPending = null;
+            }
+        } else {
+            // Interaction starting during the fetch is a hold, not a failure.
+            if (document.visibilityState !== 'visible' || explorerFsWatchDeferralActive(index)) return;
+            explorerDirectoryWatchOnFailure(pane, 0);
+            pane._explorerDirWatchNextAt = Date.now() + explorerDirectoryWatchBackoff(pane);
+        }
+    }
+
+    async function explorerDirectoryWatchCheckOne(index) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        if (!pane || !sessionId) {
+            return;
+        }
+        pane._explorerDirWatchInFlight = true;
+        const started = performance.now();
+        let delay = explorerDirectoryWatchNextDelay(pane);
+        const owner = captureExplorerDirectoryOwner(index);
+        const windowPlan = explorerDirectoryWatchWindow(pane);
+        const dirty = new Set();
+        const missing = new Set();
+        try {
+            for (const path of windowPlan.paths) {
+                if (!explorerDirectoryOwnerCurrent(index, owner, { tree: true })
+                    || !explorerDirectoryWatchTargets(pane).includes(path)) return;
+                if ([...missing].some(parent => path.startsWith(parent + '/'))) continue;
+                const baselines = explorerDirectoryRenderedRevisions(pane, path);
+                const known = baselines[0] || '';
+                const response = await fetch(
+                    `/api/explorer/${encodeURIComponent(sessionId)}/directory/state`
+                    + `?path=${encodeURIComponent(path)}&known=${encodeURIComponent(known)}`,
+                    { cache: 'no-store' }
+                );
+                if (!explorerDirectoryOwnerCurrent(index, owner, { tree: true })
+                    || !explorerDirectoryWatchTargets(pane).includes(path)) {
+                    return;
+                }
+                if (!response.ok) {
+                    const error = await response.json();
+                    if (!explorerDirectoryOwnerCurrent(index, owner, { tree: true })) return;
+                    if (response.status === 404 && error?.code === 'not_found' && path) {
+                        // A vanished expanded folder dirties its parent. The
+                        // parent's applied listing prunes the cached branch.
+                        // Drop impossible re-lists first: the missing folder
+                        // may itself be open in Preview or already pending.
+                        missing.add(path);
+                        const pending = pane._explorerDirWatchPending;
+                        if (pending) {
+                            for (const queued of pending.paths) {
+                                if (queued === path || queued.startsWith(path + '/')) {
+                                    pending.paths.delete(queued);
+                                    pending.versions?.delete(queued);
+                                }
+                            }
+                        }
+                        const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+                        queueExplorerDirectoryChange(pane, parent);
+                        pane._explorerDirWatchPending.paths = new Set([
+                            parent, ...pane._explorerDirWatchPending.paths
+                        ]);
+                        dirty.add(parent);
+                        continue;
+                    }
+                    explorerDirectoryWatchOnFailure(pane, error?.code || response.status);
+                    delay = explorerDirectoryWatchBackoff(pane);
+                    return;
+                }
+                const data = await response.json();
+                if (!explorerDirectoryOwnerCurrent(index, owner, { tree: true })
+                    || !explorerDirectoryWatchTargets(pane).includes(path)) {
+                    return;
+                }
+                // The root may have been reset/replaced during the flight; the
+                // response then says nothing about the directory now on screen.
+                if ((data.root_revision || '') !== owner.root) {
+                    return;
+                }
+                const revision = typeof data?.revision === 'string' ? data.revision : '';
+                if (!revision) {
+                    // Past the state ceiling (or unreadable): no cheap signal for
+                    // this path. Record nothing and leave its surface alone.
+                    continue;
+                }
+                if (baselines.some(baseline => revision !== baseline)) {
+                    dirty.add(path);
+                    queueExplorerDirectoryChange(pane, path);
+                }
+            }
+            if (dirty.size) {
+                pane._explorerDirWatchChanges = (pane._explorerDirWatchChanges || 0) + 1;
+            } else {
+                pane._explorerDirWatchChanges = 0;
+            }
+            await explorerDirectoryWatchFlushPending(index);
+            if (!pane._explorerDirWatchPending) pane._explorerDirWatchFailures = 0;
+            if (explorerWatchPaneCurrent(index, pane, sessionId)) {
+                pane._explorerDirWatchCursor = (
+                    (pane._explorerDirWatchCursor || 0) + windowPlan.advance
+                ) % Math.max(1, windowPlan.total);
+                delay = pane._explorerDirWatchFailures > 0
+                    ? explorerDirectoryWatchBackoff(pane)
+                    : explorerDirectoryWatchNextDelay(pane);
+            }
+        } catch (error) {
+            if (explorerWatchPaneCurrent(index, pane, sessionId)) {
+                explorerDirectoryWatchOnFailure(pane, 0);
+                delay = explorerDirectoryWatchBackoff(pane);
+            }
+        } finally {
+            pane._explorerDirWatchInFlight = false;
+            if (explorerWatchPaneCurrent(index, pane, sessionId)) {
+                pane._explorerDirWatchLastMs = performance.now() - started;
+                pane._explorerDirWatchNextAt = Date.now() + delay;
+            }
+        }
+    }
+
     function explorerGitWatchFlushAllPending() {
+        if (document.visibilityState !== 'visible') {
+            return;
+        }
         for (let index = 0; index < terminals.length; index += 1) {
             explorerGitWatchFlushPending(index);
             explorerFileWatchFlushPending(index);
             explorerFsWatchFlushPending(index);
+            explorerDirectoryWatchFlushPending(index);
         }
     }
 
     async function explorerGitWatchApplyRefresh(index, pane, sessionId) {
+        if (document.visibilityState !== 'visible') {
+            return;
+        }
         const scopePath = explorerGitRequestedScope(pane);
         const scopeKind = explorerGitRequestedScopeKind(pane);
         const data = await refreshExplorerGitRepoQuiet(index);
         if (terminals[index] !== pane || sessionIds[index] !== sessionId) {
+            return;
+        }
+        // The quiet refetch already re-checks its own scope, but a scope can
+        // move again between that check and this guard; a payload fetched under
+        // an abandoned scope must never be queued for apply.
+        if (
+            scopePath !== explorerGitRequestedScope(pane)
+            || scopeKind !== explorerGitRequestedScopeKind(pane)
+        ) {
             return;
         }
         if (!data) {
@@ -714,6 +1083,7 @@
                 explorerGitWatchFlushPending(index);
                 await explorerFileWatchFlushPending(index);
                 await explorerFsWatchFlushPending(index);
+                await explorerDirectoryWatchFlushPending(index);
                 const pane = terminals[index];
                 if (!pane) {
                     continue;
@@ -740,6 +1110,17 @@
                         }
                     }
                 }
+                if (explorerDirectoryWatchEligible(index)) {
+                    const dueAt = pane._explorerDirWatchNextAt || 0;
+                    if (Date.now() < dueAt) {
+                        noteDue(dueAt);
+                    } else {
+                        await explorerDirectoryWatchCheckOne(index);
+                        if (terminals[index] === pane) {
+                            noteDue(pane._explorerDirWatchNextAt);
+                        }
+                    }
+                }
             }
             scheduleExplorerGitWatch(
                 Math.min(
@@ -759,6 +1140,7 @@
             if (pane) {
                 pane._explorerGitWatchNextAt = 0;
                 pane._explorerFileWatchNextAt = 0;
+                pane._explorerDirWatchNextAt = 0;
             }
         });
         explorerGitWatchFlushAllPending();
@@ -772,25 +1154,85 @@
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') {
             explorerGitWatchWake();
+        } else {
+            /* A hidden page drops gesture delivery and suspends polling, so a
+               pointer-down flag or an edit deadline left set would hold a
+               pending update through the whole hidden interval and still be set
+               on return. Reconcile both as the page goes away; the wake on
+               return then only has to flush, never guess which half-finished
+               gesture was real. */
+            explorerGitWatchDeactivate();
         }
     });
     window.addEventListener('focus', explorerGitWatchWake);
     window.addEventListener('pageshow', explorerGitWatchWake);
+    /* Window deactivation is the event a retained-DOM-focus switch away fires
+       (an element keeps its focus, so no element blur). Reconcile there too:
+       the page is visible but unfocused, and a pending update must apply rather
+       than wait out a gesture the page never saw released. */
+    window.addEventListener('blur', () => {
+        explorerGitWatchDeactivate();
+        explorerGitWatchFlushAllPending();
+    });
+
+    function explorerGitWatchDeactivate() {
+        explorerGitWatchPointerDown = false;
+        explorerGitWatchEditUntil = 0;
+        // Focus return alone does not make remembered selections or hover a
+        // new interaction. Actual input resumes their protection.
+        explorerGitWatchInteractionResumed = false;
+        terminals.forEach(pane => {
+            if (pane) {
+                pane._explorerGitComposing = false;
+            }
+        });
+    }
+
+    /* Genuine editing arms a bounded settle window: an actual value change, a
+       keystroke (cursor/selection movement that changes no value), or a
+       selection change inside an editable control. Re-rendering the panel
+       takes the caret and the selection, so the apply stays deferred only while
+       the user is demonstrably still editing — never merely because focus sits
+       in a control. */
+    function explorerGitWatchNoteEdit(event) {
+        const target = event?.target;
+        if (target?.matches?.('input, textarea, [contenteditable]')) {
+            explorerGitWatchInteractionResumed = true;
+            explorerGitWatchEditUntil = Date.now() + EXPLORER_GIT_WATCH_EDIT_SETTLE_MS;
+        }
+    }
 
     /* Deferred applies flush when the gate that held them clears: pointer
        release (splitter drag, selection, click-in-progress, modal clicks),
-       focus leaving the panel, IME composition end. */
+       the edit settle elapsing, IME composition end, or window deactivation. */
     document.addEventListener('pointerdown', () => {
+        explorerGitWatchInteractionResumed = true;
         explorerGitWatchPointerDown = true;
     }, true);
     document.addEventListener('pointerup', () => {
         explorerGitWatchPointerDown = false;
         explorerGitWatchFlushAllPending();
     }, true);
-    document.addEventListener('blur', () => {
+    document.addEventListener('pointercancel', () => {
+        explorerGitWatchPointerDown = false;
         explorerGitWatchFlushAllPending();
     }, true);
+    document.addEventListener('blur', () => {
+        // An element can blur during pointerdown's default focus change. Keep
+        // that gesture intact until pointerup/cancel or actual window blur.
+        explorerGitWatchEditUntil = 0;
+        explorerGitWatchFlushAllPending();
+    }, true);
+    document.addEventListener('input', explorerGitWatchNoteEdit, true);
+    document.addEventListener('keydown', explorerGitWatchNoteEdit, true);
+    document.addEventListener('select', explorerGitWatchNoteEdit, true);
+    for (const type of ['pointermove', 'wheel']) {
+        document.addEventListener(type, () => {
+            explorerGitWatchInteractionResumed = true;
+        }, { capture: true, passive: true });
+    }
     document.addEventListener('compositionstart', event => {
+        explorerGitWatchInteractionResumed = true;
         const pane = explorerGitWatchPaneForTextarea(event.target);
         if (pane) {
             pane._explorerGitComposing = true;
@@ -805,12 +1247,16 @@
     }, true);
 
     function explorerGitWatchPaneForTextarea(target) {
-        const id = typeof target?.id === 'string' ? target.id : '';
-        const match = id.match(/^explorer-git-commit-message-(\d+)$/);
-        if (!match) {
+        if (!target?.matches?.('input, textarea, [contenteditable]')) {
             return null;
         }
-        return terminals[Number(match[1])] || null;
+        for (let index = 0; index < terminals.length; index += 1) {
+            const panel = document.getElementById(`explorer-git-panel-${index}`);
+            if (panel?.contains(target)) {
+                return terminals[index] || null;
+            }
+        }
+        return null;
     }
 
     scheduleExplorerGitWatch(EXPLORER_GIT_WATCH_BASE_MS);

@@ -23,6 +23,11 @@ CACHE_SOURCE = "\n\n".join(
         "loadSessionGroups",
         "setFocusedTerminal",
         "getLayoutClass",
+        "synchronizeGroupView",
+        "adoptSplitGroupRecord",
+        "synchronizeLivePanes",
+        "getWorkspacePanesInVisualOrder",
+        "flushLivePresentation",
     )
 )
 
@@ -69,6 +74,19 @@ class ViewNode {
         }
         if (this === document.activeElement) document.activeElement = null;
     }
+    querySelector(selector) {
+        const visit = node => `#${node.id}` === selector ? node : node.children.map(visit).find(Boolean);
+        return this.children.map(visit).find(Boolean) || null;
+    }
+    insertBefore(child, before) {
+        if (child === before) return;
+        child.remove();
+        child.parentNode = this;
+        const index = before ? this.children.indexOf(before) : this.children.length;
+        this.children.splice(index, 0, child);
+    }
+    get isConnected() { return this === page || Boolean(this.parentNode?.isConnected); }
+    focus() { document.activeElement = this; }
 }
 const page = new ViewNode();
 const grid = new ViewNode('terminalsGrid');
@@ -100,7 +118,9 @@ socket = { emit: (event, payload) => calls.rooms.push([event, payload.session_id
 sessionGroups = GROUPS.slice();
 knownGroupIds = GROUPS.map(group => group.group_id);
 fetch = async path => ({ ok: true, json: async () => path.startsWith('/api/session-groups')
-    ? { groups: GROUPS } : { sessions: SESSIONS, layout: LAYOUT } });
+    ? { groups: GROUPS } : { sessions: SESSIONS, layout: LAYOUT,
+        group: { group_id: activeGroupId, layout: LAYOUT, presentation_revision: 0,
+            pane_order: SESSIONS.map(session => session.session_id) } } });
 function getGroupById(id) { return sessionGroups.find(group => group.group_id === id); }
 function setExplorerWorkspaceAppearance() {}
 function adoptPresentationRevisions() {}
@@ -128,6 +148,47 @@ function cancelExplorerFilesystemUiForSession() {}
 function forgetExplorerSessionMarkdownAppearance() {}
 function clearSessionRoutes() {}
 function presentationController() { return null; }
+function resetFocusedTerminal() { _focusedTerminalIndex = -1; }
+function explorerReleasePaneWork() {}
+function browserDisposePane() {}
+function tabColourForGroup() { return '#ffffff'; }
+function groupRecordModel(group, ids) {
+    return { ids, rects: ids.map((id, index) => ({ x: index + 1, y: 1, w: 1, h: 1 })),
+        columnWeights: ids.map(() => 1), rowWeights: [1], baseCount: ids.length };
+}
+function captureCloseGroupSnapshot(groupId) {
+    const cached = cachedGroupViews.get(groupId);
+    const cards = cached ? cached.fragment.children : grid.children;
+    const ids = cached ? cached.sessionIds : sessionIds;
+    return { entries: cards.map((card, index) => ({
+        sessionId: ids[Number(card.dataset.slot)], slotIndex: Number(card.dataset.slot), visualIndex: index,
+        rect: (cached?.splitSlotRects || splitSlotRects)?.[index] || { x: index + 1, y: 1, w: 1, h: 1 }
+    })), columnWeights: cached?.splitColumnWeights || splitColumnWeights,
+        rowWeights: cached?.splitRowWeights || splitRowWeights, originalSplitSlotCount: cards.length };
+}
+function wirePaneControls() {}
+function wirePaneInputForwarding() {}
+function showTerminalToast(message) { calls.notice = message; }
+function buildPaneCard(session, slot) {
+    const card = new ViewNode(`tc-${slot}`);
+    card.dataset.slot = String(slot);
+    return card;
+}
+function createPaneInstance(session) {
+    return { _session: session, _paneType: session.startup_mode, _attached: false,
+        term: session.startup_mode === 'terminal' ? { dispose: () => calls.disposed.push(session.session_id) } : null };
+}
+function writeCachedGroupGeometry(cached, ids, model) {
+    cached.className = 'layout-split-local';
+    cached.splitSlotRects = model.rects;
+    cached.splitColumnWeights = model.columnWeights;
+    cached.splitRowWeights = model.rowWeights;
+}
+const applyGeometryStub = applySplitSlotGeometry;
+applySplitSlotGeometry = options => {
+    grid.className = 'layout-split-local';
+    return applyGeometryStub(options);
+};
 function releaseExplorerResourcesIfIdle() {}
 function adoptStoredGeometryForStaleView() {
     calls.geometryReads = (calls.geometryReads || 0) + 1;
@@ -183,6 +244,119 @@ async function roundTrip() {
 class SessionViewCacheTestCase(PaneOverlayTestCase):
     harness_stubs = HARNESS_STUBS + CACHE_STUBS
     terminals_source = TERMINALS_SOURCE + CACHE_SOURCE
+
+    def test_explicit_recovery_flushes_visible_and_cached_groups_and_can_repeat(self):
+        result = self._run_node(
+            """
+            const original = seedA();
+            await swapTo('g2');
+            const front = grid.firstChild;
+            const records = new Map([
+                ['g1', [original.pane._session, session(1, 'connected')]],
+                ['g2', SESSIONS.slice()]
+            ]);
+            getSessionApiPath = groupId => `/live/${groupId}`;
+            fetch = async path => {
+                const groupId = path.slice('/live/'.length);
+                const sessions = records.get(groupId);
+                return { ok: true, json: async () => ({ sessions,
+                    group: { group_id: groupId, layout: 'grid', presentation_revision: 7,
+                        pane_order: sessions.map(session => session.session_id) } }) };
+            };
+            const sent = [];
+            const controller = window.GridVibeSessionPersistence.createPresentationController({
+                describeGroup: groupId => ({ workspaceId: 'default', groupId,
+                    revision: getGroupById(groupId).presentation_revision || 0,
+                    panes: getWorkspacePanesInVisualOrder(groupId).map(pane => ({
+                        sessionId: pane._session.session_id, mode: pane._session.startup_mode
+                    })) }),
+                sendGroup: payload => {
+                    sent.push([payload.group_id, payload.pane_order]);
+                    return { status: 200, presentation_revision: payload.expected_revision + 1 };
+                }
+            });
+            presentationController = () => controller;
+            await synchronizeLivePanes();
+            const first = await flushLivePresentation();
+            records.set('g1', [original.pane._session]);
+            await synchronizeLivePanes();
+            const second = await flushLivePresentation();
+            report({ first: first.ok, second: second.ok, sent,
+                sameCached: cachedGroupViews.get('g1').terminals[0] === original.pane,
+                sameVisible: grid.firstChild === front, notice: calls.notice });
+            """
+        )
+        self.assertTrue(result["first"])
+        self.assertTrue(result["second"])
+        self.assertTrue(result["sameCached"])
+        self.assertTrue(result["sameVisible"])
+        self.assertEqual(result["sent"], [
+            ["g1", ["s1", "s2"]], ["g2", ["s-b"]],
+            ["g1", ["s1"]], ["g2", ["s-b"]],
+        ])
+        self.assertIn("1 removed", result["notice"])
+
+    def test_removing_an_earlier_pane_keeps_survivor_slots_drafts_scroll_and_focus(self):
+        result = self._run_node(
+            """
+            seedA();
+            const files = session(1, 'connected', { startup_mode: 'explorer' });
+            SESSIONS.push(files);
+            const survivor = mountPane(1, files);
+            survivor.pane._explorerEdit = { draft: 'unsaved changes' };
+            const editor = new ViewNode('editor');
+            editor.scrollTop = 193;
+            survivor.card.appendChild(editor);
+            document.activeElement = editor;
+            SESSIONS = [files];
+            await refreshStatuses();
+            await refreshStatuses();
+            report({ samePane: terminals[1] === survivor.pane,
+                sameCard: grid.firstChild === survivor.card, draft: terminals[1]._explorerEdit.draft,
+                scroll: editor.scrollTop, focus: document.activeElement === editor,
+                ids: sessionIds.filter(Boolean), count: livePaneCount(terminals),
+                rebuilt: calls.rebuilt, disposed: calls.disposed, rooms: calls.rooms });
+            """
+        )
+        self.assertTrue(result["samePane"])
+        self.assertTrue(result["sameCard"])
+        self.assertTrue(result["focus"])
+        self.assertEqual(result["draft"], "unsaved changes")
+        self.assertEqual(result["scroll"], 193)
+        self.assertEqual(result["ids"], ["s2"])
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["rebuilt"], [])
+        self.assertEqual(result["disposed"], ["s1"])
+        self.assertEqual(result["rooms"], [["leave_session", "s1"]])
+
+    def test_a_cached_membership_refresh_retains_survivors_and_discovers_live_panes(self):
+        result = self._run_node(
+            """
+            const original = seedA();
+            await swapTo('g2');
+            const cached = cachedGroupViews.get('g1');
+            const extra = session(1, 'connected');
+            GROUPS[0].pane_order = ['s1', 's2'];
+            const normalFetch = fetch;
+            getSessionApiPath = groupId => `/api/sessions?group_id=${groupId}`;
+            fetch = async path => path.endsWith('group_id=g1')
+                ? { ok: true, json: async () => ({ group: GROUPS[0], sessions: [original.pane._session, extra] }) }
+                : normalFetch(path);
+            const before = grid.firstChild;
+            document.activeElement = before;
+            await loadSessionGroups();
+            report({ retained: cached.terminals[0] === original.pane,
+                sameCard: cached.fragment.firstChild === original.card,
+                cachedIds: cached.sessionIds.filter(Boolean), count: cached.fragment.children.length,
+                visible: grid.firstChild === before, focus: document.activeElement === before });
+            """
+        )
+        self.assertTrue(result["retained"])
+        self.assertTrue(result["sameCard"])
+        self.assertTrue(result["visible"])
+        self.assertTrue(result["focus"])
+        self.assertEqual(result["cachedIds"], ["s1", "s2"])
+        self.assertEqual(result["count"], 2)
 
     def test_background_agent_tabs_preserve_restored_panes_and_focus(self):
         result = self._run_node(
@@ -333,7 +507,7 @@ class SessionViewCacheTestCase(PaneOverlayTestCase):
         self.assertEqual(result["cards"], 1)
         self.assertEqual(result["rebuilt"], 1)
 
-    def test_legitimate_session_type_count_and_layout_changes_rebuild(self):
+    def test_membership_changes_reconcile_and_layout_changes_rebuild(self):
         for change in ("identity", "type", "count", "layout"):
             with self.subTest(change=change):
                 result = self._run_node(
@@ -352,7 +526,7 @@ class SessionViewCacheTestCase(PaneOverlayTestCase):
                     report({{ cards: grid.children.length, rebuilt: calls.rebuilt.length }});
                     """
                 )
-                self.assertEqual(result["rebuilt"], 1)
+                self.assertEqual(result["rebuilt"], 1 if change == "layout" else 0)
                 self.assertEqual(result["cards"], 2 if change in ("count", "layout") else 1)
 
     def test_stale_geometry_must_be_adopted_before_a_cached_view_is_reused(self):

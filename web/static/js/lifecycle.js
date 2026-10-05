@@ -20,14 +20,14 @@
     let modalState = null;
     let modalWired = false;
 
-    async function prepare(fetchImpl, action, save) {
+    async function prepare(fetchImpl, action, save, synchronize = false) {
         if (!['close', 'restart'].includes(action) || !SAVE_CHOICES.has(save)) {
             throw new Error('Unknown lifecycle action');
         }
         const response = await fetchImpl('/api/lifecycle/prepare', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action, save })
+            body: JSON.stringify({ action, save, synchronize })
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok || !data.ready_to_exit) {
@@ -56,6 +56,7 @@
             copy: document.getElementById('lifecycleCopy'),
             status: document.getElementById('lifecycleStatus'),
             choices: document.getElementById('lifecycleChoices'),
+            synchronize: document.getElementById('lifecycleSynchronize'),
             cancel: document.getElementById('lifecycleCancel')
         };
     }
@@ -99,15 +100,21 @@
 
     function showFailure(result) {
         setStatus(`${errorSummary(result)} Choose an option to try again or continue without saving.`, true);
+        const recovery = elements().synchronize;
+        if (recovery) recovery.hidden = !result?.errors?.some(item => item?.code === 'pane_membership_mismatch');
     }
 
-    async function runChoice(save) {
+    async function runChoice(save, synchronize = false) {
         if (!modalState || modalState.busy) return;
+        const operation = modalState;
+        modalState.lastSave = save;
         modalState.busy = true;
         setBusy(true);
-        setStatus(save === SAVE_NONE ? 'Preparing to continue without saving…' : 'Saving current state…');
+        setStatus(synchronize ? 'Synchronizing panes and saving current state…'
+            : save === SAVE_NONE ? 'Preparing to continue without saving…' : 'Saving current state…');
         try {
-            const result = await prepare(modalState.fetchImpl, modalState.action, save);
+            const result = await prepare(modalState.fetchImpl, modalState.action, save, synchronize);
+            if (modalState !== operation) return;
             const onReady = modalState.onReady;
             const onError = modalState.onError;
             closeModal();
@@ -117,7 +124,7 @@
                 onError?.(error);
             }
         } catch (error) {
-            if (modalState) {
+            if (modalState === operation) {
                 modalState.busy = false;
                 setBusy(false);
                 showFailure(error.result || { errors: [{ error: error.message }] });
@@ -128,13 +135,14 @@
 
     function wireModal() {
         if (modalWired || typeof document === 'undefined') return;
-        const { choices, cancel, modal } = elements();
+        const { choices, cancel, modal, synchronize } = elements();
         if (!modal) return;
         modalWired = true;
         choices?.querySelectorAll('[data-lifecycle-save]').forEach(button => {
             button.addEventListener('click', () => runChoice(button.dataset.lifecycleSave));
         });
         cancel?.addEventListener('click', cancelModal);
+        synchronize?.addEventListener('click', () => runChoice(modalState?.lastSave, true));
     }
 
     function openModal({ action, onReady, onError, onCancel, fetchImpl } = {}) {
@@ -165,12 +173,13 @@
             `Save open sessions + workspaces & ${words.verb}`
         );
         setStatus('');
+        if (elements().synchronize) elements().synchronize.hidden = true;
         modal.classList.add('visible');
         modal.setAttribute('aria-hidden', 'false');
         return true;
     }
 
-    function attachFlushResponder(socket, { workspaceId, flush, metadata }) {
+    function attachFlushResponder(socket, { workspaceId, flush, synchronize, metadata }) {
         if (!socket?.on || !socket?.emit || typeof flush !== 'function') {
             throw new Error('A socket and flush callback are required');
         }
@@ -183,6 +192,10 @@
                 ok: false
             };
             try {
+                if (request?.synchronize === true) {
+                    if (typeof synchronize !== 'function') throw new Error('Pane synchronization is unavailable. Reload this window and retry saving.');
+                    await synchronize();
+                }
                 const flushed = await flush();
                 if (flushed?.ok === false) {
                     throw flushed.error || new Error('Presentation flush failed');
@@ -193,6 +206,10 @@
                 acknowledgement.ok = true;
             } catch (error) {
                 acknowledgement.error = String(error?.message || 'Presentation flush failed').slice(0, 300);
+                if (error?.result?.code === 'pane_membership_mismatch') {
+                    acknowledgement.code = 'pane_membership_mismatch';
+                    acknowledgement.group_id = String(error.result.group_id || '').slice(0, 64);
+                }
             }
             socket.emit('lifecycle_flush_ack', acknowledgement);
         });

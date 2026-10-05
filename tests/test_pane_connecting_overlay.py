@@ -65,6 +65,7 @@ TERMINALS_SOURCE = "\n\n".join(
         "syncPanePlaceholder",
         "attachTerminal",
         "gridLayoutClass",
+        "livePaneCount",
         "hasPaneCards",
         "initialLoad",
         "refreshStatuses",
@@ -76,6 +77,8 @@ TERMINALS_SOURCE = "\n\n".join(
 # appended and removed through the real helpers against a DOM that really holds
 # them, so "the overlay is gone" is read off the page rather than off a spy.
 HARNESS_STUBS = r"""
+const window = { GridVibeSessionPersistence: require(PERSISTENCE_PATH), GridVibeCloseGeometry: require(CLOSE_PATH) };
+var paneSynchronization = null;
 const calls = {
     statuses: [], opened: [], rebuilt: [], redrawn: [], applied: [],
     scheduled: 0, consumed: [], invalidated: []
@@ -170,6 +173,7 @@ var sessionGroups = [];
 var knownGroupIds = [];
 var socket = null;
 var cachedGroupViews = new Map();
+var backgroundRefreshGenerations = new Map();
 var SESSIONS = [];
 
 /* ── Everything the two load paths call and this test does not decide ── */
@@ -276,7 +280,9 @@ function overlayOf(index) {
 }
 
 function report(value) { process.stdout.write(JSON.stringify(value)); }
-"""
+""".replace("PERSISTENCE_PATH", json.dumps(str(REPO_ROOT / "web/static/js/session-persistence.js"))).replace(
+    "CLOSE_PATH", json.dumps(str(REPO_ROOT / "web/static/js/close-geometry.js"))
+)
 
 
 @unittest.skipUnless(NODE, "Node.js is required for pane overlay tests")

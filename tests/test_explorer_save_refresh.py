@@ -76,6 +76,8 @@ const sandbox = {
     escHtml: value => String(value == null ? '' : value),
     // Owned by explorer-fs.js, which this harness does not load.
     updateExplorerFilesystemRootRevision: () => {},
+    // Membership baselines are owned by explorer-directory.js.
+    recordExplorerDirectoryRevision: () => {},
     fetch: async url => {
         requested.push(url);
         const pane = sandbox.terminals[0];
