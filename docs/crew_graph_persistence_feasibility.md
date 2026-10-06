@@ -1,9 +1,10 @@
 # Preserving crew graphs across restarts: feasibility and implementation plan
 
-Status: reviewed against the code on 2026-10-05 (branch `szua_gridvibe-taper`,
-after release 1.15.1). Nothing implemented. Once built, the resulting rules move
-into `docs/engineering_contracts.md` and `docs/session_state_guideline.md`, and
-this note is archived.
+Status: implemented on branch `szua_gridvibe-taper` (stages 1-5, 2026-10-06).
+The resulting rules now live in `docs/engineering_contracts.md` (Agent
+dashboard) and `docs/session_state_guideline.md`; this note is kept as the
+design record and the per-stage implementation notes below. Cross-workspace
+links remain out of scope.
 
 ## Verdict
 

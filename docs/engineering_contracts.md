@@ -1545,12 +1545,43 @@ unless the task explicitly changes this contract.
   or stops being an agent pane, takes its links out of the next reading, so
   the board, the sidebar wires, the chip and the header counts lose it
   together and no surface draws a ghost of it. An agent that exits while its
-  pane stays an agent pane keeps its row, and so its `ended` link.
+  pane stays an agent pane keeps its row, and so its `ended` link. Restored
+  history (the next bullet) is the one kind that outlives the process, and this
+  same filter shows it only between agent rows that are open now.
+- **Crew links survive a restart as history, and only as history.** Every
+  runtime-state capture (autosave, explicit save, voluntary exit) writes the
+  slot's `crew_links` from one read of the live links and the held history,
+  taken after the manager snapshot and before the file locks. An entry is the
+  link's public fields (`LINK_FIELDS` without `link_id`) with each endpoint as
+  snapshot coordinates, `{group, pane}` of the same slot, because session ids
+  do not survive a restart; no pane field or `TerminalSession` change carries
+  it. Only links between two agent panes of the *same captured workspace* are
+  stored, one per (requester, worker) pair with a live link beating a restored
+  one, capped at `MAX_ASSIGNMENTS`. A `working` link is stored as `ended` with
+  the `restarted` reason key (`DASHBOARD_CREW_END_REASONS` carries its
+  sentence), so the file never claims work is in flight. Cross-workspace links
+  are not persisted. The block is chrome-class on read (`_validate_crew_links`):
+  absent, invalid or oversized reads as `[]`, a bad entry is dropped, and the
+  slot is never lost over it. Restore (`_restore_crew_links`) maps (snapshot
+  group id, pane index) to the new session ids only for a group that came back
+  with the same pane count, and installs the result in `web/crew_history.py`,
+  **never in `ResultStore`**: restored links cannot be collected, waited on,
+  counted or used to gate a follow-up, and carry no text, receipt or handoff id.
+  A failure there is logged shape-only and restores no links; it never changes
+  the restore's result. A second restore of a workspace id replaces its history,
+  keeping only links between two panes that are still live (panes moved to
+  another workspace). `build_dashboard_snapshot()` publishes history first and
+  live links after, and drops a pair's history once a live link for it exists,
+  so the live round is the newest. Closing a pane drops history naming it,
+  beside `agent_results.forget_session`. The feature is always on, with no
+  setting. A restored reported link's hover says it reported before GridVibe
+  restarted and that the report was not kept.
 - **A round counts tasks handed to the same running agent.** A task that
   starts an agent (split, launch, `set_pane_agent`) is round 1; only a
   `send_task` follow-up advances it, reading the continued assignment's round
   before the superseded one can be dropped (round 2 when it is already gone).
-  The count lives in memory only, like the rest of the store.
+  The count lives in memory only, like the rest of the store; a restart keeps
+  each restored link's round as history but never continues it.
 - **`pane["waiting"]` overrides activity, after transport.** It is `crew`
   while the agent is inside `wait_for_results`, `task` while it stands by
   inside `wait_for_task`, and `""` otherwise; `crew` wins inside the overlap.

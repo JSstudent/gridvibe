@@ -20,7 +20,7 @@ is the **shape** of a workspace and the **presentation** of its panes.
 
 | File | Owner | Holds | Secrets |
 |---|---|---|---|
-| `runtime_state.json` | `web/runtime_state.py` | Workspace snapshots: one slot per workspace id, each with groups, per-pane launch config, presentation, window chrome | **Never.** `password` is not a captured field, and that is enforced again on read |
+| `runtime_state.json` | `web/runtime_state.py` | Workspace snapshots: one slot per workspace id, each with groups, per-pane launch config, presentation, window chrome, and `crew_links` (agent crew links as history) | **Never.** `password` is not a captured field, and that is enforced again on read |
 | `saved_sessions.json` | `web/saved_session_store.py` (durability) + `web/saved_sessions.py` (schema) | Named launcher presets | SSH passwords, Fernet-encrypted with the key in `.encryption_key` |
 | `config.json` | `web/config.py` | Machine-level settings, reached only through `RuntimeConfig` | No |
 
@@ -313,6 +313,13 @@ server state.**
   workspace that already has groups is refused (`already_live`) rather than
   duplicating every tab. The slot's exact id is reused, so the next autosave
   refreshes that slot instead of growing a second one.
+- **Crew links come back as history, in their own store.** The slot's
+  `crew_links` (endpoints stored as snapshot group id and pane index) are
+  re-validated on read as chrome-class state, mapped to the new session ids by
+  `_restore_crew_links()` and held by `web/crew_history.py`, never `ResultStore`.
+  Every capture intent rewrites the block, so autosave cannot erase it. A group
+  that failed, was skipped or came back with a different pane count maps
+  nothing. See [Agent dashboard](engineering_contracts.md#agent-dashboard).
 - Browser mode grants **one named tab per user gesture**, so a multi-workspace
   restore must still attempt every workspace and report refusals once per
   batch.
@@ -344,7 +351,7 @@ server state.**
 ## Never Persisted
 
 Passwords in `runtime_state.json` · fetched explorer data, file contents, dirty
-buffers · explorer Search queries and results · the Source and Git find queries
+buffers · crew-link report text, receipts, handoff ids and link ids, and links between workspaces · explorer Search queries and results · the Source and Git find queries
 (in-memory; the Source one belongs to the tab and the path it was typed
 against) · voice state of any kind · `surface_mode` and `agent_sidebar_side` (chrome
 density and the docked dashboard's edge are live global settings, so a restore
