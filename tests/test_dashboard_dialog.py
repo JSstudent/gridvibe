@@ -3187,6 +3187,45 @@ refreshAgentDashboard = async () => {
         self.assertIn('title="Ended before it reported"', result["other"])
         self.assertEqual(result["meta"], "0 of 2 reported")
 
+    def test_a_restored_link_reads_as_history_and_never_as_an_uncollected_report(self):
+        """A link restored after a restart is drawn by its phase like any
+        other, but its report's text was not kept: the hover says so instead
+        of claiming the orchestrator has (or has not) collected it. One that
+        was in flight says GridVibe restarted before it reported."""
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([
+                link('s1', 's2', {
+                    state: 'reported', status: 'done', collected: false,
+                    reported_at: HANDED, restored: true
+                }),
+                link('s1', 's3', {
+                    state: 'reported', status: 'blocked', collected: true,
+                    reported_at: HANDED, restored: true
+                }),
+                link('s1', 's4', { state: 'ended', reason: 'restarted', restored: true })
+            ]);
+            await refreshAgentDashboard();
+            report({
+                pills: ['s2', 's3', 's4'].map(id => node(id).slots['.dash-crew-pill-slot'].innerHTML),
+                meta: head('s1').slots['.dash-crew-meta'].textContent
+            });
+            """
+        )
+        done, blocked, ended = result["pills"]
+        self.assertIn('class="dash-crew-pill is-done"', done)
+        self.assertIn(
+            'title="Reported done; reported before GridVibe restarted; the report was not kept"',
+            done,
+        )
+        self.assertIn('class="dash-crew-pill is-blocked"', blocked)
+        self.assertIn("the report was not kept", blocked)
+        for pill in (done, blocked):
+            self.assertNotIn("collected", pill)
+        self.assertIn('title="Ended: GridVibe restarted before it reported"', ended)
+        self.assertIn(">ended<", ended)
+        self.assertEqual(result["meta"], "2 of 3 reported")
+
     def test_the_waiting_orchestrator_says_how_many_it_waits_on(self):
         result = self._run_crew(
             """

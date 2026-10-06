@@ -329,6 +329,30 @@ each started group and, after the workspace chrome is applied, calls
     (Node-executed): a restored link's phase and hover text; history-then-live
     order makes the live round current.
 
+#### Implementation notes
+
+Done. `build_dashboard_snapshot` reads `agent_results.links_snapshot()`, calls
+`crew_history.supersede()` with those links' (requester, worker) pairs, then
+publishes `crew_history.snapshot() + live`, all after the manager lock is
+released and each under its own store's lock alone.
+
+- `compose_dashboard()` is unchanged. It copies each kept link whole (no field
+  whitelist), so `restored: True` reaches the payload; the history store never
+  holds text, receipt or handoff id, so nothing new can leak.
+- Supersede is permanent: once a live link exists for a pair, that pair's
+  history is gone even after the live link is collected or ends.
+- `dashboard-dialog.js`: `restarted` joins `DASHBOARD_CREW_END_REASONS`, and a
+  restored reported pill's hover appends
+  `DASHBOARD_CREW_RESTORED_REPORT` in place of the collected clause, whatever
+  `collected` says. An ended restored link keeps its end-reason sentence.
+  `linkPhase()` and `agent-crews.js` are unchanged (its header comment is left
+  for Stage 5).
+- Tests: `tests/test_dashboard.py` (composer filter for restored links, a
+  restored link leaving with its pane, route-level history-then-live order,
+  permanent supersede, and the lock test now covering both history reads),
+  `tests/test_agent_crews.py` (restored phases, history-then-live order), and
+  `tests/test_dashboard_dialog.py` (restored pill hovers).
+
 ### Stage 5: docs and changelog
 
 - `web/agent_results.py` docstring: unchanged in substance (the store is
