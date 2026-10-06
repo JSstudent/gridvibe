@@ -333,7 +333,10 @@ def compose_dashboard(
         # pane) takes its links out of the reading, so the board, the sidebar's
         # wires, the chip and the header counts all lose it together and no
         # surface keeps a ghost of it. An agent that exits while its pane stays
-        # an agent pane keeps its row, and so its ``ended`` link.
+        # an agent pane keeps its row, and so its ``ended`` link. Links restored
+        # after a restart (``web/crew_history.py``) are the one kind that
+        # outlives the process, and this same filter shows them only between
+        # agent rows that are open now.
         "links": [
             dict(link)
             for link in links or ()

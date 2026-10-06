@@ -50,7 +50,9 @@ Never persisted, never logged in full: log lines carry ids, a character count
 and a status, never the text. A receipt is never logged and never leaves this
 store except in the ``read_handoff`` answer to the pane it was minted for, whose
 sidecar keeps it rather than showing it to the agent. No Flask, no I/O and no
-import from the rest of ``web/``, so the store is tested directly.
+import from the rest of ``web/``, so the store is tested directly. What a restart
+brings back is not held here: ``web/crew_history.py`` keeps the restored links
+as inert history, apart from these assignments.
 """
 
 import datetime
