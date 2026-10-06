@@ -50,7 +50,9 @@ Never persisted, never logged in full: log lines carry ids, a character count
 and a status, never the text. A receipt is never logged and never leaves this
 store except in the ``read_handoff`` answer to the pane it was minted for, whose
 sidecar keeps it rather than showing it to the agent. No Flask, no I/O and no
-import from the rest of ``web/``, so the store is tested directly.
+import from the rest of ``web/``, so the store is tested directly. What a restart
+brings back is not held here: ``web/crew_history.py`` keeps the restored links
+as inert history, apart from these assignments.
 """
 
 import datetime
@@ -170,7 +172,9 @@ NOTHING_HANDED_OUT_MESSAGE = (
 
 #: Why an assignment ended, in the words the requester is shown. Keyed by the
 #: reasons ``web/agent_handoffs.py`` drops a handoff with; anything else is
-#: quoted as it came.
+#: quoted as it came. ``restarted`` is never passed to :meth:`ResultStore.end`:
+#: it is the key ``web/crew_history.py`` stores for a link that was working
+#: when GridVibe went away.
 _ENDED_REASONS = {
     "connection closed": "its pane's connection closed before it reported",
     "pane closed": "its pane was closed before it reported",
@@ -179,6 +183,7 @@ _ENDED_REASONS = {
     "replaced": "its pane was handed a different task before it reported",
     "agent exited": "its agent exited before it reported",
     "agent replaced": "a different agent was started in its pane before it reported",
+    "restarted": "GridVibe restarted before it reported",
 }
 
 

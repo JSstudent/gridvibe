@@ -601,8 +601,13 @@
         replaced: 'Its pane was handed a different task before it reported',
         'agent exited': 'Its agent exited before it reported',
         'agent replaced': 'A different agent was started in its pane before it reported',
-        undeliverable: 'Its agent started without GridVibe\'s tools, so the task never reached it'
+        undeliverable: 'Its agent started without GridVibe\'s tools, so the task never reached it',
+        restarted: 'GridVibe restarted before it reported'
     });
+
+    /* A restored report's clause in place of the collected one: its text went
+       with the process that held it, so nothing is left to collect. */
+    const DASHBOARD_CREW_RESTORED_REPORT = 'reported before GridVibe restarted; the report was not kept';
 
     /* What the board last drew: its structure key and what each node and crew
        head said, so an unchanged poll writes nothing. */
@@ -676,6 +681,8 @@
             if (phase === 'ended') {
                 const why = DASHBOARD_CREW_END_REASONS[String(node.link.reason || '')];
                 hover = why ? `Ended: ${why}` : hover;
+            } else if (model.isReportedPhase(phase) && node.link.restored) {
+                hover += `; ${DASHBOARD_CREW_RESTORED_REPORT}`;
             } else if (model.isReportedPhase(phase)) {
                 hover += model.linkCollected(node.link)
                     ? '; its orchestrator has collected the report'

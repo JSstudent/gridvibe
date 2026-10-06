@@ -81,7 +81,7 @@ const window = { GridVibeSessionPersistence: require(PERSISTENCE_PATH), GridVibe
 var paneSynchronization = null;
 const calls = {
     statuses: [], opened: [], rebuilt: [], redrawn: [], applied: [],
-    scheduled: 0, consumed: [], invalidated: []
+    scheduled: 0, consumed: [], invalidated: [], watchWakes: 0
 };
 
 class StubNode {
@@ -233,6 +233,7 @@ async function ensureAttachedTerminalsReady() {}
 async function redrawAttachedTerminals(indices) { calls.redrawn.push(...indices); }
 async function redrawAttachedTerminalsLikeFullscreen() {}
 function settleWorkspaceFocusTarget() {}
+function explorerGitWatchWakeVisible() { calls.watchWakes += 1; }
 function renderSessionTabs() {}
 function retrySessionConnection() {}
 function applyGroupFontOverride() {}

@@ -204,6 +204,7 @@ See **every session in every workspace**, agents first, in a sidebar you can kee
 - **Follow the crews you choose** — in the dialog, right-click a crew member to show or hide its diagram, use **ContextMenu** or **Shift+F10** on its row, or hide an open diagram with its **×** while its agents keep running. The dialog fits the open diagrams within three quarters of the window, stacks them below the list on narrow screens, and removes crews that end.
 - **Highlight a whole crew** — hover a crew member in either list, or click empty space inside its diagram to highlight the crew and its sidebar lines. Click the frame again to clear it; opening another diagram or hiding the highlighted one also clears the graph highlight.
 - **See each worker's task** — crew tiles show the agent icon and terminal title in its agent's colour, with the current task label or chat line underneath. Session, status, round and time share one compact row.
+- **Crew links survive a restart** — restoring a workspace brings its crews back on the board and sidebar as finished history, never as work in flight. A worker that was still working shows `ended`, and a reported one notes that its report was not kept.
 - **Waiting is not working** — an agent waiting on its crew, or standing by for its next task, wears a dotted mark instead of the working spinner.
 - **Click anything to go there** — a row in either list, its session, or its workspace, or a node on a crew board, opens or focuses that window at that tab.
 - **Keep the dialog up while you work elsewhere** — it stays open when you move to another window, so you can leave it on a second screen. It closes when you click beside it, reach a pane in its own workspace, or open it somewhere else.
@@ -243,6 +244,9 @@ Swap any pane between a terminal and a file explorer with one button — same di
 - **Scope** — **pin** the sidebar to a path, or let the **chain** button follow whatever you browse. Both go down to a single file, are marked in the Files tree, and survive a restart. Every action obeys the scope and names it in its tooltip.
 - **Graph** — the newest 60 commits, plus 60 more per **Show more**, up to 300. The magnifier finds a commit by subject or id with `Enter`/`Shift+Enter` stepping, and `Alt`-click collapses every commit.
 - **Commit card** — right-click a commit for the full message, the author, the date in the author's own time zone, the object id, and any branch or tag, each with a copy button.
+- **Stays current** — changes made outside GridVibe update the sidebar, file badges and listings in the background, and switching to a tab catches its explorer up straight away.
+
+In very large repositories, `git config core.untrackedCache true` (and `core.fsmonitor true` where your Git supports it) makes those background checks much faster.
 
 Cross-root transfers and Git checkout, pull, or merge are intentionally left to the terminal.
 

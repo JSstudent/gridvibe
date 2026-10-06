@@ -49,6 +49,7 @@ manager is touched at all.
 import time
 from typing import Any, Dict, Iterable, List, Optional, Set
 
+from web import crew_history
 from web.agent_activity import ACTIVITY_WORKING, describe_agent_activity
 from web.agent_handoffs import handoffs as agent_handoffs
 from web.agent_results import results as agent_results
@@ -332,7 +333,10 @@ def compose_dashboard(
         # pane) takes its links out of the reading, so the board, the sidebar's
         # wires, the chip and the header counts all lose it together and no
         # surface keeps a ghost of it. An agent that exits while its pane stays
-        # an agent pane keeps its row, and so its ``ended`` link.
+        # an agent pane keeps its row, and so its ``ended`` link. Links restored
+        # after a restart (``web/crew_history.py``) are the one kind that
+        # outlives the process, and this same filter shows them only between
+        # agent rows that are open now.
         "links": [
             dict(link)
             for link in links or ()
@@ -366,10 +370,10 @@ def build_dashboard_snapshot(session_manager: Any, activity: Dict[str, Any]) -> 
     invert the one ordering the whole backend depends on. The caller reads it
     first, releases, and hands it in.
 
-    The links and the two waiting readings are read here, after the manager
-    lock is released, each under its own store's lock alone: neither store's
-    lock is ever held with the manager's or ``connection_lock``, nor with the
-    other store's.
+    The links (restored crew history and the results store's live ones) and
+    the two waiting readings are read here, after the manager lock is
+    released, each under its own store's lock alone: no store's lock is ever
+    held with the manager's or ``connection_lock``, nor with another store's.
     """
     from web.workspaces import list_live_workspaces
 
@@ -386,7 +390,15 @@ def build_dashboard_snapshot(session_manager: Any, activity: Dict[str, Any]) -> 
                     session.to_dict()
                     for session in session_manager.get_group_sessions(group.group_id)
                 ]
-    links = agent_results.links_snapshot()
+    live_links = agent_results.links_snapshot()
+    # Restored history first, so a live round for the same pair is the newest
+    # and is the one the board draws; once a live link exists its pair's
+    # history is dropped for good.
+    crew_history.supersede(
+        (link.get("requester_session_id"), link.get("worker_session_id"))
+        for link in live_links
+    )
+    links = crew_history.snapshot() + live_links
     waiting = agent_results.waiting_requesters()
     standing_by = agent_handoffs.standing_by()
     return compose_dashboard(

@@ -47,6 +47,14 @@ before it is offered: the file is local state a user may edit, and a slot that
 cannot actually be relaunched must not be advertised as restorable. Both read
 paths share that one gate, so the restore chooser's group and pane counts
 always describe what a restore of that slot would really start.
+
+A slot also carries ``crew_links``: the agent crew links between panes of that
+workspace, with endpoints in snapshot coordinates (group id, pane index)
+because session ids do not survive a restart. Every capture writes it, from
+links read once before the file locks; the rules (what is kept, ``working``
+stored as ``ended``/``restarted``, per-entry validation) belong to
+``web/crew_history.py``. It is chrome-class on read: a bad block becomes
+``[]`` and never costs the slot.
 """
 
 import json
@@ -55,8 +63,9 @@ import math
 import os
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+from web import crew_history
 from web.agent_conversations import (
     CONVERSATION_ID_FIELD,
     CONVERSATION_PROVIDER_FIELD,
@@ -64,6 +73,8 @@ from web.agent_conversations import (
     conversation_restore_enabled,
     validate_conversation_identity,
 )
+from web.agent_results import MAX_ASSIGNMENTS
+from web.agent_results import results as agent_results
 from web.pane_paths import capture_pane_paths
 from web.paths import BASE_DIR
 from web.session_presentation import (
@@ -286,6 +297,106 @@ def _snapshot_group(group: Any, sessions: List[Any]) -> Dict[str, Any]:
         "opened_by": normalize_group_opened_by(data.get("opened_by")),
         "sessions": [_snapshot_session(session) for session in sessions],
     }
+
+
+def _captured_live_groups(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The live groups one capture stores: those holding at least one pane.
+
+    The slot's groups and its crew-link coordinates are both built from this
+    one list, so a (group id, pane index) always names the stored pane.
+    """
+    return [
+        group
+        for group in snapshot.get("groups") or []
+        if isinstance(group, dict) and group.get("sessions")
+    ]
+
+
+def _read_crew_links() -> List[Dict[str, Any]]:
+    """Every crew link a capture may store: held history first, then live.
+
+    Read once per capture, after the manager snapshot and before the file
+    locks. Each store takes only its own lock, never while another is held.
+    """
+    return crew_history.snapshot() + agent_results.links_snapshot()
+
+
+def _capture_crew_links(
+    live_groups: List[Dict[str, Any]], links: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """The stored crew links of one workspace, endpoints as snapshot coordinates.
+
+    Only links between two agent panes of these groups survive; what else is
+    kept, and how, is :func:`web.crew_history.translate_for_capture`.
+    """
+    pane_coords: Dict[str, Tuple[str, int]] = {}
+    agent_panes: Set[str] = set()
+    for group in live_groups:
+        group_id = group.get("group_id")
+        if not isinstance(group_id, str) or not group_id:
+            continue
+        for index, session in enumerate(group.get("sessions") or []):
+            data = session if isinstance(session, dict) else session.to_dict()
+            session_id = data.get("session_id")
+            if not isinstance(session_id, str) or not session_id:
+                continue
+            pane_coords[session_id] = (group_id, index)
+            if data.get("startup_mode") == "agent":
+                agent_panes.add(session_id)
+    if not links or not agent_panes:
+        return []
+    return crew_history.translate_for_capture(links, pane_coords, agent_panes)
+
+
+def _validate_crew_links(value: Any, groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return the stored crew links that still name a restorable pane.
+
+    Chrome-class: a block that is not a list, or holds more than
+    :data:`MAX_ASSIGNMENTS` entries, becomes ``[]``, and an entry that is
+    invalid or names a group or pane this slot will not restore is dropped.
+    The slot itself never fails over it. Per-entry rules are
+    :func:`web.crew_history.translate_for_restore`'s, applied here through an
+    identity mapping of the surviving coordinates.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > MAX_ASSIGNMENTS:
+        logger.warning(
+            "Runtime-state crew links dropped: %s",
+            "not a list" if not isinstance(value, list) else f"{len(value)} entries",
+        )
+        return []
+    seen: Set[str] = set()
+    ambiguous: Set[str] = set()
+    for group in groups:
+        group_id = group["group_id"]
+        (ambiguous if group_id in seen else seen).add(group_id)
+    coordinates: List[Tuple[str, int]] = [
+        (group["group_id"], index)
+        for group in groups
+        if group["group_id"] and group["group_id"] not in ambiguous
+        for index in range(len(group["sessions"]))
+    ]
+    keyed = {coordinate: str(key) for key, coordinate in enumerate(coordinates)}
+    links = crew_history.translate_for_restore(value, keyed)
+    entries: List[Dict[str, Any]] = []
+    for link in links:
+        requester = coordinates[int(link.pop("requester_session_id"))]
+        worker = coordinates[int(link.pop("worker_session_id"))]
+        entries.append(
+            {
+                "requester": {"group": requester[0], "pane": requester[1]},
+                "worker": {"group": worker[0], "pane": worker[1]},
+                **link,
+            }
+        )
+    if len(entries) != len(value):
+        logger.warning(
+            "Runtime-state crew links dropped %d of %d entries",
+            len(value) - len(entries),
+            len(value),
+        )
+    return entries
 
 
 def _looks_like_timestamp_name(name: str) -> bool:
@@ -544,6 +655,9 @@ def _validate_slot(workspace_id: Any, slot: Any) -> Optional[Dict[str, Any]]:
         ]
         appearance = workspace_appearance_from_panes(legacy_panes)
     validated.update(appearance or default_workspace_appearance())
+    # Chrome-class too: absent (a slot written before the field), invalid or
+    # oversized reads as no crew links, never as an unrestorable slot.
+    validated["crew_links"] = _validate_crew_links(slot.get("crew_links"), groups)
     return validated
 
 
@@ -872,8 +986,13 @@ class RuntimeStateStore:
         md_preset: str,
         md_font: str,
         source_font: str,
+        crew_links: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Assemble one stored slot from a captured shape."""
+        """Assemble one stored slot from a captured shape.
+
+        ``crew_links`` is rewritten by every capture, like the groups it points
+        into: a capture that left it out would erase it.
+        """
         captured_group_ids = {group["group_id"] for group in groups}
         slot: Dict[str, Any] = {
             "workspace_id": workspace_id,
@@ -898,6 +1017,7 @@ class RuntimeStateStore:
             "md_font": md_font,
             "source_font": source_font,
             "groups": groups,
+            "crew_links": crew_links,
         }
         manually_saved_at = (
             saved_at
@@ -934,16 +1054,19 @@ class RuntimeStateStore:
         # The complete live set, not just this workspace: it is what the
         # auto-slot cap must never evict (MW-14).
         live_snapshots = session_manager.snapshot_live_workspaces()
+        # Once, after the manager snapshot and before the file locks.
+        links = _read_crew_links()
         live_snapshot = live_snapshots.get(workspace_id)
         if not live_snapshot:
             return None
+        live_groups = _captured_live_groups(live_snapshot)
         groups = [
             _snapshot_group(group, list(group.get("sessions") or []))
-            for group in live_snapshot.get("groups") or []
-            if isinstance(group, dict) and group.get("sessions")
+            for group in live_groups
         ]
         if not groups:
             return None
+        crew_links = _capture_crew_links(live_groups, links)
 
         if active_group_id is None:
             active_group_id = live_snapshot.get("active_group_id")
@@ -998,6 +1121,7 @@ class RuntimeStateStore:
                 topbar_visible=normalized_topbar_visible,
                 agent_sidebar_open=normalized_agent_sidebar,
                 agent_sidebar_scale=normalized_scale,
+                crew_links=crew_links,
                 **appearance,
             )
             slot["revision"] = self._bump_revision(
@@ -1035,6 +1159,8 @@ class RuntimeStateStore:
         live_snapshots = session_manager.snapshot_live_workspaces()
         if not live_snapshots:
             return {}
+        # Once, after the manager snapshot and before the file locks.
+        links = _read_crew_links()
 
         saved_at = time.time()
         state_path = self.state_path()
@@ -1056,10 +1182,10 @@ class RuntimeStateStore:
                         workspace_id,
                     )
                     continue
+                live_groups = _captured_live_groups(snapshot)
                 groups = [
                     _snapshot_group(group, list(group.get("sessions") or []))
-                    for group in snapshot.get("groups") or []
-                    if isinstance(group, dict) and group.get("sessions")
+                    for group in live_groups
                 ]
                 if not groups:
                     continue
@@ -1103,6 +1229,7 @@ class RuntimeStateStore:
                         or normalize_agent_sidebar_scale(snapshot.get("agent_sidebar_scale"))
                         or 100
                     ),
+                    crew_links=_capture_crew_links(live_groups, links),
                     **(
                         normalize_workspace_appearance(snapshot)
                         or default_workspace_appearance()

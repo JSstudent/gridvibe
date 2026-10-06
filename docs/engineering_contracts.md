@@ -712,7 +712,8 @@ unless the task explicitly changes this contract.
   applies, including unchanged rows; state polls never commit baselines.
   The page watches the browsed directory and loaded, expanded tree directories
   once per path through a rotating `EXPLORER_DIR_WATCH_MAX_TREE_NODES` (16)
-  window. Dirty paths merge across polls and each apply selects at most 16 paths
+  window; in directory mode the browsed directory leads every pass and the
+  other 15 slots rotate over the rest. Dirty paths merge across polls and each apply selects at most 16 paths
   (the tree helper independently caps itself at 16 nodes). Failed or held work
   remains pending; versions preserve changes queued during another apply.
   Checks capture pane/session/root, path/mode/tab, navigation/root epochs and
@@ -722,6 +723,24 @@ unless the task explicitly changes this contract.
   refreshes its parent, whose applied rows prune cached descendants; a missing
   session suspends the watch. Quiet refresh preserves scroll, expansion, Find,
   tabs and drafts, and an open editor permits tree refresh only.
+- The change watcher (`explorer-git-watch.js`) is one page-level recursive
+  `setTimeout`. It checks only the shown tab's panes, sequentially, with at most
+  one request per pane per check, and an unchanged poll writes nothing. Focus,
+  visibility return and a tab swap wake it: `initialLoad()` calls
+  `explorerGitWatchWakeVisible()` after restoring a cached view or rebuilding
+  the grid, never for a reused view, debounced by
+  `EXPLORER_GIT_WATCH_SWAP_SETTLE_MS` (200 ms). A wake zeroes the shown panes'
+  due times. A wake during a running pass makes that pass rerun as soon as it
+  settles; a pass whose `terminals` list was replaced stops and reruns on the
+  list now shown; a check in flight when a wake landed stays due instead of
+  installing its interval. The adaptive interval (duration × 6 over a 5 s local
+  / 10 s SSH base, 60 s cap, churn damper) measures only the state request(s),
+  never the refresh a change triggers.
+- Watcher Git reads run `git status` under
+  `EXPLORER_GIT_BACKGROUND_STATUS_TIMEOUT_S` (5 s): `git/state` always, and the
+  quiet `git/repo` and `/entries` refreshes, which send `background=1`.
+  Interactive loads, "Show more" included, keep `EXPLORER_GIT_STATUS_TIMEOUT_S`
+  (2 s).
 - Multi-entry selection belongs to session id + root revision + one surface;
   changing any drops it. It never spans tree/listing or persists. Prune targets to
   topmost paths; rename stays single-entry. Batches issue N existing per-entry
@@ -829,8 +848,8 @@ unless the task explicitly changes this contract.
   reading a hovered scrolled panel — never on idle retained DOM focus, so a
   visible but unfocused workspace still applies the newest pending state while a
   `pointercancel`/window blur/hidden page reconciles pointer and edit state, and
-  the wake on focus/visibility return performs one immediate check without
-  replaying hidden intervals. The quiet apply preserves the commit-message draft,
+  the wake on focus/visibility return or a tab swap performs one immediate check
+  without replaying hidden intervals. The quiet apply preserves the commit-message draft,
   caret, selection (including `selectionDirection`) and scroll, restores caret
   without stealing foreground focus after a blur, and preserves the
   commit-message caret on Alt-collapse.
@@ -1545,12 +1564,43 @@ unless the task explicitly changes this contract.
   or stops being an agent pane, takes its links out of the next reading, so
   the board, the sidebar wires, the chip and the header counts lose it
   together and no surface draws a ghost of it. An agent that exits while its
-  pane stays an agent pane keeps its row, and so its `ended` link.
+  pane stays an agent pane keeps its row, and so its `ended` link. Restored
+  history (the next bullet) is the one kind that outlives the process, and this
+  same filter shows it only between agent rows that are open now.
+- **Crew links survive a restart as history, and only as history.** Every
+  runtime-state capture (autosave, explicit save, voluntary exit) writes the
+  slot's `crew_links` from one read of the live links and the held history,
+  taken after the manager snapshot and before the file locks. An entry is the
+  link's public fields (`LINK_FIELDS` without `link_id`) with each endpoint as
+  snapshot coordinates, `{group, pane}` of the same slot, because session ids
+  do not survive a restart; no pane field or `TerminalSession` change carries
+  it. Only links between two agent panes of the *same captured workspace* are
+  stored, one per (requester, worker) pair with a live link beating a restored
+  one, capped at `MAX_ASSIGNMENTS`. A `working` link is stored as `ended` with
+  the `restarted` reason key (`DASHBOARD_CREW_END_REASONS` carries its
+  sentence), so the file never claims work is in flight. Cross-workspace links
+  are not persisted. The block is chrome-class on read (`_validate_crew_links`):
+  absent, invalid or oversized reads as `[]`, a bad entry is dropped, and the
+  slot is never lost over it. Restore (`_restore_crew_links`) maps (snapshot
+  group id, pane index) to the new session ids only for a group that came back
+  with the same pane count, and installs the result in `web/crew_history.py`,
+  **never in `ResultStore`**: restored links cannot be collected, waited on,
+  counted or used to gate a follow-up, and carry no text, receipt or handoff id.
+  A failure there is logged shape-only and restores no links; it never changes
+  the restore's result. A second restore of a workspace id replaces its history,
+  keeping only links between two panes that are still live (panes moved to
+  another workspace). `build_dashboard_snapshot()` publishes history first and
+  live links after, and drops a pair's history once a live link for it exists,
+  so the live round is the newest. Closing a pane drops history naming it,
+  beside `agent_results.forget_session`. The feature is always on, with no
+  setting. A restored reported link's hover says it reported before GridVibe
+  restarted and that the report was not kept.
 - **A round counts tasks handed to the same running agent.** A task that
   starts an agent (split, launch, `set_pane_agent`) is round 1; only a
   `send_task` follow-up advances it, reading the continued assignment's round
   before the superseded one can be dropped (round 2 when it is already gone).
-  The count lives in memory only, like the rest of the store.
+  The count lives in memory only, like the rest of the store; a restart keeps
+  each restored link's round as history but never continues it.
 - **`pane["waiting"]` overrides activity, after transport.** It is `crew`
   while the agent is inside `wait_for_results`, `task` while it stands by
   inside `wait_for_task`, and `""` otherwise; `crew` wins inside the overlap.

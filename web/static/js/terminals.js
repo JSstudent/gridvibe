@@ -9420,6 +9420,15 @@
                 });
             }
 
+            /* A restored or rebuilt view brings explorer panes whose Git and
+               file state is as old as the moment they were last shown; only
+               the change watcher catches them up, and its timer was planned
+               for the panes this load replaced. A reused view is already
+               on its schedule. */
+            if (!usingCurrentView && stillCurrent()) {
+                explorerGitWatchWakeVisible();
+            }
+
             /* The grid this load just produced is what a held dashboard target
                has been waiting for. */
             settleWorkspaceFocusTarget();

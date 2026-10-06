@@ -55,7 +55,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import tests  # noqa: E402,F401 - redirects durable state away from the real files
 from sessions.manager import SessionStatus  # noqa: E402
-from web import api  # noqa: E402
+from web import api, crew_history  # noqa: E402
 from web import terminal_io as web_terminal_io  # noqa: E402
 from web.agent_activity import (  # noqa: E402
     ACTIVITY_IDLE,
@@ -602,6 +602,35 @@ class DashboardCrewTestCase(unittest.TestCase):
         )
         self.assertEqual([item["worker_session_id"] for item in after["links"]], ["other"])
 
+    def test_restored_links_pass_the_live_row_filter_like_any_other(self):
+        """Restored history is filtered by the same rule: kept between two live
+        agent rows, with its ``restored`` mark, and dropped when either end is
+        a closed pane or not an agent row."""
+        restored = dict(state="reported", status="done", reported_at="2026-10-02T10:05:00+00:00",
+                        restored=True)
+        snapshot = self._compose(
+            links=[
+                link("orch", "worker", **restored),
+                link("orch", "closed-pane", **restored),
+                link("orch", "shell", **restored),
+            ]
+        )
+
+        (published,) = snapshot["links"]
+        self.assertEqual(published, link("orch", "worker", **restored))
+        self.assertIs(published["restored"], True)
+
+    def test_a_restored_link_to_a_pane_that_closes_leaves_the_next_reading(self):
+        links = [link("orch", "worker", state="ended", reason="restarted", restored=True)]
+        before = self._compose(links=links)
+        after = self._compose(
+            sessions_by_group={"g1": [session("orch", "g1")]},
+            links=links,
+        )
+
+        self.assertEqual(len(before["links"]), 1)
+        self.assertEqual(after["links"], [])
+
     def test_no_links_is_an_empty_list(self):
         self.assertEqual(self._compose()["links"], [])
 
@@ -689,12 +718,14 @@ class DashboardRouteTestCase(unittest.TestCase):
         api.session_manager.reset_sessions()
         with web_terminal_io.connection_lock:
             web_terminal_io.ssh_connections.clear()
+        crew_history.reset()
         self.addCleanup(self._reset)
 
     def _reset(self):
         api.session_manager.reset_sessions()
         with web_terminal_io.connection_lock:
             web_terminal_io.ssh_connections.clear()
+        crew_history.reset()
 
     def _launch_group(self):
         created = api.session_manager.create_group(
@@ -900,6 +931,80 @@ class DashboardRouteTestCase(unittest.TestCase):
             payload["workspaces"][0]["groups"][0]["panes"][0]["waiting"], WAITING_CREW
         )
 
+    def _add_agent(self, group_id, title):
+        return api.session_manager.create_session(
+            group_id=group_id,
+            host="10.0.0.5",
+            directory="/srv/app",
+            title=title,
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection="codex",
+        )
+
+    def test_restored_history_comes_first_and_a_live_round_supersedes_its_pair(self):
+        """History is read before the live links, so a live round for the same
+        pair is the newest; once it exists, that pair's history is dropped for
+        good, and the other pair's history is published with its mark."""
+        _, agent, _ = self._launch_group()
+        result_store.reset()
+        self.addCleanup(result_store.reset)
+        live_worker = self._add_agent(agent.group_id, "Terminal 3")
+        old_worker = self._add_agent(agent.group_id, "Terminal 4")
+        reported = {"state": "reported", "status": "done", "round": 2}
+        crew_history.install(
+            "default",
+            [
+                {"requester_session_id": agent.session_id,
+                 "worker_session_id": live_worker.session_id, **reported},
+                {"requester_session_id": agent.session_id,
+                 "worker_session_id": old_worker.session_id, **reported},
+            ],
+        )
+
+        before = self.client.get("/api/dashboard").get_json()["links"]
+        result_store.expect(
+            "h-live", requester_session_id=agent.session_id,
+            worker_session_id=live_worker.session_id,
+        )
+        after = self.client.get("/api/dashboard").get_json()["links"]
+
+        self.assertEqual(
+            [(item["worker_session_id"], item.get("restored", False)) for item in before],
+            [(live_worker.session_id, True), (old_worker.session_id, True)],
+        )
+        self.assertEqual(
+            [(item["worker_session_id"], item.get("restored", False), item["state"])
+             for item in after],
+            [(old_worker.session_id, True, "reported"),
+             (live_worker.session_id, False, "working")],
+        )
+        self.assertEqual(crew_history.history.count(), 1)
+        for item in after:
+            for private in ("text", "receipt", "handoff_id"):
+                self.assertNotIn(private, item)
+        self.assertNotIn("h-live", json.dumps(after))
+
+    def test_restored_history_to_a_closed_pane_is_not_published(self):
+        _, agent, _ = self._launch_group()
+        worker = self._add_agent(agent.group_id, "Terminal 3")
+        crew_history.install(
+            "default",
+            [
+                {"requester_session_id": agent.session_id,
+                 "worker_session_id": worker.session_id, "state": "ended",
+                 "reason": "restarted"},
+                {"requester_session_id": agent.session_id,
+                 "worker_session_id": "closed-worker", "state": "ended",
+                 "reason": "restarted"},
+            ],
+        )
+
+        (published,) = self.client.get("/api/dashboard").get_json()["links"]
+        self.assertEqual(published["worker_session_id"], worker.session_id)
+        self.assertEqual(published["reason"], "restarted")
+        self.assertIs(published["restored"], True)
+
     def test_neither_store_is_read_under_the_manager_lock_or_connection_lock(self):
         self._launch_group()
         held = []
@@ -928,11 +1033,13 @@ class DashboardRouteTestCase(unittest.TestCase):
 
         with patch.object(result_store, "links_snapshot", reading(result_store.links_snapshot)), \
                 patch.object(result_store, "waiting_requesters", reading(result_store.waiting_requesters)), \
-                patch.object(handoff_store, "standing_by", reading(handoff_store.standing_by)):
+                patch.object(handoff_store, "standing_by", reading(handoff_store.standing_by)), \
+                patch.object(crew_history, "supersede", reading(crew_history.supersede)), \
+                patch.object(crew_history, "snapshot", reading(crew_history.snapshot)):
             response = self.client.get("/api/dashboard")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(held, [(True, True)] * 3)
+        self.assertEqual(held, [(True, True)] * 5)
 
     def test_an_empty_server_answers_rather_than_failing(self):
         """A workspace record with no session in it is not a live workspace --

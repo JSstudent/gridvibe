@@ -411,6 +411,29 @@ class IndexCrewsTestCase(AgentCrewsNodeTestCase):
         self.assertEqual(set(three["rootOf"].values()), {"q"})
         self.assertEqual(result["members"], ["q", "r", "p", "tail"])
 
+    def test_history_then_live_makes_the_live_round_current(self):
+        """The server puts restored history before the live links, so a live
+        round for a pair that also has history is its newest and is drawn; a
+        pair with history alone is drawn from its history."""
+        result = self._run_node(
+            """
+            const index = crews.indexCrews({ links: [
+                link('orch', 'a', { state: 'reported', status: 'done', round: 2, restored: true }),
+                link('orch', 'b', { state: 'ended', reason: 'restarted', restored: true }),
+                link('orch', 'a', { read: false, round: 3 })
+            ] });
+            const current = index.byRequester.get('orch');
+            report({
+                plain: plain(index),
+                phases: current.map(l => [l.worker_session_id, crews.linkPhase(l), Boolean(l.restored)])
+            });
+            """
+        )
+        self.assertEqual(result["plain"]["byRequester"], {"orch": ["a#l3", "b#l2"]})
+        self.assertEqual(
+            result["phases"], [["a", "handed", False], ["b", "ended", True]]
+        )
+
     def test_nothing_to_index_is_an_empty_forest(self):
         result = self._run_node(
             """
@@ -441,7 +464,11 @@ class LinkPhaseTestCase(AgentCrewsNodeTestCase):
                 ['blocked', { state: 'reported', status: 'blocked', collected: true }],
                 ['failed', { state: 'reported', status: 'failed', collected: true }],
                 ['ended', { state: 'ended', reason: 'pane closed' }],
-                ['ended', { state: 'ended', read: true, collected: true }]
+                ['ended', { state: 'ended', read: true, collected: true }],
+                // Restored history is drawn by the same table: never in flight.
+                ['done', { state: 'reported', status: 'done', restored: true }],
+                ['blocked', { state: 'reported', status: 'blocked', restored: true }],
+                ['ended', { state: 'ended', reason: 'restarted', restored: true }]
             ];
             report(rows.map(([want, row]) => [want, crews.linkPhase(row)]));
             """

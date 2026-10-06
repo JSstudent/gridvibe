@@ -24,6 +24,7 @@ from collections import deque
 from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Tuple
 
 from sessions.manager import SessionStatus
+from web import crew_history
 from web.agent_activity import (
     announced_agent_title,
     apply_agent_events,
@@ -383,6 +384,8 @@ def _close_ssh_connection(session_id: str, clear_buffer: bool = True, *, expecte
         # to collect them -- while a report this pane made stays with the
         # agent that asked for it.
         agent_results.forget_session(session_id)
+        # Restored crew history follows the same close rule as live links.
+        crew_history.forget_session(session_id)
     _evict_pooled_ssh_client(session_id)
 
 

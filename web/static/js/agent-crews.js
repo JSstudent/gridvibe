@@ -22,7 +22,10 @@
        second look.
      · **Only live panes are in a crew.** The server publishes a link only
        while both of its panes are agent rows, so a pane that closes leaves the
-       crew everywhere at once and nothing here has a ghost to draw.
+       crew everywhere at once and nothing here has a ghost to draw. Links
+       restored after a restart are the one kind that outlives the process;
+       they arrive first in the list, flagged `restored`, so a live round for
+       the same pair is the newest.
      · **Wires are a decoration.** The layer owns one `<svg>` inside the
        scroller and nothing else: a phase change rewrites that SVG and never a
        row, so scroll, focus and the input-target ring stay where they were.

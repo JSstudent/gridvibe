@@ -1,9 +1,141 @@
 # GridVibe Testing Issues Archive
-Last updated: 2026-10-04
+Last updated: 2026-10-06
 
 Closed issues are moved here from [`docs/testing_issues.md`](../../testing_issues.md) after their resolution is verified. IDs remain reserved and must be considered when allocating new issues.
 
 ## Closed Issues
+
+### Issue ID: ISSUE-2026-064
+- Title: Switching session tabs shows stale explorer Git and file-tree state for up to a minute
+- Priority: Medium
+- Status: Closed
+- Closed: 2026-10-06
+- Area: `web/static/js/explorer-git-watch.js`, `web/static/js/terminals.js`, `web/explorer.py`
+- Assignee: Unassigned
+- Tags: `explorer`, `git`, `performance`, `session-groups`
+- Reported: 2026-10-06
+
+Description:
+Switching to a session tab does not start an explorer change check. The tab
+is usually restored from `cachedGroupViews`, and every explorer path on that
+restore re-renders cached state without fetching: `syncExplorerPane` returns
+early for an attached pane, `loadExplorerGitRepo` only re-renders when already
+loaded for the scope, and `loadExplorerTree` renders the cached children.
+Catching up is left to the change watcher, which the swap never wakes —
+`explorerGitWatchWake()` runs only on `visibilitychange`, `focus` and
+`pageshow`. Large directories and repositories make the delay longer, on a
+swap and in steady state.
+
+Steps to reproduce:
+1. Open two session tabs: A with only terminal panes, B with a local explorer
+   pane (Files tree and Git sidebar open) on a Git worktree.
+2. Stay on A for longer than one watch interval.
+3. From a terminal, create or modify a file under B's root.
+4. Switch to B.
+
+Expected behavior:
+The tab shows the new file and its Git badge within about one `git status`
+round trip of the switch.
+
+Actual behavior / logs:
+B shows the state from when it was left until the next page tick, up to 60 s
+later. Causes found in code:
+- **Swap timing.** `explorerGitWatchTick` starts `nextDelay` at
+  `EXPLORER_GIT_WATCH_MAX_MS` (60 s) and only shortens it for panes it can
+  poll in the current `terminals`. A tab with no explorer pane schedules the
+  next tick 60 s out. The returning pane's own `_…NextAt` deadlines are
+  already past, so the page timer alone sets the wait.
+- **Running tick.** Checks run one at a time and are awaited. A check for a
+  pane in the tab just left that is waiting on a slow `git status` holds back
+  the new tab. A wake during a running tick returns early on
+  `explorerGitWatchRunning`, and the running tick then reschedules from its
+  stale list.
+- **Interval includes refresh work.** The next delay is the measured duration
+  × 6 (5 s minimum, 60 s maximum). For the Git check the duration runs from
+  before the `/git/state` fetch to `finally`, so it includes the full
+  `/git/repo` refetch, the directory re-list and the change-mark refresh. A
+  4 s refresh after a change puts the next poll about 24 s out. The directory
+  check's duration covers up to 16 sequential `/directory/state` requests plus
+  its re-list. From the third consecutive changed poll the interval also
+  doubles per poll, up to 60 s.
+- **Directories over 4096 entries.** At `EXPLORER_DIRECTORY_STATE_MAX_ENTRIES`
+  (4096) the server returns `revision: ""` and the client skips that
+  directory, so those directories update only through the Git signal.
+- **Git status timeout.** The state poll's `git status --untracked-files=all`
+  runs with `timeout=2.0`. In a large Windows worktree it can time out; each
+  timeout counts as a failure (10/20/30 s backoff, suspended after 5), and a
+  listing whose Git context timed out also drops the Git-driven re-list
+  consumer (`explorerFsWatchConsumer` requires `_explorerGitContext.available`).
+- **Large expanded trees.** The directory poll checks at most 16 directories
+  per pass and advances a rotating window, so with 50 expanded folders a
+  change in the last one can take 4 passes at the stretched interval.
+- **Deferral while reading.** Applies are held while focus is inside the tree
+  or listing, or while the pointer is over a surface scrolled away from the
+  top (`explorerFsWatchDeferralActive`). Large trees are usually scrolled.
+
+### Proposed solution:
+1. Add a wake a swap can call (for example `explorerGitWatchWakeVisible()`)
+   that zeroes `_explorerGitWatchNextAt`, `_explorerFileWatchNextAt` and
+   `_explorerDirWatchNextAt` for the current `terminals`, clears the timer and
+   starts a tick.
+2. Add a rerun-requested flag: a wake that arrives during a running tick sets
+   it, and the running tick re-runs immediately instead of scheduling its
+   stale delay. Without it, step 1 does nothing whenever a tick is in flight.
+3. Call the wake at the end of `initialLoad()` when the view was restored from
+   cache or rebuilt (not when the current view was reused). Debounce it by
+   about 200 ms, or skip panes checked in the last 1–2 s, so fast tab cycling
+   does not queue a burst of `git status` calls.
+4. Optionally, let a swap stop a tick that is waiting on a pane no longer
+   shown. The stale-response guards (`explorerWatchPaneCurrent`) already
+   discard that result.
+5. Measure only the state request when computing the adaptive interval, not
+   the refresh that follows a detected change.
+6. Give the `/git/state` poll a longer timeout than 2 s, or reuse a recent
+   `git status` result. Document `core.untrackedCache=true` / `core.fsmonitor`
+   as a user-side speed-up for large repositories.
+7. Check the browsed directory first in every directory pass, outside the
+   16-directory window.
+
+Steps 1–4 keep the watcher contract: only visible panes are polled, at most
+one request per pane per check, and an unchanged poll makes no DOM writes.
+Tests: a Node-executed watch test that a cache restore wakes the visible
+explorer panes once (debounced), that a wake during a running tick causes an
+immediate rerun, and that the adaptive delay ignores apply time.
+
+Resolution:
+Verified and fixed on 2026-10-06. A swap restored from `cachedGroupViews` never
+woke the watcher, so its next pass was planned around the tab just left.
+`initialLoad()` now calls `explorerGitWatchWakeVisible()` after restoring a
+cached view or rebuilding the grid (not for a reused view), debounced 200 ms,
+which zeroes the shown panes' due times and starts a pass. A wake during a
+running pass sets a rerun flag and the pass reruns as soon as it settles; a
+pass whose `terminals` list was replaced stops and reruns on the shown list; a
+check in flight when the wake landed stays due instead of installing its
+interval (a wake serial), so a pane left and restored mid-check is polled again.
+The adaptive interval now measures only the state request(s) for the Git, file
+and directory checks. The watcher's Git reads get a 5 s `git status` bound
+(`EXPLORER_GIT_BACKGROUND_STATUS_TIMEOUT_S`): `git/state` always, and the quiet
+`git/repo` and `/entries` refreshes through `background=1`; interactive loads
+keep 2 s. The browsed directory leads every directory-check pass, with the
+other 15 slots rotating. Proposed step 4 was taken without aborting the
+in-flight old-tab request, which the identity guards still discard, so a swap
+can wait up to one `git status`. Directories over 4096 entries and the
+reading deferral are unchanged; the README now suggests
+`core.untrackedCache` / `core.fsmonitor` for large repositories.
+
+Validation: new Node-executed tests in `tests/test_explorer_git_watch.py`
+(swap rerun, wake during a running pass, in-flight pane re-polled, debounced
+swap wake, hidden-page hold, watcher-only background refetch, interval ignores
+apply time), `tests/test_explorer_directory_watch.py` (browsed directory leads
+each pass, background re-lists, interval ignores re-list) and
+`tests/test_session_view_cache.py` (restored and rebuilt views wake once, a
+reused view does not); `tests/test_api.py` covers which reads get which
+`git status` bound. The swap and interval tests fail against the pre-fix
+watcher. 2330 explorer, Git, API and session-view tests passed, and Ruff is
+clean. A Codex OCR delegate review reported two medium findings (in-flight
+pane deadline, refreshes still bound at 2 s); both were fixed. The user
+confirmed the manual swap test on 2026-10-06.
+
 
 ### Issue ID: ISSUE-2026-063
 - Title: Pane ID mismatch blocks Save & Close without a synchronization action

@@ -15778,6 +15778,47 @@ class ExplorerGitRevisionTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 500)
 
+    def test_watcher_git_reads_outlast_the_interactive_bound(self):
+        # The change watcher's `git status` may run longer than a listing's, so
+        # a large worktree neither fails every poll nor every refresh it causes.
+        repo_dir = self._init_committed_repo()
+        session_id = self._create_explorer_session(repo_dir)
+
+        def status_timeouts(request):
+            with patch.object(
+                web_explorer, "_run_git_command", wraps=web_explorer._run_git_command
+            ) as run_git:
+                response = request()
+            self.assertEqual(response.status_code, 200)
+            response.close()
+            return {
+                call.kwargs["timeout"]
+                for call in run_git.call_args_list
+                if call.args[0][:1] == ["status"]
+            }
+
+        background = web_explorer.EXPLORER_GIT_BACKGROUND_STATUS_TIMEOUT_S
+        interactive = web_explorer.EXPLORER_GIT_STATUS_TIMEOUT_S
+        base = f"/api/explorer/{session_id}"
+        reads = {
+            "poll": lambda: self._git_state(session_id),
+            "listing": lambda: self.client.get(f"{base}/entries"),
+            "quiet listing": lambda: self.client.get(f"{base}/entries?background=1"),
+            "sidebar": lambda: self.client.get(f"{base}/git/repo"),
+            "quiet sidebar": lambda: self.client.get(f"{base}/git/repo?background=1"),
+        }
+        expected = {
+            "poll": background,
+            "listing": interactive,
+            "quiet listing": background,
+            "sidebar": interactive,
+            "quiet sidebar": background,
+        }
+        for name, request in reads.items():
+            with self.subTest(read=name):
+                self.assertEqual(status_timeouts(request), {expected[name]})
+        self.assertGreater(background, interactive)
+
     def test_git_repo_and_mutating_routes_carry_matching_revision(self):
         repo_dir = self._init_committed_repo()
         (repo_dir / "README.md").write_text("# Project\n\nchanged\n", encoding="utf-8")
@@ -16157,7 +16198,7 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
 
     def test_quiet_refresh_helper_contract(self):
         sidebar = self._static("js/explorer-git-sidebar.js")
-        self.assertIn("async function refreshExplorerGitRepoQuiet(index)", sidebar)
+        self.assertIn("async function refreshExplorerGitRepoQuiet(", sidebar)
         quiet_fn = sidebar[
             sidebar.index("async function refreshExplorerGitRepoQuiet"):
             sidebar.index("function applyExplorerGitRepoQuiet")

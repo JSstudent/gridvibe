@@ -157,6 +157,9 @@
         ])));
     }
 
+    /* Only the change watcher re-lists quietly, so the request asks for the
+       server's background `git status` bound: a worktree slower than the
+       interactive bound would otherwise lose its badges on every re-list. */
     async function explorerFetchEntriesQuiet(index, path) {
         const sessionId = sessionIds[index];
         if (!sessionId) {
@@ -164,7 +167,8 @@
         }
         try {
             const response = await fetch(
-                `/api/explorer/${encodeURIComponent(sessionId)}/entries?path=${encodeURIComponent(path || '')}`,
+                `/api/explorer/${encodeURIComponent(sessionId)}/entries`
+                + `?path=${encodeURIComponent(path || '')}&background=1`,
                 { cache: 'no-store' }
             );
             const data = await response.json();

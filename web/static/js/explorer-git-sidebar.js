@@ -2017,14 +2017,16 @@ ${explorerGitRequestedScopeKind(pane)}`;
         }
     }
 
-    async function refreshExplorerGitRepoQuiet(index) {
+    async function refreshExplorerGitRepoQuiet(index, { background = false } = {}) {
         /* Background variant of loadExplorerGitRepo for the Git change
            listener (explorer-git-watch.js): forced (no _explorerGitRepoLoaded
            early return, no invalidate — the last good panel stays on screen),
            quiet (only a git-refreshing class on the panel, never the Loading
            placeholder), and identity-checked (a stale pane/session id yields
            null). Returns the fresh payload, or null on failure/staleness —
-           the pane keeps its last good _explorerGitRepo either way. */
+           the pane keeps its last good _explorerGitRepo either way.
+           `background` is the listener's own refetch: no reader waits on it,
+           so it asks for the server's longer `git status` bound. */
         const pane = terminals[index];
         const sessionId = sessionIds[index];
         const scopePath = explorerGitScopePath(pane);
@@ -2041,7 +2043,10 @@ ${explorerGitRequestedScopeKind(pane)}`;
                     sessionId,
                     'repo',
                     scopePath,
-                    explorerGitCommitLimitParams(pane),
+                    {
+                        ...explorerGitCommitLimitParams(pane),
+                        background: background ? '1' : ''
+                    },
                     scopeKind
                 ),
                 { cache: 'no-store' }

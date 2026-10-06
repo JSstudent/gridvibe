@@ -65,12 +65,25 @@
     const EXPLORER_GIT_WATCH_MAX_FAILURES = 5;        // then suspend
     const EXPLORER_GIT_WATCH_CHURN_LIMIT = 3;         // consecutive changes
     const EXPLORER_GIT_WATCH_EDIT_SETTLE_MS = 800;    // bounded typing settle window
+    const EXPLORER_GIT_WATCH_SWAP_SETTLE_MS = 200;    // tab-swap wake debounce
     // Directory state check: how many directories one pass polls. Mirrors
     // EXPLORER_FS_WATCH_MAX_TREE_NODES in explorer-tree.js so the tree-quiet
     // refresh and this poll agree on a bounded per-pass plan.
     const EXPLORER_DIR_WATCH_MAX_TREE_NODES = 16;
     let explorerGitWatchTimer = null;
+    let explorerGitWatchSwapTimer = null;
     let explorerGitWatchRunning = false;
+    let explorerGitWatchRerun = false;
+    let explorerGitWatchWakeSerial = 0;               // advanced by every wake
+
+    /* The due time a finished check installs. A check that was in flight when
+       a wake landed answered from a snapshot older than the wake, and the
+       wake's zeroed due time would otherwise be overwritten by its normal
+       interval, so the rerun the wake asked for would skip this very pane.
+       It stays due instead. */
+    function explorerWatchDueAt(wakeSerial, delay) {
+        return wakeSerial === explorerGitWatchWakeSerial ? Date.now() + delay : 0;
+    }
     let explorerGitWatchPointerDown = false;
     let explorerGitWatchEditUntil = 0;                // genuine-edit deadline (Date.now ms)
     let explorerGitWatchInteractionResumed = true;
@@ -89,7 +102,10 @@
 
     /* Adaptive floor (plan §5.4): a poll that takes 900 ms yields a 5.4 s
        floor; the listener can never consume more than ~1/6 of wall-clock time
-       in Git work. The churn damper doubles the interval per consecutive
+       in Git work. Only the state request is measured — the refresh a detected
+       change triggers is the user's update, not the poll's cost, and counting
+       it pushed the next poll out exactly when changes were landing. The
+       churn damper doubles the interval per consecutive
        changed poll past the limit, capped at MAX — a build or agent rewriting
        files stops repainting the sidebar every base interval. Shared by both
        checks: a `stat` is far cheaper than `git status`, so the Git cadence is
@@ -554,6 +570,8 @@
         }
         pane._explorerFileWatchInFlight = true;
         const started = performance.now();
+        let measured = false;
+        const wakeSerial = explorerGitWatchWakeSerial;
         let delay = explorerFileWatchNextDelay(pane);
         try {
             const known = encodeURIComponent(pane._explorerFileStateRevision || '');
@@ -576,6 +594,8 @@
             if (!explorerWatchPaneCurrent(index, pane, sessionId) || pane._explorerFilePath !== path) {
                 return;
             }
+            pane._explorerFileWatchLastMs = performance.now() - started;
+            measured = true;
             pane._explorerFileWatchFailures = 0;
             if (!data || data.changed === false || data.revision === pane._explorerFileStateRevision) {
                 pane._explorerFileWatchChanges = 0;
@@ -598,8 +618,10 @@
         } finally {
             pane._explorerFileWatchInFlight = false;
             if (explorerWatchPaneCurrent(index, pane, sessionId)) {
-                pane._explorerFileWatchLastMs = performance.now() - started;
-                pane._explorerFileWatchNextAt = Date.now() + delay;
+                if (!measured) {
+                    pane._explorerFileWatchLastMs = performance.now() - started;
+                }
+                pane._explorerFileWatchNextAt = explorerWatchDueAt(wakeSerial, delay);
             }
         }
     }
@@ -650,19 +672,23 @@
     /* A bounded, rotating window over the targets. Past the per-pass ceiling
        the window starts at a cursor that advances every pass, so a large
        expanded tree's deeper nodes are eventually checked instead of being
-       permanently excluded beyond the first `EXPLORER_FS_WATCH_MAX_TREE_NODES`. */
+       permanently excluded beyond the first `EXPLORER_FS_WATCH_MAX_TREE_NODES`.
+       The browsed directory is what the reader is looking at, so it leads
+       every pass; only the tree directories behind it share the rotation. */
     function explorerDirectoryWatchWindow(pane) {
         const targets = explorerDirectoryWatchTargets(pane);
         const limit = EXPLORER_DIR_WATCH_MAX_TREE_NODES;
         if (targets.length <= limit) {
             return { paths: targets, advance: 0, total: targets.length };
         }
+        const paths = pane._explorerMode === 'directory' ? targets.slice(0, 1) : [];
+        const rotating = targets.slice(paths.length);
+        const slots = limit - paths.length;
         const cursor = pane._explorerDirWatchCursor || 0;
-        const paths = [];
-        for (let i = 0; i < limit; i += 1) {
-            paths.push(targets[(cursor + i) % targets.length]);
+        for (let i = 0; i < slots; i += 1) {
+            paths.push(rotating[(cursor + i) % rotating.length]);
         }
-        return { paths, advance: limit, total: targets.length };
+        return { paths, advance: slots, total: rotating.length };
     }
 
     function explorerDirectoryWatchNextDelay(pane) {
@@ -783,6 +809,8 @@
         }
         pane._explorerDirWatchInFlight = true;
         const started = performance.now();
+        let measured = false;
+        const wakeSerial = explorerGitWatchWakeSerial;
         let delay = explorerDirectoryWatchNextDelay(pane);
         const owner = captureExplorerDirectoryOwner(index);
         const windowPlan = explorerDirectoryWatchWindow(pane);
@@ -855,6 +883,9 @@
                     queueExplorerDirectoryChange(pane, path);
                 }
             }
+            // The state requests are the pass's cost; the re-list below is not.
+            pane._explorerDirWatchLastMs = performance.now() - started;
+            measured = true;
             if (dirty.size) {
                 pane._explorerDirWatchChanges = (pane._explorerDirWatchChanges || 0) + 1;
             } else {
@@ -878,8 +909,10 @@
         } finally {
             pane._explorerDirWatchInFlight = false;
             if (explorerWatchPaneCurrent(index, pane, sessionId)) {
-                pane._explorerDirWatchLastMs = performance.now() - started;
-                pane._explorerDirWatchNextAt = Date.now() + delay;
+                if (!measured) {
+                    pane._explorerDirWatchLastMs = performance.now() - started;
+                }
+                pane._explorerDirWatchNextAt = explorerWatchDueAt(wakeSerial, delay);
             }
         }
     }
@@ -902,7 +935,7 @@
         }
         const scopePath = explorerGitRequestedScope(pane);
         const scopeKind = explorerGitRequestedScopeKind(pane);
-        const data = await refreshExplorerGitRepoQuiet(index);
+        const data = await refreshExplorerGitRepoQuiet(index, { background: true });
         if (terminals[index] !== pane || sessionIds[index] !== sessionId) {
             return;
         }
@@ -943,6 +976,8 @@
         }
         pane._explorerGitWatchInFlight = true;
         const started = performance.now();
+        let measured = false;
+        const wakeSerial = explorerGitWatchWakeSerial;
         let delay = explorerGitWatchNextDelay(pane);
         const sidebarConsumer = explorerGitWatchSidebarConsumer(pane);
         const fsConsumer = explorerFsWatchConsumer(pane);
@@ -991,6 +1026,10 @@
             ) {
                 return;
             }
+            // Durations are monotonic (performance.now); only the per-pane
+            // due-time comparison uses the wall clock (plan E14).
+            pane._explorerGitWatchLastMs = performance.now() - started;
+            measured = true;
             pane._explorerGitWatchFailures = 0;
             const revision = typeof data?.revision === 'string' ? data.revision : '';
             const sidebarStale = Boolean(
@@ -1051,10 +1090,10 @@
         } finally {
             pane._explorerGitWatchInFlight = false;
             if (terminals[index] === pane && sessionIds[index] === sessionId) {
-                // Durations are monotonic (performance.now); only the per-pane
-                // due-time comparison uses the wall clock (plan E14).
-                pane._explorerGitWatchLastMs = performance.now() - started;
-                pane._explorerGitWatchNextAt = Date.now() + delay;
+                if (!measured) {
+                    pane._explorerGitWatchLastMs = performance.now() - started;
+                }
+                pane._explorerGitWatchNextAt = explorerWatchDueAt(wakeSerial, delay);
             }
         }
     }
@@ -1062,80 +1101,123 @@
     /* One recursive setTimeout for the whole page; the next pass is scheduled
        only after the current one settles, and panes are checked sequentially
        — a burst of simultaneous `git status` calls / SSH channels is a worse
-       failure mode than a few hundred ms of extra background latency. */
+       failure mode than a few hundred ms of extra background latency.
+
+       A wake that lands while a pass is running is not dropped: the pass was
+       planned from the due times and the pane list it started with, so it
+       re-runs as soon as it settles instead of scheduling that stale delay. */
     async function explorerGitWatchTick() {
         if (explorerGitWatchRunning) {
+            explorerGitWatchRerun = true;
             return;
         }
         explorerGitWatchRunning = true;
         try {
-            if (document.visibilityState !== 'visible') {
-                scheduleExplorerGitWatch(EXPLORER_GIT_WATCH_BASE_MS);
-                return;
-            }
-            let nextDelay = EXPLORER_GIT_WATCH_MAX_MS;
-            const noteDue = dueAt => {
-                if (dueAt) {
-                    nextDelay = Math.min(nextDelay, Math.max(dueAt - Date.now(), 0));
-                }
-            };
-            for (let index = 0; index < terminals.length; index += 1) {
-                explorerGitWatchFlushPending(index);
-                await explorerFileWatchFlushPending(index);
-                await explorerFsWatchFlushPending(index);
-                await explorerDirectoryWatchFlushPending(index);
-                const pane = terminals[index];
-                if (!pane) {
-                    continue;
-                }
-                if (explorerGitWatchEligible(index)) {
-                    const dueAt = pane._explorerGitWatchNextAt || 0;
-                    if (Date.now() < dueAt) {
-                        noteDue(dueAt);
-                    } else {
-                        await explorerGitWatchCheckOne(index);
-                        if (terminals[index] === pane) {
-                            noteDue(pane._explorerGitWatchNextAt);
-                        }
-                    }
-                }
-                if (explorerFileWatchEligible(index)) {
-                    const dueAt = pane._explorerFileWatchNextAt || 0;
-                    if (Date.now() < dueAt) {
-                        noteDue(dueAt);
-                    } else {
-                        await explorerFileWatchCheckOne(index);
-                        if (terminals[index] === pane) {
-                            noteDue(pane._explorerFileWatchNextAt);
-                        }
-                    }
-                }
-                if (explorerDirectoryWatchEligible(index)) {
-                    const dueAt = pane._explorerDirWatchNextAt || 0;
-                    if (Date.now() < dueAt) {
-                        noteDue(dueAt);
-                    } else {
-                        await explorerDirectoryWatchCheckOne(index);
-                        if (terminals[index] === pane) {
-                            noteDue(pane._explorerDirWatchNextAt);
-                        }
-                    }
-                }
-            }
-            scheduleExplorerGitWatch(
-                Math.min(
-                    Math.max(nextDelay, EXPLORER_GIT_WATCH_BASE_MS),
-                    EXPLORER_GIT_WATCH_MAX_MS
-                )
-            );
+            await explorerGitWatchPass();
         } finally {
             explorerGitWatchRunning = false;
         }
+        if (explorerGitWatchRerun) {
+            explorerGitWatchRerun = false;
+            if (explorerGitWatchTimer) {
+                clearTimeout(explorerGitWatchTimer);
+                explorerGitWatchTimer = null;
+            }
+            await explorerGitWatchTick();
+        }
+    }
+
+    async function explorerGitWatchPass() {
+        if (document.visibilityState !== 'visible') {
+            scheduleExplorerGitWatch(EXPLORER_GIT_WATCH_BASE_MS);
+            return;
+        }
+        /* A tab swap replaces `terminals` with another view's panes. Indexes
+           from here on would name those panes against this pass's plan, so the
+           pass stops at the next step and re-runs on the list now shown; the
+           check still awaiting a pane that left is dropped by its own
+           identity guards. */
+        const panes = terminals;
+        const abandoned = () => {
+            if (terminals === panes) {
+                return false;
+            }
+            explorerGitWatchRerun = true;
+            return true;
+        };
+        let nextDelay = EXPLORER_GIT_WATCH_MAX_MS;
+        const noteDue = dueAt => {
+            if (dueAt) {
+                nextDelay = Math.min(nextDelay, Math.max(dueAt - Date.now(), 0));
+            }
+        };
+        for (let index = 0; index < panes.length; index += 1) {
+            explorerGitWatchFlushPending(index);
+            await explorerFileWatchFlushPending(index);
+            await explorerFsWatchFlushPending(index);
+            await explorerDirectoryWatchFlushPending(index);
+            if (abandoned()) {
+                return;
+            }
+            const pane = terminals[index];
+            if (!pane) {
+                continue;
+            }
+            if (explorerGitWatchEligible(index)) {
+                const dueAt = pane._explorerGitWatchNextAt || 0;
+                if (Date.now() < dueAt) {
+                    noteDue(dueAt);
+                } else {
+                    await explorerGitWatchCheckOne(index);
+                    if (abandoned()) {
+                        return;
+                    }
+                    if (terminals[index] === pane) {
+                        noteDue(pane._explorerGitWatchNextAt);
+                    }
+                }
+            }
+            if (explorerFileWatchEligible(index)) {
+                const dueAt = pane._explorerFileWatchNextAt || 0;
+                if (Date.now() < dueAt) {
+                    noteDue(dueAt);
+                } else {
+                    await explorerFileWatchCheckOne(index);
+                    if (abandoned()) {
+                        return;
+                    }
+                    if (terminals[index] === pane) {
+                        noteDue(pane._explorerFileWatchNextAt);
+                    }
+                }
+            }
+            if (explorerDirectoryWatchEligible(index)) {
+                const dueAt = pane._explorerDirWatchNextAt || 0;
+                if (Date.now() < dueAt) {
+                    noteDue(dueAt);
+                } else {
+                    await explorerDirectoryWatchCheckOne(index);
+                    if (abandoned()) {
+                        return;
+                    }
+                    if (terminals[index] === pane) {
+                        noteDue(pane._explorerDirWatchNextAt);
+                    }
+                }
+            }
+        }
+        scheduleExplorerGitWatch(
+            Math.min(
+                Math.max(nextDelay, EXPLORER_GIT_WATCH_BASE_MS),
+                EXPLORER_GIT_WATCH_MAX_MS
+            )
+        );
     }
 
     /* Wake-ups (plan §5.5): missed intervals are never accumulated — a page
        hidden for an hour performs one check on return, not a backlog. */
     function explorerGitWatchWake() {
+        explorerGitWatchWakeSerial += 1;
         terminals.forEach(pane => {
             if (pane) {
                 pane._explorerGitWatchNextAt = 0;
@@ -1149,6 +1231,23 @@
             explorerGitWatchTimer = null;
         }
         explorerGitWatchTick();
+    }
+
+    /* A tab swap shows panes the page timer was not planned around: it was
+       set from the tab just left, which — with no explorer pane of its own —
+       leaves the next pass a full MAX away. terminals.js calls this once a
+       cached view is restored or a grid rebuilt. The settle window coalesces
+       fast tab cycling into one check per shown pane. */
+    function explorerGitWatchWakeVisible() {
+        if (explorerGitWatchSwapTimer) {
+            clearTimeout(explorerGitWatchSwapTimer);
+        }
+        explorerGitWatchSwapTimer = setTimeout(() => {
+            explorerGitWatchSwapTimer = null;
+            if (document.visibilityState === 'visible') {
+                explorerGitWatchWake();
+            }
+        }, EXPLORER_GIT_WATCH_SWAP_SETTLE_MS);
     }
 
     document.addEventListener('visibilitychange', () => {
