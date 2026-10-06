@@ -170,7 +170,9 @@ NOTHING_HANDED_OUT_MESSAGE = (
 
 #: Why an assignment ended, in the words the requester is shown. Keyed by the
 #: reasons ``web/agent_handoffs.py`` drops a handoff with; anything else is
-#: quoted as it came.
+#: quoted as it came. ``restarted`` is never passed to :meth:`ResultStore.end`:
+#: it is the key ``web/crew_history.py`` stores for a link that was working
+#: when GridVibe went away.
 _ENDED_REASONS = {
     "connection closed": "its pane's connection closed before it reported",
     "pane closed": "its pane was closed before it reported",
@@ -179,6 +181,7 @@ _ENDED_REASONS = {
     "replaced": "its pane was handed a different task before it reported",
     "agent exited": "its agent exited before it reported",
     "agent replaced": "a different agent was started in its pane before it reported",
+    "restarted": "GridVibe restarted before it reported",
 }
 
 

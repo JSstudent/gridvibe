@@ -203,6 +203,30 @@ end.
   output keys are exactly `LINK_FIELDS` (+ `restored`), never text, receipt or
   handoff id.
 
+#### Implementation notes
+
+Done. `web/crew_history.py` holds `translate_for_capture`,
+`translate_for_restore`, a `CrewHistory` class and the module-level `history`
+with `install`/`snapshot`/`forget_session`/`supersede`/`reset` bound to it.
+
+- Capture picks, per (requester, worker) pair, the newest link, but a live link
+  always beats a `restored` one whatever the input order. Output keeps input
+  order and is capped at `MAX_ASSIGNMENTS`, newest kept.
+- Both translations share one field validator (types checked, never coerced;
+  `working` demoted to `ended`/`restarted`; `reason` must be a known key, which
+  adds `undeliverable` and `other` to the `_ENDED_REASONS` keys; `label` goes
+  through `validate_task_label`). `translate_for_restore` takes
+  (group id, pane index) → session id and drops anything that does not resolve.
+- `install(workspace_id, links)` replaces that workspace's held links, rebuilds
+  each from `LINK_FIELDS` alone (fresh `link_id`, `restored: True`) and caps
+  that workspace at `MAX_ASSIGNMENTS`, newest kept. The cap is per slot, so one
+  workspace's install never evicts another's links.
+- `supersede(pairs)` takes (requester, worker) session-id pairs.
+- `"restarted"` is in `_ENDED_REASONS` with its own sentence; `ResultStore`
+  never passes it to `end()`.
+- Tests: `tests/test_crew_history.py`; `agent_results`, handoff, dashboard and
+  MCP result suites stay green.
+
 ### Stage 2: capture and read in runtime state
 
 - `web/runtime_state.py`: read links once per capture before the file locks.

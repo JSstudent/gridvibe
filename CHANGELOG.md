@@ -4,6 +4,8 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **(other) Agent crew link history store for restart persistence.** The crew links on the agent dashboard live only in memory, so a restart drops every one. This adds the in-memory store that will hold them as inert history after a restore, in `web/crew_history.py`, with nothing yet reading or writing it. Two pure translations turn links into stored entries keyed by snapshot group and pane position and back to the new session ids, keeping only links between agent panes of one workspace, the newest per pair, at most 256. A link that was `working` is stored as `ended` with a new `restarted` reason, which `web/agent_results.py` now knows. Restored links stay out of the result store, so they cannot be collected, waited on or used to gate a follow-up, and they never carry report text, receipts or handoff ids.
+
 ## 1.15.1 - 2026-10-05
 
 - **(fix) Save and close can recover from an outdated pane list.** The failure dialog offers **Synchronize panes & retry save** for a structured membership mismatch, then retries the chosen save scope across participating windows. Visible and cached tabs retain surviving pane objects, terminal state, explorer drafts, scroll and focus while accounting for added and removed live panes. Background membership refreshes now reconcile their cached views before saving. Failed synchronization or persistence keeps the app open. The rules live in [Presentation persistence](docs/engineering_contracts.md#presentation-persistence) and [Workspace lifecycle and windows](docs/engineering_contracts.md#workspace-lifecycle-and-windows).
