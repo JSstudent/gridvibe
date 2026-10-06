@@ -246,6 +246,31 @@ with `install`/`snapshot`/`forget_session`/`supersede`/`reset` bound to it.
   Extend `tests/test_session_persistence_contract.py` if it freezes the slot
   key set.
 
+#### Implementation notes
+
+Done. `crew_links` is a required `_build_slot` parameter, so both capture
+paths must pass it and every slot written carries the key (`[]` when empty).
+
+- Each capture calls `_read_crew_links()` (`crew_history.snapshot()` then
+  `agent_results.links_snapshot()`) once, right after
+  `snapshot_live_workspaces()` and before the file locks. `_captured_live_groups`
+  is the one filtered group list the slot's groups and the coordinates are both
+  built from; the coordinate map comes from each pane's `session_id` and
+  `startup_mode` in the manager snapshot.
+- Capture does not call `crew_history.supersede()`: the live-over-history rule
+  is already `translate_for_capture`'s, so a capture never mutates history.
+  Stage 4's dashboard read remains the supersede caller.
+- `_validate_crew_links` does the block checks (not a list, over
+  `MAX_ASSIGNMENTS` → `[]`, shape-only warning) and runs
+  `translate_for_restore` over an identity mapping of the surviving
+  (group id, pane index) coordinates, so per-entry rules have one owner. A group
+  id shared by two surviving groups is ambiguous and resolves nothing. A stored
+  `working` entry reads back as `ended`/`restarted`.
+- `tests/test_session_persistence_contract.py` does not freeze the slot key
+  set and is unchanged. Tests: `CrewLinks*TestCase` in
+  `tests/test_runtime_state.py`, including all three capture intents through
+  the real routes and a corrupt block that still restores.
+
 ### Stage 3: restore and close wiring
 
 - `web/workspaces.py::_restore_claimed_workspace`: build the coordinate map,

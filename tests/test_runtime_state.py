@@ -1,12 +1,18 @@
-"""`agent_mcp_override` through the runtime workspace snapshot.
+"""The runtime workspace snapshot: `agent_mcp_override` and `crew_links`.
 
 A restore is the same pane coming back, so it keeps the grant it was launched
 with. A snapshot written before the field existed does not state it, and that
 pane comes back without the grant -- the absent key reads `False`, never
 "inherit". The record itself holds the grant only beside `agent_mcp` on an
 agent pane, which is what makes every path that stops a pane being one drop it.
+
+`crew_links` is the slot's record of the agent crew links between its panes,
+endpoints as (snapshot group id, pane index). Every capture writes it, so an
+autosave after an explicit save keeps it; on read it degrades, never fails the
+slot.
 """
 
+import copy
 import json
 import unittest
 from pathlib import Path
@@ -15,10 +21,11 @@ from unittest.mock import patch
 
 from sessions.manager import SessionManager
 from web import agents as web_agents
-from web import api
+from web import api, crew_history
 from web import config as web_config
 from web import runtime_state as web_runtime_state
 from web import saved_sessions as web_saved_sessions
+from web.agent_results import MAX_ASSIGNMENTS
 
 _AGENT_PANE = {
     "title": "Claude",
@@ -303,6 +310,422 @@ class ToolLaunchOverrideTestCase(_LiveAppMixin, unittest.TestCase):
         )[0]
         self.assertTrue(created.agent_mcp)
         self.assertIs(created.agent_mcp_override, False)
+
+
+# ==================== crew_links ====================
+
+#: The keys a stored crew link carries: the two coordinates and the public
+#: link fields, never a session id, link id, report text, receipt or handoff id.
+_STORED_LINK_KEYS = {
+    "requester",
+    "worker",
+    "state",
+    "read",
+    "status",
+    "collected",
+    "handed_at",
+    "reported_at",
+    "reason",
+    "round",
+    "label",
+}
+
+
+def _link(requester, worker, state="reported", **fields):
+    """One dashboard link, as `links_snapshot()` returns it."""
+    link = {
+        "link_id": f"link-{requester}-{worker}",
+        "requester_session_id": requester,
+        "worker_session_id": worker,
+        "state": state,
+        "read": True,
+        "status": "done" if state == "reported" else "",
+        "collected": False,
+        "handed_at": "2026-10-06T01:00:00+00:00",
+        "reported_at": "2026-10-06T01:05:00+00:00" if state == "reported" else "",
+        "reason": "",
+        "round": 1,
+        "label": "build",
+    }
+    link.update(fields)
+    return link
+
+
+def _stored_link(requester, worker, **fields):
+    """One stored entry, as a slot holds it."""
+    entry = {
+        "requester": {"group": requester[0], "pane": requester[1]},
+        "worker": {"group": worker[0], "pane": worker[1]},
+        "state": "reported",
+        "read": True,
+        "status": "done",
+        "collected": False,
+        "handed_at": "2026-10-06T01:00:00+00:00",
+        "reported_at": "2026-10-06T01:05:00+00:00",
+        "reason": "",
+        "round": 1,
+        "label": "build",
+    }
+    entry.update(fields)
+    return entry
+
+
+def _pane(session_id, startup_mode="agent"):
+    pane = {"session_id": session_id, "directory": "/srv", "title": session_id}
+    if startup_mode == "agent":
+        pane.update(_AGENT_PANE)
+    else:
+        pane["startup_mode"] = startup_mode
+    return pane
+
+
+def _group(group_id, *panes):
+    return {
+        "group_id": group_id,
+        "name": f"Group {group_id}",
+        "connection_mode": "wsl",
+        "layout": "single" if len(panes) == 1 else "vertical",
+        "sessions": list(panes),
+    }
+
+
+class _FakeManager:
+    """The one manager call a capture makes, over fixed live workspaces."""
+
+    def __init__(self, workspaces):
+        self.workspaces = workspaces
+
+    def snapshot_live_workspaces(self):
+        return {
+            workspace_id: {
+                "workspace_id": workspace_id,
+                "label": workspace_id,
+                "groups": copy.deepcopy(groups),
+            }
+            for workspace_id, groups in self.workspaces.items()
+        }
+
+
+class CrewLinksCaptureTestCase(unittest.TestCase):
+    """What every capture writes into `crew_links`, against a fake manager."""
+
+    def setUp(self):
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
+        self.store = web_runtime_state.RuntimeStateStore(lambda: str(self.state_path))
+        crew_history.reset()
+        self.addCleanup(crew_history.reset)
+        self.live_links = []
+        patcher = patch.object(
+            web_runtime_state.agent_results,
+            "links_snapshot",
+            side_effect=lambda: copy.deepcopy(self.live_links),
+        )
+        self.links_snapshot = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.manager = _FakeManager(
+            {
+                "default": [
+                    _group("g1", _pane("lead"), _pane("shell", "terminal")),
+                    _group("g2", _pane("helper"), _pane("tester")),
+                ],
+                "other": [_group("g9", _pane("stranger"))],
+            }
+        )
+
+    def _stored(self, workspace_id="default"):
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        return state["workspaces"][workspace_id]["crew_links"]
+
+    def test_a_capture_stores_links_as_coordinates_and_autosave_keeps_them(self):
+        self.live_links = [_link("lead", "helper"), _link("helper", "tester", round=2)]
+
+        self.store.capture_workspace(self.manager, "default", origin="manual")
+        saved = self._stored()
+        # The erasure bug: an autosave that rewrote the slot without the field.
+        self.store.capture_live_workspaces(self.manager, origin="auto")
+
+        expected = [
+            _stored_link(("g1", 0), ("g2", 0)),
+            _stored_link(("g2", 0), ("g2", 1), round=2),
+        ]
+        self.assertEqual(saved, expected)
+        self.assertEqual(self._stored(), expected)
+
+    def test_a_voluntary_exit_capture_writes_them_too(self):
+        self.live_links = [_link("lead", "helper")]
+
+        self.store.capture_live_workspaces(self.manager, origin="manual")
+
+        self.assertEqual(self._stored(), [_stored_link(("g1", 0), ("g2", 0))])
+
+    def test_a_working_link_is_stored_as_ended_by_a_restart(self):
+        self.live_links = [_link("lead", "helper", state="working")]
+
+        self.store.capture_workspace(self.manager, "default")
+
+        [entry] = self._stored()
+        self.assertEqual(entry["state"], "ended")
+        self.assertEqual(entry["reason"], crew_history.RESTARTED)
+
+    def test_cross_workspace_and_non_agent_endpoints_are_dropped(self):
+        self.live_links = [
+            _link("lead", "stranger"),
+            _link("lead", "shell"),
+            _link("lead", "gone"),
+            _link("lead", "tester"),
+        ]
+
+        self.store.capture_live_workspaces(self.manager)
+
+        self.assertEqual(self._stored(), [_stored_link(("g1", 0), ("g2", 1))])
+        self.assertEqual(self._stored("other"), [])
+
+    def test_held_history_is_captured_and_a_live_round_wins_its_pair(self):
+        crew_history.install(
+            "default",
+            [
+                {"requester_session_id": "lead", "worker_session_id": "helper",
+                 **_stored_link(("g1", 0), ("g2", 0), round=1)},
+                {"requester_session_id": "helper", "worker_session_id": "tester",
+                 **_stored_link(("g2", 0), ("g2", 1), round=3)},
+            ],
+        )
+        self.live_links = [_link("lead", "helper", state="working", round=2)]
+
+        self.store.capture_workspace(self.manager, "default")
+
+        stored = {(entry["requester"]["group"], entry["requester"]["pane"]): entry
+                  for entry in self._stored()}
+        self.assertEqual(stored[("g2", 0)]["round"], 3)
+        self.assertEqual(stored[("g1", 0)]["round"], 2)
+        self.assertEqual(stored[("g1", 0)]["reason"], crew_history.RESTARTED)
+
+    def test_the_stored_file_holds_no_report_receipt_handoff_or_link_id(self):
+        self.live_links = [
+            _link(
+                "lead",
+                "helper",
+                text="SECRET-REPORT-TEXT",
+                receipt="SECRET-RECEIPT",
+                handoff_id="SECRET-HANDOFF",
+            )
+        ]
+
+        self.store.capture_live_workspaces(self.manager)
+
+        raw = self.state_path.read_text(encoding="utf-8")
+        for needle in ("SECRET-", "link-lead", "link_id", "handoff_id", "receipt",
+                       "session_id\": \"lead"):
+            self.assertNotIn(needle, raw)
+        for entry in self._stored():
+            self.assertEqual(set(entry), _STORED_LINK_KEYS)
+
+    def test_links_are_read_once_per_capture(self):
+        self.store.capture_live_workspaces(self.manager)
+        self.assertEqual(self.links_snapshot.call_count, 1)
+
+        self.store.capture_workspace(self.manager, "default")
+        self.assertEqual(self.links_snapshot.call_count, 2)
+
+    def test_the_cap_keeps_the_newest_links(self):
+        panes = [_pane(f"agent-{index}") for index in range(MAX_ASSIGNMENTS + 2)]
+        self.manager.workspaces = {"default": [_group("g1", *panes)]}
+        self.live_links = [
+            _link(f"agent-{index}", f"agent-{index + 1}")
+            for index in range(MAX_ASSIGNMENTS + 1)
+        ]
+
+        self.store.capture_workspace(self.manager, "default")
+
+        stored = self._stored()
+        self.assertEqual(len(stored), MAX_ASSIGNMENTS)
+        self.assertEqual(stored[-1]["requester"], {"group": "g1", "pane": MAX_ASSIGNMENTS})
+
+
+class CrewLinksReadTestCase(unittest.TestCase):
+    """`_validate_slot`: a bad block degrades to `[]`; the slot still restores."""
+
+    def setUp(self):
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
+        self.store = web_runtime_state.RuntimeStateStore(lambda: str(self.state_path))
+
+    def _write(self, **slot_fields):
+        slot = {
+            "workspace_id": "default",
+            "label": "Crew",
+            "origin": "manual",
+            "saved_at": 1000.0,
+            "groups": [
+                _group("g1", _pane("a"), _pane("b")),
+                _group("g2", _pane("c")),
+            ],
+        }
+        slot.update(slot_fields)
+        state = {
+            "version": web_runtime_state.SCHEMA_VERSION,
+            "workspaces": {"default": slot},
+        }
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    def _read(self):
+        slot = self.store.load_restorable_workspace("default")
+        self.assertIsNotNone(slot)
+        [summary] = self.store.list_restorable_workspaces()
+        self.assertEqual((summary["group_count"], summary["pane_count"]), (2, 3))
+        return slot["crew_links"]
+
+    def test_a_valid_block_round_trips(self):
+        links = [
+            _stored_link(("g1", 0), ("g1", 1)),
+            _stored_link(("g1", 1), ("g2", 0), state="ended", status="",
+                         reported_at="", reason="pane closed"),
+        ]
+        self._write(crew_links=links)
+
+        self.assertEqual(self._read(), links)
+
+    def test_a_pre_field_slot_reads_as_no_links(self):
+        self._write()
+
+        self.assertEqual(self._read(), [])
+
+    def test_a_bad_block_degrades_to_no_links(self):
+        oversized = [_stored_link(("g1", 0), ("g1", 1))] * (MAX_ASSIGNMENTS + 1)
+        for label, block in (
+            ("string", "corrupt"),
+            ("object", {"requester": {"group": "g1", "pane": 0}}),
+            ("number", 7),
+            ("oversized", oversized),
+        ):
+            with self.subTest(block=label):
+                self._write(crew_links=block)
+                self.assertEqual(self._read(), [])
+
+    def test_invalid_or_unresolvable_entries_are_dropped(self):
+        good = _stored_link(("g1", 0), ("g2", 0))
+        self._write(
+            crew_links=[
+                _stored_link(("g1", 0), ("g1", 1), round="2"),
+                _stored_link(("g1", 0), ("g1", 1), read="yes"),
+                _stored_link(("g1", 0), ("g1", 1), state="working!"),
+                _stored_link(("g1", 0), ("g1", 1), reason="made-up"),
+                _stored_link(("g1", 0), ("g1", 1), status="bogus"),
+                _stored_link(("g1", 0), ("g1", 2)),
+                _stored_link(("g1", 0), ("gone", 0)),
+                _stored_link(("g1", 0), ("g1", 0)),
+                {"requester": "g1:0", "worker": {"group": "g1", "pane": 1}},
+                "not an entry",
+                good,
+            ]
+        )
+
+        self.assertEqual(self._read(), [good])
+
+    def test_a_dropped_group_takes_its_links_with_it(self):
+        broken = _group("g2", _pane("c"))
+        broken["sessions"][0]["explorer_open_tabs"] = "abc"
+        self._write(
+            groups=[_group("g1", _pane("a"), _pane("b")), broken],
+            crew_links=[
+                _stored_link(("g1", 0), ("g2", 0)),
+                _stored_link(("g1", 0), ("g1", 1)),
+            ],
+        )
+
+        slot = self.store.load_restorable_workspace("default")
+
+        self.assertEqual(slot["crew_links"], [_stored_link(("g1", 0), ("g1", 1))])
+
+    def test_a_stored_working_link_reads_as_ended_by_a_restart(self):
+        self._write(
+            crew_links=[
+                _stored_link(("g1", 0), ("g1", 1), state="working", status="",
+                             reported_at="")
+            ]
+        )
+
+        [entry] = self._read()
+        self.assertEqual((entry["state"], entry["reason"]), ("ended", "restarted"))
+
+
+class CrewLinksLiveCaptureTestCase(_LiveAppMixin, unittest.TestCase):
+    """The real save, autosave and voluntary-exit paths, then a restore."""
+
+    def setUp(self):
+        super().setUp()
+        crew_history.reset()
+        self.addCleanup(crew_history.reset)
+
+    def _launch_crew(self):
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "workspace_id": "default",
+                "session_name": "Crew",
+                "layout": "vertical",
+                "sessions": [
+                    {**_AGENT_PANE, "directory": str(self.repo_dir), "title": "Lead"},
+                    {**_AGENT_PANE, "directory": str(self.repo_dir), "title": "Helper"},
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.get_json())
+        group_id = response.get_json()["group_id"]
+        lead, helper = api.session_manager.get_group_sessions(group_id)
+        return group_id, lead.session_id, helper.session_id
+
+    def _stored_links(self):
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        return state["workspaces"]["default"]["crew_links"]
+
+    def test_every_capture_intent_writes_the_links(self):
+        group_id, lead, helper = self._launch_crew()
+        expected = [_stored_link((group_id, 0), (group_id, 1))]
+
+        with patch.object(
+            web_runtime_state.agent_results,
+            "links_snapshot",
+            return_value=[_link(lead, helper)],
+        ):
+            saved = self.client.post(
+                "/api/runtime-state/save", json={"workspace_id": "default"}
+            )
+            self.assertEqual(saved.status_code, 200, saved.get_json())
+            self.assertEqual(self._stored_links(), expected)
+
+            web_runtime_state.capture_live_workspaces(api.session_manager, origin="auto")
+            self.assertEqual(self._stored_links(), expected)
+
+            prepared = self.client.post(
+                "/api/lifecycle/prepare", json={"action": "restart", "save": "workspaces"}
+            )
+            self.assertEqual(prepared.status_code, 200, prepared.get_json())
+            self.assertEqual(self._stored_links(), expected)
+
+    def test_a_corrupt_block_still_restores_the_workspace(self):
+        self._launch_crew()
+        saved = self.client.post(
+            "/api/runtime-state/save", json={"workspace_id": "default"}
+        )
+        self.assertEqual(saved.status_code, 200, saved.get_json())
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        state["workspaces"]["default"]["crew_links"] = {"not": "a list"}
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        self.client.delete("/api/sessions")
+        api.session_manager.reset_sessions()
+        restored = self.client.post(
+            "/api/runtime-state/restore", json={"workspace_ids": ["default"]}
+        )
+
+        self.assertEqual(restored.status_code, 200, restored.get_json())
+        [group] = api.session_manager.get_workspace_groups("default")
+        self.assertEqual(len(api.session_manager.get_group_sessions(group.group_id)), 2)
 
 
 if __name__ == "__main__":
