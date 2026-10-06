@@ -844,6 +844,30 @@ class CrewLinksRestoreTestCase(_LiveAppMixin, unittest.TestCase):
             self._pairs(crew_history.snapshot())[0], (panes["Lead"], panes["Helper"])
         )
 
+    def test_restoring_again_keeps_the_history_of_panes_moved_elsewhere(self):
+        self._save_crew()
+        self._restore()
+        moved = self._panes()
+        api.session_manager.create_workspace("Other", "bbbbbbbbbbbb")
+        for group in api.session_manager.get_workspace_groups("default"):
+            api.session_manager.move_group(group.group_id, "bbbbbbbbbbbb")
+        self.assertEqual(self._panes(), {})
+
+        self._restore()
+
+        panes = self._panes()
+        self.assertEqual(
+            self._pairs(crew_history.snapshot()),
+            [
+                (moved["Lead"], moved["Helper"]),
+                (moved["Helper"], moved["Tester"]),
+                (moved["Tester"], moved["Reviewer"]),
+                (panes["Lead"], panes["Helper"]),
+                (panes["Helper"], panes["Tester"]),
+                (panes["Tester"], panes["Reviewer"]),
+            ],
+        )
+
     def _assert_only_the_leads_link(self, restored):
         self.assertTrue(restored["restored"])
         self.assertEqual([group["started"] for group in restored["groups"]], [True, False])
@@ -950,11 +974,11 @@ class CrewLinksRestoreTestCase(_LiveAppMixin, unittest.TestCase):
         real_install = crew_history.install
         calls = []
 
-        def install(workspace_id, links):
+        def install(workspace_id, links, **kwargs):
             calls.append(len(links))
             if len(calls) == 1:
                 raise RuntimeError("SECRET-DETAIL")
-            return real_install(workspace_id, links)
+            return real_install(workspace_id, links, **kwargs)
 
         with patch.object(web_workspaces.crew_history, "install", install), \
                 self.assertLogs("web.workspaces", level="WARNING") as logs:

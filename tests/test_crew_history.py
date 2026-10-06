@@ -274,6 +274,19 @@ class HistoryStoreTests(unittest.TestCase):
         self.history.install("w1", [])
         self.assertEqual([link["label"] for link in self.history.snapshot()], ["other"])
 
+    def test_install_keeps_earlier_links_whose_panes_are_still_live(self):
+        self.history.install(
+            "w1", [make_link("a", "b", label="moved"), make_link("a", "c", label="gone")]
+        )
+        self.history.install(
+            "w1", [make_link("x", "y", label="new")], live_sessions=["a", "b", "x", "y"]
+        )
+        self.assertEqual(
+            [link["label"] for link in self.history.snapshot()], ["moved", "new"]
+        )
+        self.history.install("w1", [], live_sessions=["a"])
+        self.assertEqual(self.history.snapshot(), [])
+
     def test_forget_session_drops_every_link_naming_the_pane(self):
         self.install("w1")
         self.history.install("w2", [make_link("c", "a", state="ended", status="")])

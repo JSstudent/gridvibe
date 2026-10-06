@@ -243,15 +243,26 @@ class CrewHistory:
         self._lock = threading.Lock()
         self._by_workspace: Dict[str, List[Dict[str, Any]]] = {}
 
-    def install(self, workspace_id: str, links: Iterable[Mapping[str, Any]]) -> int:
+    def install(
+        self,
+        workspace_id: str,
+        links: Iterable[Mapping[str, Any]],
+        *,
+        live_sessions: Iterable[str] = (),
+    ) -> int:
         """Hold a workspace's restored links, replacing what it held before.
 
         ``links`` carry live session ids, as :func:`translate_for_restore`
         returns them. Each is rebuilt from :data:`LINK_FIELDS` alone with a
         fresh ``link_id`` and ``restored: True``, so nothing else a caller
-        passes can be held. One workspace holds at most ``max_links``, the
+        passes can be held. One install holds at most ``max_links``, the
         newest; another workspace's links are never evicted to make room.
-        Returns how many this workspace now holds.
+
+        What the workspace held before is dropped, except a link whose two
+        panes are both in ``live_sessions``: a restore only runs on a workspace
+        with no groups, so those panes were moved to another workspace and
+        their history still describes them. Such links are kept, ahead of the
+        new ones. Returns how many this workspace now holds.
         """
         held: List[Dict[str, Any]] = []
         for link in links:
@@ -273,11 +284,18 @@ class CrewHistory:
                 }
             )
         key = str(workspace_id or "")
+        live = frozenset(str(session_id) for session_id in live_sessions)
         with self._lock:
-            self._by_workspace.pop(key, None)
-            if held:
-                self._by_workspace[key] = held[-self.max_links :]
-            count = len(self._by_workspace.get(key, ()))
+            moved = [
+                link
+                for link in self._by_workspace.pop(key, ())
+                if link["requester_session_id"] in live
+                and link["worker_session_id"] in live
+            ]
+            kept = moved + held[-self.max_links :]
+            if kept:
+                self._by_workspace[key] = kept
+            count = len(kept)
         logger.info("Crew history installed workspace=%s links=%d", key, count)
         return count
 

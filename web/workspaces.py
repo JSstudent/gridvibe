@@ -2116,8 +2116,16 @@ def _restore_crew_links(
     :mod:`web.crew_history`, never to ``ResultStore``. This is presentation
     only: any failure is logged shape-only and restores no links, and never
     changes the restore's own result.
+
+    History this workspace id held from an earlier restore is replaced, but a
+    link between two panes that are still live is kept: they were moved to
+    another workspace, and their crew history went with them.
     """
+    live_sessions: Set[str] = set()
     try:
+        live_sessions = {
+            session.session_id for session in _manager().get_all_sessions()
+        }
         coord_to_session: Dict[Tuple[str, int], str] = {}
         seen: Set[str] = set()
         ambiguous: Set[str] = set()
@@ -2140,7 +2148,7 @@ def _restore_crew_links(
         for key in [key for key in coord_to_session if key[0] in ambiguous]:
             del coord_to_session[key]
         links = crew_history.translate_for_restore(entries or [], coord_to_session)
-        crew_history.install(workspace_id, links)
+        crew_history.install(workspace_id, links, live_sessions=live_sessions)
     except Exception as exc:
         logger.warning(
             "Crew links not restored workspace=%s category=%s",
@@ -2150,7 +2158,7 @@ def _restore_crew_links(
         # Restore no links: never leave an earlier restore's history standing
         # for this workspace id beside panes it does not describe.
         try:
-            crew_history.install(workspace_id, [])
+            crew_history.install(workspace_id, [], live_sessions=live_sessions)
         except Exception:
             pass
 
