@@ -1,10 +1,17 @@
 # MCP Agent Model Selection: Implementation Plan
 
-Prepared on 2026-10-05 against repository HEAD `3453982` and the
-[reviewed design](mcp_agent_model_selection_plan.md). This is a plan for later
-implementation; none of the feature described here has shipped. This file is
-gitignored R&D material. Maintained guarantees must be written into their
-owning contracts when implementation ships.
+Prepared on 2026-10-05 against repository HEAD `3453982` and the reviewed
+design, which was removed from the tree in `c84064e`; read it with
+`git show 2706cfc:docs/mcp_agent_model_selection_plan.md`. This is a plan for
+later implementation; none of the feature described here has shipped. Stage 0
+evidence is recorded in the
+[Stage 0 evidence record](mcp_agent_model_selection_stage0_evidence.md).
+
+**Tracking note.** This plan and its Stage 0 evidence record are tracked in
+`docs/` only for the duration of the implementation, so changes to them can be
+reviewed in commits. Once the feature ships, both move to `docs/r&d/` and stop
+being maintained; neither is a citation of record. Maintained guarantees must
+be written into their owning contracts when implementation ships.
 
 ## Outcome and scope
 
@@ -20,9 +27,9 @@ provider installation, authentication repair, effort controls or inferred auto
 mode. A model declaration never waives lineage, self, kind, depth, machine or
 override gates. Existing launches that omit model fields retain their behavior.
 
-Read [CLAUDE.md](../../../../CLAUDE.md), the relevant
-[engineering contracts](../../../engineering_contracts.md#agent-tools-mcp) and
-[session state guide](../../../session_state_guideline.md) before implementation.
+Read [CLAUDE.md](../CLAUDE.md), the relevant
+[engineering contracts](engineering_contracts.md#agent-tools-mcp) and
+[session state guide](session_state_guideline.md) before implementation.
 
 ## Current implementation and required changes
 
@@ -315,6 +322,7 @@ remains unknown unless trustworthy metadata proves it; a successful process
 start is not a successful model request.
 
 External CLI details must be rechecked at Stage 0 using the official sources
-linked in the [reviewed design](mcp_agent_model_selection_plan.md#references).
+copied from the reviewed design into the
+[Stage 0 evidence record](mcp_agent_model_selection_stage0_evidence.md#9-sources-to-recheck).
 The old OpenCode `EEXIST` observation is historical and was not reproduced by
 this review. This plan authorizes no repair of that environment.
