@@ -21,7 +21,9 @@ Assertions cover the issue's independence contract:
 - a deferred apply holds the newest plan and releases it;
 - a stale pane/session/root response is dropped; navigation during an apply is
   rechecked;
-- a large expanded tree is polled in a bounded rotating window;
+- a large expanded tree is polled in a bounded rotating window that the browsed
+  directory leads on every pass;
+- the adaptive interval is measured from the state requests, not the re-list;
 - an open editor still leaves the tree refreshes eligible.
 """
 
@@ -408,6 +410,7 @@ class HiddenAndBoundedTestCase(ExplorerDirectoryWatchHarness):
             }
             pane._explorerTreeExpanded = expanded;
             pane._explorerTreeChildren = treeChildren;
+            pane._explorerMode = 'file';   // no browsed directory to pin
             const first = sandbox.explorerDirectoryWatchWindow(pane);
             pane._explorerDirWatchCursor = 16;
             const second = sandbox.explorerDirectoryWatchWindow(pane);
@@ -422,6 +425,67 @@ class HiddenAndBoundedTestCase(ExplorerDirectoryWatchHarness):
         self.assertEqual(result["firstLen"], 16)
         self.assertEqual(result["secondLen"], 16)
         self.assertNotEqual(result["firstName"], result["secondName"])
+
+    def test_browsed_directory_leads_every_pass_of_a_large_tree(self):
+        result = self._run_node("""
+            pane._explorerMode = 'directory';
+            pane._explorerPath = 'd19';
+            for (let i = 0; i < 50; i += 1) {
+                pane._explorerTreeExpanded.add('d' + i);
+                pane._explorerTreeChildren.set('d' + i, []);
+            }
+            const passes = [];
+            const seen = new Set();
+            for (let pass = 0; pass < 4; pass += 1) {
+                const plan = sandbox.explorerDirectoryWatchWindow(pane);
+                passes.push({ first: plan.paths[0], size: plan.paths.length,
+                    unique: new Set(plan.paths).size });
+                plan.paths.forEach(path => seen.add(path));
+                pane._explorerDirWatchCursor =
+                    (pane._explorerDirWatchCursor + plan.advance) % plan.total;
+            }
+            emit({ passes, covered: seen.size });
+        """)
+        for plan in result["passes"]:
+            self.assertEqual(plan, {"first": "d19", "size": 16, "unique": 16})
+        # The tree root and 49 other expanded folders share 15 rotating slots,
+        # so all 51 targets are covered within 4 passes.
+        self.assertEqual(result["covered"], 51)
+
+    def test_quiet_relists_ask_for_the_background_git_bound(self):
+        result = self._run_node("""
+            recordBoth('', 'old');
+            dirAnswer.revision = 'new';
+            const relists = [];
+            const transport = sandbox.fetch;
+            sandbox.fetch = async url => {
+                if (String(url).includes('/entries')) relists.push(String(url));
+                return transport(url);
+            };
+            await sandbox.explorerDirectoryWatchCheckOne(0);
+            emit({ relists: relists.map(url =>
+                new URL('http://localhost' + url).searchParams.get('background')) });
+        """)
+        self.assertTrue(result["relists"])
+        self.assertEqual(set(result["relists"]), {"1"})
+
+    def test_a_slow_relist_does_not_stretch_the_interval(self):
+        result = self._run_node("""
+            recordBoth('', 'old');
+            dirAnswer.revision = 'new';
+            const transport = sandbox.fetch;
+            sandbox.fetch = async url => {
+                if (String(url).includes('/directory/state')) advanceClock(500);
+                if (String(url).includes('/entries')) advanceClock(4000);
+                return transport(url);
+            };
+            await sandbox.explorerDirectoryWatchCheckOne(0);
+            emit({ applied: applyCalls.length, lastMs: pane._explorerDirWatchLastMs,
+                delay: pane._explorerDirWatchNextAt - clock });
+        """)
+        self.assertEqual(result["applied"], 1)
+        self.assertEqual(result["lastMs"], 500)
+        self.assertEqual(result["delay"], 5000)
 
 
 class PendingWorkTestCase(ExplorerDirectoryWatchHarness):

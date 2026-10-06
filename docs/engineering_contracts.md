@@ -712,7 +712,8 @@ unless the task explicitly changes this contract.
   applies, including unchanged rows; state polls never commit baselines.
   The page watches the browsed directory and loaded, expanded tree directories
   once per path through a rotating `EXPLORER_DIR_WATCH_MAX_TREE_NODES` (16)
-  window. Dirty paths merge across polls and each apply selects at most 16 paths
+  window; in directory mode the browsed directory leads every pass and the
+  other 15 slots rotate over the rest. Dirty paths merge across polls and each apply selects at most 16 paths
   (the tree helper independently caps itself at 16 nodes). Failed or held work
   remains pending; versions preserve changes queued during another apply.
   Checks capture pane/session/root, path/mode/tab, navigation/root epochs and
@@ -722,6 +723,24 @@ unless the task explicitly changes this contract.
   refreshes its parent, whose applied rows prune cached descendants; a missing
   session suspends the watch. Quiet refresh preserves scroll, expansion, Find,
   tabs and drafts, and an open editor permits tree refresh only.
+- The change watcher (`explorer-git-watch.js`) is one page-level recursive
+  `setTimeout`. It checks only the shown tab's panes, sequentially, with at most
+  one request per pane per check, and an unchanged poll writes nothing. Focus,
+  visibility return and a tab swap wake it: `initialLoad()` calls
+  `explorerGitWatchWakeVisible()` after restoring a cached view or rebuilding
+  the grid, never for a reused view, debounced by
+  `EXPLORER_GIT_WATCH_SWAP_SETTLE_MS` (200 ms). A wake zeroes the shown panes'
+  due times. A wake during a running pass makes that pass rerun as soon as it
+  settles; a pass whose `terminals` list was replaced stops and reruns on the
+  list now shown; a check in flight when a wake landed stays due instead of
+  installing its interval. The adaptive interval (duration × 6 over a 5 s local
+  / 10 s SSH base, 60 s cap, churn damper) measures only the state request(s),
+  never the refresh a change triggers.
+- Watcher Git reads run `git status` under
+  `EXPLORER_GIT_BACKGROUND_STATUS_TIMEOUT_S` (5 s): `git/state` always, and the
+  quiet `git/repo` and `/entries` refreshes, which send `background=1`.
+  Interactive loads, "Show more" included, keep `EXPLORER_GIT_STATUS_TIMEOUT_S`
+  (2 s).
 - Multi-entry selection belongs to session id + root revision + one surface;
   changing any drops it. It never spans tree/listing or persists. Prune targets to
   topmost paths; rename stays single-entry. Batches issue N existing per-entry
@@ -829,8 +848,8 @@ unless the task explicitly changes this contract.
   reading a hovered scrolled panel — never on idle retained DOM focus, so a
   visible but unfocused workspace still applies the newest pending state while a
   `pointercancel`/window blur/hidden page reconciles pointer and edit state, and
-  the wake on focus/visibility return performs one immediate check without
-  replaying hidden intervals. The quiet apply preserves the commit-message draft,
+  the wake on focus/visibility return or a tab swap performs one immediate check
+  without replaying hidden intervals. The quiet apply preserves the commit-message draft,
   caret, selection (including `selectionDirection`) and scroll, restores caret
   without stealing foreground focus after a blur, and preserves the
   commit-message caret on Alt-collapse.

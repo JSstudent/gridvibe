@@ -125,6 +125,8 @@ from web.dashboard import build_dashboard_snapshot
 from web.explorer import (  # noqa: F401 - some names re-exported for backwards compatibility
     EXPLORER_DIRECTORY_STATE_MAX_ENTRIES,
     EXPLORER_FILE_PREVIEW_MAX_BYTES,
+    EXPLORER_GIT_BACKGROUND_STATUS_TIMEOUT_S,
+    EXPLORER_GIT_STATUS_TIMEOUT_S,
     ExplorerRouteError,
     _acquire_ssh_sftp,
     _append_deleted_git_entries,
@@ -1151,6 +1153,17 @@ def get_sessions():
     return jsonify(payload)
 
 
+def _explorer_git_status_timeout() -> float:
+    """The `git status` bound for this explorer read.
+
+    `background=1` marks a request from the explorer change watcher, which no
+    reader is waiting on, so it gets the longer background bound.
+    """
+    if request.args.get("background") == "1":
+        return EXPLORER_GIT_BACKGROUND_STATUS_TIMEOUT_S
+    return EXPLORER_GIT_STATUS_TIMEOUT_S
+
+
 @app.route('/api/explorer/<session_id>/entries', methods=['GET'])
 def get_explorer_entries(session_id: str):
     """List entries for a file explorer pane."""
@@ -1158,6 +1171,7 @@ def get_explorer_entries(session_id: str):
     if session is None:
         return jsonify({"error": "Session not found"}), 404
     requested_path = request.args["path"] if "path" in request.args else None
+    status_timeout = _explorer_git_status_timeout()
 
     def handler(backend: Any) -> Dict[str, Any]:
         root_path, current_path = backend.resolve_dir(requested_path)
@@ -1169,7 +1183,9 @@ def get_explorer_entries(session_id: str):
             directory_revision(entries)
             if len(entries) <= EXPLORER_DIRECTORY_STATE_MAX_ENTRIES else None
         )
-        git_context, git_statuses = _get_git_context(backend, root_path, current_path)
+        git_context, git_statuses = _get_git_context(
+            backend, root_path, current_path, status_timeout=status_timeout
+        )
         _attach_git_status_to_entries(backend, root_path, git_context, git_statuses, entries)
         _append_deleted_git_entries(backend, root_path, current_path, git_context, git_statuses, entries)
         entries.sort(key=lambda item: (item["type"] != "directory", item["name"].lower()))
@@ -2094,11 +2110,18 @@ def get_explorer_git_repo(session_id: str):
     if session is None:
         return jsonify({"error": "Session not found"}), 404
 
+    status_timeout = _explorer_git_status_timeout()
+
     def handler(backend: Any) -> Dict[str, Any]:
         root_path, anchor_path, context_dir = _explorer_git_anchor_paths(backend)
         commit_limit = _explorer_git_commit_limit()
         summary = _get_git_repo_summary(
-            backend, root_path, anchor_path, context_dir, commit_limit
+            backend,
+            root_path,
+            anchor_path,
+            context_dir,
+            commit_limit,
+            status_timeout=status_timeout,
         )
         return {"root": root_path, **summary}
 
@@ -2120,7 +2143,13 @@ def get_explorer_git_state(session_id: str):
 
     def handler(backend: Any) -> Dict[str, Any]:
         root_path, anchor_path, context_dir = _explorer_git_anchor_paths(backend)
-        state = _get_git_repo_state(backend, root_path, anchor_path, context_dir)
+        state = _get_git_repo_state(
+            backend,
+            root_path,
+            anchor_path,
+            context_dir,
+            status_timeout=EXPLORER_GIT_BACKGROUND_STATUS_TIMEOUT_S,
+        )
         revision = state["revision"]
         return {"revision": revision, "changed": revision != known}
 

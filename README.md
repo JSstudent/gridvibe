@@ -244,6 +244,9 @@ Swap any pane between a terminal and a file explorer with one button — same di
 - **Scope** — **pin** the sidebar to a path, or let the **chain** button follow whatever you browse. Both go down to a single file, are marked in the Files tree, and survive a restart. Every action obeys the scope and names it in its tooltip.
 - **Graph** — the newest 60 commits, plus 60 more per **Show more**, up to 300. The magnifier finds a commit by subject or id with `Enter`/`Shift+Enter` stepping, and `Alt`-click collapses every commit.
 - **Commit card** — right-click a commit for the full message, the author, the date in the author's own time zone, the object id, and any branch or tag, each with a copy button.
+- **Stays current** — changes made outside GridVibe update the sidebar, file badges and listings in the background, and switching to a tab catches its explorer up straight away.
+
+In very large repositories, `git config core.untrackedCache true` (and `core.fsmonitor true` where your Git supports it) makes those background checks much faster.
 
 Cross-root transfers and Git checkout, pull, or merge are intentionally left to the terminal.
 

@@ -15,7 +15,10 @@ rather than pattern-matched:
 - the newest deferred payload wins; a deferred payload is dropped rather than
   applied under a scope the pane has left; stale pane/session/scope responses
   are discarded; a hidden page neither polls nor applies on return past a single
-  check.
+  check;
+- a tab swap wakes the shown panes once (debounced), a wake landing during a
+  running pass re-runs it on the panes now shown, and the adaptive interval is
+  measured from the state request alone (ISSUE-2026-064).
 
 A second harness loads the *shipped* ``applyExplorerGitRepoQuiet`` so the quiet
 apply's caret/selection/scroll preservation is executed too, including that it
@@ -176,10 +179,15 @@ vm.runInContext(fs.readFileSync(process.argv[5], 'utf8'), sandbox); // directory
 vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox); // watch
 
 // Overrides go on *after* evaluation so calls resolve to the stubs at call time.
+const realRefreshExplorerGitRepoQuiet = sandbox.refreshExplorerGitRepoQuiet;
 // `applyExplorerGitRepoQuiet` is recorded (and still advances the pane's
 // revision, the way the shipped one does) so the deferral tests can assert on
 // *when* an apply lands without rebuilding the panel.
-sandbox.refreshExplorerGitRepoQuiet = async () => repoData;
+const quietRepoOptions = [];
+sandbox.refreshExplorerGitRepoQuiet = async (index, options) => {
+    quietRepoOptions.push(options || null);
+    return repoData;
+};
 sandbox.applyExplorerGitRepoQuiet = (index, data, scopePath, scopeKind) => {
     applyCalls.push({ index, data, scopePath, scopeKind });
     const target = sandbox.terminals[index];
@@ -498,6 +506,215 @@ class HiddenPageTestCase(ExplorerGitWatchHarness):
         )
         self.assertEqual(result["applied"], 1)
         self.assertEqual(result["revision"], "rev-new")
+
+
+class ViewSwapWakeTestCase(ExplorerGitWatchHarness):
+    """A tab swap catches the shown panes up within one poll (ISSUE-2026-064)."""
+
+    def test_a_swap_during_a_running_pass_reruns_on_the_shown_panes(self):
+        result = self._run_node(
+            """
+            elements['explorer-git-panel-0'] = makeElement('panel');
+            elements['explorer-git-panel-1'] = makeElement('panel');
+            const polled = [];
+            const transport = sandbox.fetch;
+            sandbox.fetch = async url => {
+                if (String(url).includes('/git/state')) {
+                    polled.push(String(url).split('/')[3]);
+                }
+                return transport(url);
+            };
+            // Tab A: two explorer panes; the first poll hangs on `git status`.
+            sandbox.terminals = [pane, makePane()];
+            sandbox.sessionIds = ['session-a0', 'session-a1'];
+            holdNextState();
+            const running = sandbox.explorerGitWatchTick();
+            await new Promise(r => setTimeout(r, 0));
+            // Swap to tab B, whose pane was left half-way through its interval.
+            const shown = makePane();
+            shown._explorerGitWatchNextAt = clock + 30000;
+            sandbox.terminals = [shown];
+            sandbox.sessionIds = ['session-b'];
+            sandbox.explorerGitWatchWake();
+            stateGate.resolve();
+            await running;
+            emit({
+                polled,
+                shownRevision: shown._explorerGitRevision,
+                leftRevision: pane._explorerGitRevision,
+                clock
+            });
+            """
+        )
+        # A0 was already in flight; A1 is never polled for a tab no longer
+        # shown; B is polled by the immediate rerun, with no clock movement.
+        self.assertEqual(result["polled"], ["session-a0", "session-b"])
+        self.assertEqual(result["shownRevision"], "rev-new")
+        self.assertEqual(result["leftRevision"], "rev-old")
+        self.assertEqual(result["clock"], 0)
+
+    def test_a_wake_during_a_running_pass_is_not_dropped(self):
+        result = self._run_node(
+            """
+            elements['explorer-git-panel-0'] = makeElement('panel');
+            elements['explorer-git-panel-1'] = makeElement('panel');
+            // The pass skips slot 0 (not yet due) and hangs on slot 1.
+            pane._explorerGitWatchNextAt = clock + 30000;
+            sandbox.terminals.push(makePane());
+            sandbox.sessionIds.push('session-2');
+            holdNextState();
+            const running = sandbox.explorerGitWatchTick();
+            await new Promise(r => setTimeout(r, 0));
+            // A focus wake now makes slot 0 due, behind the running pass.
+            sandbox.explorerGitWatchWake();
+            stateGate.resolve();
+            await running;
+            emit({ polls: fetchStateCalls, revision: pane._explorerGitRevision });
+            """
+        )
+        # Slot 1 once in the pass, then slots 0 and 1 again in the rerun: slot
+        # 1's first answer predates the wake.
+        self.assertEqual(result, {"polls": 3, "revision": "rev-new"})
+
+    def test_a_pane_in_flight_at_the_wake_is_polled_again(self):
+        # Leaving a tab and coming back restores the same pane list, so the
+        # poll that was in flight passes every identity guard -- but it read the
+        # repository before the wake. The rerun must poll that pane again.
+        result = self._run_node(
+            """
+            elements['explorer-git-panel-0'] = makeElement('panel');
+            const answers = [{ revision: 'rev-old' }, { revision: 'rev-new' }];
+            const transport = sandbox.fetch;
+            sandbox.fetch = async url => {
+                if (!String(url).includes('/git/state')) return transport(url);
+                const answer = answers.shift();
+                const response = await transport(url);
+                return { ...response, json: async () => answer };
+            };
+            holdNextState();
+            const running = sandbox.explorerGitWatchTick();
+            await new Promise(r => setTimeout(r, 0));
+            sandbox.explorerGitWatchWake();
+            stateGate.resolve();
+            await running;
+            emit({
+                polls: fetchStateCalls,
+                revision: pane._explorerGitRevision,
+                applied: applyCalls.length,
+                clock
+            });
+            """
+        )
+        self.assertEqual(result, {"polls": 2, "revision": "rev-new", "applied": 1, "clock": 0})
+
+    def test_fast_tab_cycling_wakes_the_shown_panes_once(self):
+        result = self._run_node(
+            """
+            elements['explorer-git-panel-0'] = makeElement('panel');
+            const timers = new Map();
+            let nextTimer = 1;
+            sandbox.setTimeout = (fn, ms) => {
+                timers.set(nextTimer, { fn, ms });
+                return nextTimer++;
+            };
+            sandbox.clearTimeout = id => { timers.delete(id); };
+            pane._explorerGitWatchNextAt = clock + 30000;
+            sandbox.explorerGitWatchWakeVisible();
+            sandbox.explorerGitWatchWakeVisible();
+            sandbox.explorerGitWatchWakeVisible();
+            const settle = [...timers.values()];
+            const beforeSettle = fetchStateCalls;
+            timers.clear();
+            settle.forEach(timer => timer.fn());
+            await new Promise(r => setTimeout(r, 0));
+            emit({
+                pending: settle.length,
+                settleMs: settle.map(timer => timer.ms),
+                beforeSettle,
+                polls: fetchStateCalls,
+                revision: pane._explorerGitRevision
+            });
+            """
+        )
+        self.assertEqual(result["pending"], 1)
+        self.assertEqual(result["settleMs"], [200])
+        self.assertEqual(result["beforeSettle"], 0)
+        self.assertEqual(result["polls"], 1)
+        self.assertEqual(result["revision"], "rev-new")
+
+    def test_a_swap_wake_waits_while_the_page_is_hidden(self):
+        result = self._run_node(
+            """
+            elements['explorer-git-panel-0'] = makeElement('panel');
+            let settle = null;
+            sandbox.setTimeout = fn => { settle = fn; return 1; };
+            sandbox.explorerGitWatchWakeVisible();
+            document.visibilityState = 'hidden';
+            settle();
+            await new Promise(r => setTimeout(r, 0));
+            emit({ polls: fetchStateCalls, applied: applyCalls.length });
+            """
+        )
+        self.assertEqual(result, {"polls": 0, "applied": 0})
+
+
+class BackgroundStatusBoundTestCase(ExplorerGitWatchHarness):
+    """The watcher's own refetch asks for the server's background Git bound."""
+
+    def test_only_the_watcher_refetch_is_marked_background(self):
+        result = self._run_node(
+            """
+            const panel = makeElement('panel');
+            panel.classList = { add() {}, remove() {} };
+            elements['explorer-git-panel-0'] = panel;
+            await sandbox.explorerGitWatchTick();
+            const urls = [];
+            sandbox.fetch = async url => {
+                urls.push(String(url));
+                return { ok: false, status: 500, json: async () => ({}) };
+            };
+            await realRefreshExplorerGitRepoQuiet(0, { background: true });
+            await realRefreshExplorerGitRepoQuiet(0);
+            emit({
+                watcher: quietRepoOptions,
+                background: new URL('http://x' + urls[0]).searchParams.get('background'),
+                interactive: new URL('http://x' + urls[1]).searchParams.get('background')
+            });
+            """
+        )
+        self.assertEqual(result["watcher"], [{"background": True}])
+        self.assertEqual(result["background"], "1")
+        self.assertIsNone(result["interactive"])
+
+
+class AdaptiveIntervalTestCase(ExplorerGitWatchHarness):
+    """The next poll is spaced by the state request, not the refresh it caused."""
+
+    def test_a_slow_refresh_after_a_change_does_not_stretch_the_interval(self):
+        result = self._run_node(
+            """
+            elements['explorer-git-panel-0'] = makeElement('panel');
+            const transport = sandbox.fetch;
+            sandbox.fetch = async url => {
+                if (String(url).includes('/git/state')) advanceClock(1000);
+                return transport(url);
+            };
+            sandbox.refreshExplorerGitRepoQuiet = async () => {
+                advanceClock(4000);   // the full /git/repo refetch
+                return repoData;
+            };
+            await sandbox.explorerGitWatchTick();
+            emit({
+                lastMs: pane._explorerGitWatchLastMs,
+                delay: pane._explorerGitWatchNextAt - clock,
+                revision: pane._explorerGitRevision
+            });
+            """
+        )
+        self.assertEqual(result["revision"], "rev-new")
+        self.assertEqual(result["lastMs"], 1000)
+        # 1000 ms x 6, not (1000 + 4000) ms x 6 = 30 s.
+        self.assertEqual(result["delay"], 6000)
 
 
 class ReviewInteractionRegressionTestCase(ExplorerGitWatchHarness):

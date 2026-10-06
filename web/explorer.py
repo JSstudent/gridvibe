@@ -72,6 +72,13 @@ EXPLORER_GIT_LOG_MAX_COMMITS = 60
 EXPLORER_GIT_LOG_MAX_PAGES = 5
 EXPLORER_GIT_LOG_LIMIT_MAX = EXPLORER_GIT_LOG_MAX_COMMITS * EXPLORER_GIT_LOG_MAX_PAGES
 EXPLORER_GIT_REVISION_LENGTH = 16
+# `git status` bounds. A listing or sidebar load is waited on, so it gives up
+# fast. The change watcher's requests -- its `git/state` poll and the quiet
+# `git/repo` and `/entries` refreshes a change triggers -- are waited on by no
+# one, and a large worktree that needs more than the interactive bound would
+# otherwise see the poll fail, or the poll succeed and every refresh fail.
+EXPLORER_GIT_STATUS_TIMEOUT_S = 2.0
+EXPLORER_GIT_BACKGROUND_STATUS_TIMEOUT_S = 5.0
 
 # The sidebar's commit rows are parsed field-by-field rather than scraped out
 # of `--oneline`, so a subject keeps whatever spaces and parentheses it has and
@@ -2771,6 +2778,7 @@ def _get_git_context(
     root_path: str,
     current_path: str,
     anchor_path: Optional[str] = None,
+    status_timeout: float = EXPLORER_GIT_STATUS_TIMEOUT_S,
 ) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
     """Return repository metadata and statuses for one selected Git path.
 
@@ -2801,7 +2809,7 @@ def _get_git_context(
         backend.pathspec(repo_root, selected_path),
     ]
     try:
-        status_result = backend.run_git(status_args, cwd=repo_root, timeout=2.0)
+        status_result = backend.run_git(status_args, cwd=repo_root, timeout=status_timeout)
         _require_complete_git_result(status_result, "Git status")
     except (subprocess.TimeoutExpired, TimeoutError):
         context = _empty_explorer_git_context("Git status timed out")
@@ -3262,6 +3270,7 @@ def _get_git_repo_state(
     root_path: str,
     current_path: Optional[str] = None,
     context_dir: Optional[str] = None,
+    status_timeout: float = EXPLORER_GIT_STATUS_TIMEOUT_S,
 ) -> Dict[str, Any]:
     """Return the sidebar's semantic Git state without the commit graph."""
     anchor_path = current_path or root_path
@@ -3270,6 +3279,7 @@ def _get_git_repo_state(
         root_path,
         context_dir or anchor_path,
         anchor_path,
+        status_timeout=status_timeout,
     )
     if not git_context.get("available"):
         raise ValueError(git_context.get("error") or "Folder is not inside a Git worktree")
@@ -3311,6 +3321,7 @@ def _get_git_repo_summary(
     current_path: Optional[str] = None,
     context_dir: Optional[str] = None,
     limit: int = EXPLORER_GIT_LOG_MAX_COMMITS,
+    status_timeout: float = EXPLORER_GIT_STATUS_TIMEOUT_S,
 ) -> Dict[str, Any]:
     """Return changed files and a bounded commit graph for the browsed path.
 
@@ -3320,7 +3331,9 @@ def _get_git_repo_summary(
     collapse a graph the reader had expanded.
     """
     anchor_path = current_path or root_path
-    state = _get_git_repo_state(backend, root_path, anchor_path, context_dir)
+    state = _get_git_repo_state(
+        backend, root_path, anchor_path, context_dir, status_timeout=status_timeout
+    )
     repo_root = str(state["git"]["repo_root"])
     anchor_pathspec = backend.pathspec(repo_root, anchor_path)
     page = max(1, int(limit))

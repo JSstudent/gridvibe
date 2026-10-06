@@ -454,6 +454,26 @@ class SessionViewCacheTestCase(PaneOverlayTestCase):
         self.assertEqual(result["observed"], 5)
         self.assertIn({"viewportY": 17}, result["viewport"])
 
+    def test_swapped_in_views_wake_the_explorer_watch_and_a_reused_view_does_not(self):
+        # A restored or rebuilt tab shows explorer panes the watch timer was not
+        # planned around (ISSUE-2026-064); a reused view is already on schedule.
+        result = self._run_node(
+            """
+            seedA();
+            await initialLoad();
+            const reused = calls.watchWakes;
+            await swapTo('g2');
+            const rebuilt = { wakes: calls.watchWakes, grids: calls.rebuilt.length };
+            calls.rebuilt = [];
+            await swapTo('g1');
+            report({ reused, rebuilt,
+                restored: { wakes: calls.watchWakes, grids: calls.rebuilt.length } });
+            """
+        )
+        self.assertEqual(result["reused"], 0)
+        self.assertEqual(result["rebuilt"], {"wakes": 1, "grids": 1})
+        self.assertEqual(result["restored"], {"wakes": 2, "grids": 0})
+
     def test_invalid_fragment_is_rejected_before_clearing_the_live_grid(self):
         for invalid in ("empty", "wrong_card", "missing_instance", "missing_id"):
             with self.subTest(invalid=invalid):
