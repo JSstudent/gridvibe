@@ -17,6 +17,7 @@ from gridvibe_mcp.server import dispatch  # noqa: E402
 from sessions.manager import SessionManager  # noqa: E402
 from tests.test_mcp_client import StubOpener, client_for, http_error  # noqa: E402
 from web.agent_results import ResultStore  # noqa: E402
+from web.crew_history import CrewHistory  # noqa: E402
 from web.mcp_close import close_for_agent  # noqa: E402
 
 
@@ -294,6 +295,30 @@ class CloseAssignmentTestCase(unittest.TestCase):
         row = results.collect(caller.session_id, [worker.session_id])["agents"][0]
         self.assertEqual(row["state"], "ended")
         self.assertIn("closed", row["reason"])
+
+    def test_closing_a_restored_pane_drops_its_crew_history(self):
+        manager = SessionManager()
+        manager.create_group("Workers", "local", "vertical", 3, group_id="g")
+        caller = manager.create_session("g", host="localhost", directory=".")
+        worker = manager.create_session("g", host="localhost", directory=".", created_by_session_id=caller.session_id)
+        other = manager.create_session("g", host="localhost", directory=".")
+        history = CrewHistory()
+        restored = {"state": "reported", "status": "done", "read": True, "collected": False}
+        history.install("default", [
+            {"requester_session_id": caller.session_id, "worker_session_id": worker.session_id, **restored},
+            {"requester_session_id": caller.session_id, "worker_session_id": other.session_id, **restored},
+        ])
+        # The transport teardown is stubbed out, so only the close path's own
+        # cleanup can drop the history.
+        with patch("web.mcp_close.session_manager", manager), patch("web.pane_gates.session_manager", manager), \
+             patch("web.terminal_io._close_ssh_connection"), patch("web.terminal_io.crew_history", history), \
+             patch("web.terminal_io._broadcast_session_groups_updated"), \
+             patch("web.workspaces.forget_pruned_workspaces"), patch("web.workspaces.forget_emptied_default_workspace"):
+            answer, status = close_for_agent("pane", worker.session_id, {"requested_by_session_id": caller.session_id})
+        self.assertEqual(status, 200, answer)
+        self.assertEqual(
+            [link["worker_session_id"] for link in history.snapshot()], [other.session_id]
+        )
 
 
 class CloseToolTestCase(unittest.TestCase):

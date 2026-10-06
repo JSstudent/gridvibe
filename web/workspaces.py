@@ -37,6 +37,7 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+from web import crew_history
 from web.agent_conversations import prepare_conversation_launch_fields
 from web.agent_handoffs import (
     HandoffError,
@@ -1979,6 +1980,8 @@ def _restore_claimed_workspace(resolved_workspace_id: str) -> Dict[str, Any]:
 
     group_results: List[Dict[str, Any]] = []
     started_group_ids: List[str] = []
+    # (snapshot group, launch payload) per started group, for the crew links.
+    started_groups: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
     active_snapshot_group_id = str(slot.get("active_group_id") or "").strip()
     active_group_id = ""
 
@@ -2018,6 +2021,7 @@ def _restore_claimed_workspace(resolved_workspace_id: str) -> Dict[str, Any]:
             result["group_id"] = payload.get("group_id", "")
             result["pane_count"] = payload.get("count", 0)
             started_group_ids.append(result["group_id"])
+            started_groups.append((snapshot_group, payload))
             if snapshot_group_id and snapshot_group_id == active_snapshot_group_id:
                 active_group_id = result["group_id"]
         else:
@@ -2062,6 +2066,7 @@ def _restore_claimed_workspace(resolved_workspace_id: str) -> Dict[str, Any]:
         md_font=slot["md_font"],
         source_font=slot["source_font"],
     )
+    _restore_crew_links(resolved_workspace_id, slot.get("crew_links"), started_groups)
 
     # Shape-only diagnostics (MW-16): enough to reconstruct what a restore did
     # and why a tab is missing, with no host, directory, command, or credential.
@@ -2095,6 +2100,59 @@ def _restore_claimed_workspace(resolved_workspace_id: str) -> Dict[str, Any]:
         "group_count": len(started_group_ids),
         "groups": group_results,
     }
+
+
+def _restore_crew_links(
+    workspace_id: str,
+    entries: Any,
+    started_groups: List[Tuple[Dict[str, Any], Dict[str, Any]]],
+) -> None:
+    """Install a restored workspace's crew links as history, keyed to its new panes.
+
+    A stored endpoint is (snapshot group id, pane index). A started group maps
+    its panes only when it came back with exactly as many as the slot holds,
+    so an index can never name a different pane; a group that failed or was
+    skipped maps nothing, and a link touching it is dropped. The links go to
+    :mod:`web.crew_history`, never to ``ResultStore``. This is presentation
+    only: any failure is logged shape-only and restores no links, and never
+    changes the restore's own result.
+    """
+    try:
+        coord_to_session: Dict[Tuple[str, int], str] = {}
+        seen: Set[str] = set()
+        ambiguous: Set[str] = set()
+        for snapshot_group, payload in started_groups:
+            group_id = str(snapshot_group.get("group_id") or "")
+            if not group_id:
+                continue
+            if group_id in seen:
+                ambiguous.add(group_id)
+                continue
+            seen.add(group_id)
+            stored = snapshot_group.get("sessions") or []
+            launched = payload.get("sessions") or []
+            if len(launched) != len(stored):
+                continue
+            for index, session in enumerate(launched):
+                session_id = session.get("session_id") if isinstance(session, dict) else None
+                if isinstance(session_id, str) and session_id:
+                    coord_to_session[(group_id, index)] = session_id
+        for key in [key for key in coord_to_session if key[0] in ambiguous]:
+            del coord_to_session[key]
+        links = crew_history.translate_for_restore(entries or [], coord_to_session)
+        crew_history.install(workspace_id, links)
+    except Exception as exc:
+        logger.warning(
+            "Crew links not restored workspace=%s category=%s",
+            workspace_id,
+            type(exc).__name__,
+        )
+        # Restore no links: never leave an earlier restore's history standing
+        # for this workspace id beside panes it does not describe.
+        try:
+            crew_history.install(workspace_id, [])
+        except Exception:
+            pass
 
 
 def _preflight_restore_set(workspace_ids: List[str]) -> List[Dict[str, Any]]:

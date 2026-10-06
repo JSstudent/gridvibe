@@ -286,6 +286,35 @@ paths must pass it and every slot written carries the key (`[]` when empty).
   - restored links never appear in `ResultStore` (`count()`,
     `live_assignment`, `wait_for_results`).
 
+#### Implementation notes
+
+Done. `_restore_claimed_workspace` keeps (snapshot group, launch payload) for
+each started group and, after the workspace chrome is applied, calls
+`_restore_crew_links(workspace_id, slot["crew_links"], started_groups)`.
+
+- `slot["crew_links"]` arrives already validated: the restore reads the slot
+  through `load_restorable_workspace` → `_validate_slot`.
+- A group maps (group id, pane index) → new session id only when its payload
+  holds as many sessions as the snapshot group; a snapshot group id that two
+  started groups share maps nothing. Failed, skipped and mismatched groups map
+  nothing, so `translate_for_restore` drops their links.
+- `install()` always runs, with `[]` when nothing resolves, so a second restore
+  of the same workspace id replaces its history. On any exception the block
+  logs workspace id and exception class only, then installs `[]` (itself
+  guarded) so no stale history survives beside the new panes. The restore's
+  result never depends on it, and nothing is `seed()`ed into `ResultStore`.
+- `crew_history.forget_session` runs beside `agent_results.forget_session` in
+  `terminal_io._close_ssh_connection` (session gone) and in
+  `mcp_close.close_for_agent`'s per-pane cleanup loop; those are the only two
+  callers. No workspace close/forget path was added: closing a workspace closes
+  its panes through the same path.
+- Tests: `CrewLinksRestoreTestCase` in `tests/test_runtime_state.py` (real
+  save → restore through the routes, failed and skipped groups, count mismatch,
+  re-restore replaces, pane close through `DELETE /api/sessions/<id>`,
+  `ResultStore` untouched including the `handoff-reports` route, failing block)
+  and `test_closing_a_restored_pane_drops_its_crew_history` in
+  `tests/test_mcp_close.py`.
+
 ### Stage 4: dashboard and board
 
 - `web/dashboard.py::build_dashboard_snapshot`: history first, then live, and

@@ -25,7 +25,9 @@ from web import api, crew_history
 from web import config as web_config
 from web import runtime_state as web_runtime_state
 from web import saved_sessions as web_saved_sessions
+from web import workspaces as web_workspaces
 from web.agent_results import MAX_ASSIGNMENTS
+from web.agent_results import results as agent_results_store
 
 _AGENT_PANE = {
     "title": "Claude",
@@ -726,6 +728,247 @@ class CrewLinksLiveCaptureTestCase(_LiveAppMixin, unittest.TestCase):
         self.assertEqual(restored.status_code, 200, restored.get_json())
         [group] = api.session_manager.get_workspace_groups("default")
         self.assertEqual(len(api.session_manager.get_group_sessions(group.group_id)), 2)
+
+
+class CrewLinksRestoreTestCase(_LiveAppMixin, unittest.TestCase):
+    """A restore installs the slot's links as history, keyed to the new panes."""
+
+    def setUp(self):
+        super().setUp()
+        crew_history.reset()
+        self.addCleanup(crew_history.reset)
+        agent_results_store.reset()
+        self.addCleanup(agent_results_store.reset)
+
+    def _launch_group(self, name, *titles, workspace_id="default", **body):
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                **body,
+                "connection_mode": "wsl",
+                "workspace_id": workspace_id,
+                "session_name": name,
+                "layout": "single" if len(titles) == 1 else "vertical",
+                "sessions": [
+                    {**_AGENT_PANE, "directory": str(self.repo_dir), "title": title}
+                    for title in titles
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.get_json())
+        return [
+            session.session_id
+            for session in api.session_manager.get_group_sessions(
+                response.get_json()["group_id"]
+            )
+        ]
+
+    def _save_crew(self, **testers):
+        """Leads (lead, helper) and Testers (tester, reviewer), three links, saved."""
+        lead, helper = self._launch_group("Leads", "Lead", "Helper")
+        tester, reviewer = self._launch_group("Testers", "Tester", "Reviewer", **testers)
+        live = [
+            _link(lead, helper),
+            _link(helper, tester, state="working", round=2),
+            _link(tester, reviewer),
+        ]
+        with patch.object(
+            web_runtime_state.agent_results, "links_snapshot", return_value=live
+        ):
+            saved = self.client.post(
+                "/api/runtime-state/save", json={"workspace_id": "default"}
+            )
+        self.assertEqual(saved.status_code, 200, saved.get_json())
+        self.assertEqual(len(self._stored_links()), 3)
+        # A restart: the process, and every pane and store with it, is gone.
+        api.session_manager.reset_sessions()
+        crew_history.reset()
+
+    def _stored_links(self):
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        return state["workspaces"]["default"]["crew_links"]
+
+    def _restore(self):
+        response = self.client.post(
+            "/api/runtime-state/restore", json={"workspace_ids": ["default"]}
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        return response.get_json()["workspaces"][0]
+
+    def _panes(self):
+        """Live pane ids by title, for the restored workspace."""
+        return {
+            session.title: session.session_id
+            for group in api.session_manager.get_workspace_groups("default")
+            for session in api.session_manager.get_group_sessions(group.group_id)
+        }
+
+    @staticmethod
+    def _pairs(links):
+        return [(link["requester_session_id"], link["worker_session_id"]) for link in links]
+
+    def test_a_restore_installs_history_keyed_to_the_new_panes(self):
+        self._save_crew()
+
+        restored = self._restore()
+
+        self.assertTrue(restored["restored"])
+        panes = self._panes()
+        links = crew_history.snapshot()
+        self.assertEqual(
+            self._pairs(links),
+            [
+                (panes["Lead"], panes["Helper"]),
+                (panes["Helper"], panes["Tester"]),
+                (panes["Tester"], panes["Reviewer"]),
+            ],
+        )
+        self.assertTrue(all(link["restored"] for link in links))
+        self.assertEqual(
+            (links[1]["state"], links[1]["reason"], links[1]["round"]),
+            ("ended", crew_history.RESTARTED, 2),
+        )
+
+    def test_restoring_the_workspace_again_replaces_its_history(self):
+        self._save_crew()
+        self._restore()
+        # Gone without a close path running, so the first history is still held.
+        api.session_manager.reset_sessions()
+        self.assertEqual(crew_history.history.count(), 3)
+
+        self._restore()
+
+        panes = self._panes()
+        self.assertEqual(crew_history.history.count(), 3)
+        self.assertEqual(
+            self._pairs(crew_history.snapshot())[0], (panes["Lead"], panes["Helper"])
+        )
+
+    def _assert_only_the_leads_link(self, restored):
+        self.assertTrue(restored["restored"])
+        self.assertEqual([group["started"] for group in restored["groups"]], [True, False])
+        panes = self._panes()
+        self.assertNotIn("Tester", panes)
+        self.assertEqual(
+            self._pairs(crew_history.snapshot()), [(panes["Lead"], panes["Helper"])]
+        )
+
+    def test_a_failed_group_drops_its_links(self):
+        self._save_crew()
+        real_launch = web_workspaces.launch_session_group
+
+        def failing_testers(body):
+            if body.get("session_name") == "Testers":
+                return {"error": "Relaunch failed"}, 500
+            return real_launch(body)
+
+        with patch.object(web_workspaces, "launch_session_group", failing_testers):
+            restored = self._restore()
+
+        self._assert_only_the_leads_link(restored)
+
+    def test_a_skipped_group_drops_its_links(self):
+        preset = web_saved_sessions.upsert_saved_session(
+            config={
+                "connection_mode": "wsl",
+                "terminal_count": 2,
+                "layout": "vertical",
+                "terminals": [{"title": "Tester"}, {"title": "Reviewer"}],
+            },
+            name="Testers",
+        )
+        self._save_crew(saved_session_id=preset["id"])
+        # R6: by restore time the preset is live in a sibling workspace.
+        api.session_manager.create_workspace("Other", "bbbbbbbbbbbb")
+        self._launch_group(
+            "Testers", "Elsewhere", workspace_id="bbbbbbbbbbbb", saved_session_id=preset["id"]
+        )
+
+        restored = self._restore()
+
+        self.assertEqual(restored["groups"][1].get("skipped"), "already_live")
+        self._assert_only_the_leads_link(restored)
+
+    def test_a_pane_count_mismatch_maps_nothing_for_that_group(self):
+        self._save_crew()
+        real_launch = web_workspaces.launch_session_group
+
+        def short_leads(body):
+            payload, status = real_launch(body)
+            if body.get("session_name") == "Leads":
+                payload = {**payload, "sessions": payload["sessions"][:1]}
+            return payload, status
+
+        with patch.object(web_workspaces, "launch_session_group", short_leads):
+            restored = self._restore()
+
+        self.assertTrue(restored["restored"])
+        panes = self._panes()
+        self.assertEqual(
+            self._pairs(crew_history.snapshot()), [(panes["Tester"], panes["Reviewer"])]
+        )
+
+    def test_closing_a_restored_pane_drops_its_history(self):
+        self._save_crew()
+        self._restore()
+        panes = self._panes()
+
+        response = self.client.delete(f"/api/sessions/{panes['Helper']}")
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(
+            self._pairs(crew_history.snapshot()), [(panes["Tester"], panes["Reviewer"])]
+        )
+
+    def test_restored_links_never_enter_the_result_store(self):
+        self._save_crew()
+        self._restore()
+        panes = self._panes()
+        self.assertEqual(crew_history.history.count(), 3)
+
+        self.assertEqual(agent_results_store.count(), 0)
+        self.assertEqual(agent_results_store.links_snapshot(), [])
+        for title in ("Helper", "Tester", "Reviewer"):
+            self.assertIsNone(agent_results_store.live_assignment(panes[title]))
+        answer = self.client.get(
+            f"/api/sessions/{panes['Lead']}/handoff-reports",
+            query_string={"session_ids": panes["Helper"], "wait": "0"},
+        )
+        self.assertEqual(answer.status_code, 200, answer.get_json())
+        payload = answer.get_json()
+        self.assertEqual(payload["agents"], [])
+        self.assertEqual(payload["unknown"], [panes["Helper"]])
+
+    def test_a_failing_link_block_never_fails_the_restore(self):
+        self._save_crew()
+        crew_history.install(
+            "default",
+            [{"requester_session_id": "stale-a", "worker_session_id": "stale-b",
+              **_stored_link(("g", 0), ("g", 1))}],
+        )
+
+        real_install = crew_history.install
+        calls = []
+
+        def install(workspace_id, links):
+            calls.append(len(links))
+            if len(calls) == 1:
+                raise RuntimeError("SECRET-DETAIL")
+            return real_install(workspace_id, links)
+
+        with patch.object(web_workspaces.crew_history, "install", install), \
+                self.assertLogs("web.workspaces", level="WARNING") as logs:
+            restored = self._restore()
+
+        self.assertTrue(restored["restored"])
+        self.assertEqual([group["started"] for group in restored["groups"]], [True, True])
+        self.assertEqual(len(self._panes()), 4)
+        # The failed install held three links; the fallback installs none, and
+        # the stale history for this workspace id is gone with it.
+        self.assertEqual(calls, [3, 0])
+        self.assertEqual(crew_history.history.count(), 0)
+        self.assertTrue(any("RuntimeError" in line for line in logs.output))
+        self.assertFalse(any("SECRET-DETAIL" in line for line in logs.output))
 
 
 if __name__ == "__main__":

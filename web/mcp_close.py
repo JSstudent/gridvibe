@@ -233,6 +233,7 @@ def close_for_agent(kind: str, target_id: str, payload: Mapping[str, Any]) -> Tu
         _close_ssh_connection,
         agent_handoffs,
         agent_results,
+        crew_history,
     )
     from web.workspaces import forget_emptied_default_workspace, forget_pruned_workspaces
 
@@ -245,7 +246,11 @@ def close_for_agent(kind: str, target_id: str, payload: Mapping[str, Any]) -> Tu
         # A manager cleanup failure can leave a disconnected record present.
         # End assignments regardless of whether transport retirement reached
         # its own forget_session calls.
-        for cleanup in (agent_handoffs.forget_session, agent_results.forget_session):
+        for cleanup in (
+            agent_handoffs.forget_session,
+            agent_results.forget_session,
+            crew_history.forget_session,
+        ):
             try:
                 cleanup(session_id)
             except Exception as exc:
