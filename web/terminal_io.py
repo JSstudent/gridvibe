@@ -565,6 +565,26 @@ def _send_connection_input(connection: Dict[str, Any], input_data: str):
         write_lock.release()
 
 
+def _run_tmux_write(connection: Dict[str, Any], operation):
+    """Run one tmux command that writes into this connection's session.
+
+    Held to `_send_connection_input`'s rule -- serialized with the pane's
+    other input and never run once the connection is retired. The SSH client
+    answering is no proof the pane is live: a close hands it to the MCP
+    tunnel's teardown, which keeps it open for its own cleanup.
+    """
+    with connection_lock:
+        write_lock = connection.setdefault('write_lock', threading.Lock())
+    if not write_lock.acquire(timeout=TERMINAL_WRITE_TIMEOUT):
+        raise TimeoutError('Terminal input is busy; input was not sent')
+    try:
+        if connection.get('retired'):
+            raise OSError('Terminal connection closed')
+        return operation(connection.get("client"))
+    finally:
+        write_lock.release()
+
+
 def _terminal_cwd_probe_command(connection: Dict[str, Any], marker_start: str, marker_end: str) -> str:
     """Return a shell command that prints the current directory between markers."""
     shell_kind = str(connection.get("shell_kind") or "").strip()
@@ -2925,8 +2945,9 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
             )
             delivered = True
             if tmux_target:
-                delivered = ssh_tmux.send_line(
-                    connection.get("client"), tmux_target, launch_line
+                delivered = _run_tmux_write(
+                    connection,
+                    lambda client: ssh_tmux.send_line(client, tmux_target, launch_line),
                 )
                 if not delivered:
                     _publish_ssh_terminal_output(
@@ -2983,8 +3004,9 @@ def _tmux_startup_target(
     new_window_directory = connection.pop("tmux_new_window", None)
     if new_window_directory is not None:
         try:
-            pane_id, in_directory = ssh_tmux.new_window(
-                connection.get("client"), tmux_name, new_window_directory
+            pane_id, in_directory = _run_tmux_write(
+                connection,
+                lambda client: ssh_tmux.new_window(client, tmux_name, new_window_directory),
             )
         except ssh_tmux.TmuxError as exc:
             logger.warning("tmux new-window failed for %s: %s", tmux_name, exc)

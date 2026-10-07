@@ -196,6 +196,179 @@ class TerminalApplyAllTests(unittest.TestCase):
         self.assertEqual(self._run("api.applyTemplateToDrafts", [], 4), [])
 
 
+def _slice(source, start, end):
+    begin = source.index(start)
+    return source[begin:source.index(end, begin)]
+
+
+# The launcher's real "Same for all" functions and its form reader, run against
+# stub rows. A row's draft is whatever the test gave it; an `invalid` row
+# throws from the per-row reader the way a browser row with no URL does.
+LAUNCHER_HARNESS_HEAD = r"""
+const api = require(process.argv[2]);
+const timers = new Map();
+let timerSeq = 0;
+const window = {
+    GridVibeTerminalApplyAll: api,
+    setTimeout(fn) { timerSeq += 1; timers.set(timerSeq, fn); return timerSeq; },
+    clearTimeout(id) { timers.delete(id); }
+};
+function runTimers() {
+    const pending = Array.from(timers.values());
+    timers.clear();
+    pending.forEach(fn => fn());
+}
+const MAX_SESSIONS = 0;
+const DEFAULT_TERMINALS = [];
+let terminalApplyAll = false;
+let terminalApplyAllTimer = null;
+let selectedCount = 0;
+let rows = [];
+
+function makeRow(draft, invalid = false) {
+    const classes = new Set(['t-row']);
+    const field = value => ({ value });
+    const row = {
+        draft, invalid, dataset: {},
+        classList: {
+            add: name => classes.add(name),
+            contains: name => classes.has(name),
+            toggle(name, force) {
+                const on = force === undefined ? !classes.has(name) : Boolean(force);
+                if (on) classes.add(name); else classes.delete(name);
+                return on;
+            }
+        },
+        querySelector(selector) {
+            if (selector === '.t-title') return field(draft.title || '');
+            if (selector === '.t-tmux-session') return field(draft.tmux_session || '');
+            return null;
+        },
+        contains: target => target === row.input,
+        input: { matches: () => false },
+        replaceWith(next) { rows[rows.indexOf(row)] = next; }
+    };
+    return row;
+}
+function collectTerminalDraft(row) {
+    if (row.invalid) throw new Error('Enter a browser URL before launching.');
+    return JSON.parse(JSON.stringify(row.draft));
+}
+function terminalRowMarkup(draft) { return JSON.stringify(draft); }
+function bindTerminalRowInteractions() {}
+function syncTerminalCommandState() {}
+function scheduleAgentPreflight() {}
+function toggleTerminalRowFold() {}
+const checkbox = { checked: false, disabled: false };
+const badge = { textContent: '', title: '' };
+const document = {
+    querySelectorAll: () => rows.slice(),
+    querySelector: selector => (selector.includes('.t-badge') ? badge : rows[0]),
+    getElementById: () => checkbox,
+    createElement: () => ({
+        set innerHTML(markup) {
+            this.content = { firstElementChild: makeRow(JSON.parse(markup)) };
+        }
+    })
+};
+function setUp(drafts) {
+    rows = drafts.map(([draft, invalid]) => makeRow(draft, invalid));
+    selectedCount = rows.length;
+    terminalApplyAll = false;
+    terminalApplyAllTimer = null;
+    timers.clear();
+}
+function tick(on) {
+    checkbox.checked = on;
+    toggleTerminalApplyAll(checkbox);
+}
+function editTerminalOne(changes) {
+    Object.assign(rows[0].draft, changes);
+    scheduleTerminalTemplateSync({ type: 'input', target: rows[0].input });
+}
+function view(row) {
+    return {
+        follows: row.classList.contains('t-row-follows'),
+        title: row.draft.title,
+        initial_command: row.draft.initial_command,
+        startup_mode: row.draft.startup_mode
+    };
+}
+"""
+
+
+@unittest.skipUnless(NODE, "Node is required for the frontend behavior tests")
+class TerminalApplyAllLauncherTests(unittest.TestCase):
+    def _run(self, body, drafts):
+        source = (ROOT / "web" / "static" / "js" / "launcher.js").read_text(encoding="utf-8")
+        script = "\n".join(
+            [
+                LAUNCHER_HARNESS_HEAD,
+                _slice(source, "    function collectTerminalDrafts() {", "    function renderCountOptions() {"),
+                _slice(
+                    source,
+                    "    function isTerminalFollowerRow(row) {",
+                    "    /* Panel fold state is a per-browser view preference",
+                ),
+                f"setUp({json.dumps(drafts)});",
+                f"process.stdout.write(JSON.stringify((() => {{ {body} }})()));",
+            ]
+        )
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "run.js"
+            path.write_text(script, encoding="utf-8")
+            completed = subprocess.run(
+                [NODE, str(path), str(MODULE_JS)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        if completed.returncode != 0:
+            raise AssertionError(completed.stderr)
+        return json.loads(completed.stdout)
+
+    def test_a_follower_the_form_cannot_read_still_takes_the_copy(self):
+        browser = follower_draft(title="Docs", startup_mode="browser", initial_command="")
+        out = self._run(
+            "tick(true); return { badge: badge.textContent, follower: view(rows[1]) };",
+            [[template_draft(), False], [browser, True]],
+        )
+        self.assertEqual(out["badge"], "All")
+        self.assertEqual(
+            out["follower"],
+            {"follows": True, "title": "Docs", "initial_command": "claude", "startup_mode": "agent"},
+        )
+
+    def test_a_launch_or_save_read_carries_an_edit_still_waiting_to_be_copied(self):
+        out = self._run(
+            "tick(true); editTerminalOne({ initial_command: 'codex', agent_selection: 'codex' });"
+            " const drafts = collectTerminalDrafts();"
+            " return { follower: drafts[1].initial_command, pending: timers.size };",
+            [[template_draft(), False], [follower_draft(), False]],
+        )
+        self.assertEqual(out, {"follower": "codex", "pending": 0})
+
+    def test_unticking_keeps_the_edit_still_waiting_to_be_copied(self):
+        out = self._run(
+            "tick(true); editTerminalOne({ initial_command: 'codex' }); tick(false);"
+            " runTimers(); return view(rows[1]);",
+            [[template_draft(), False], [follower_draft(), False]],
+        )
+        self.assertEqual(
+            out,
+            {"follows": False, "title": "Logs", "initial_command": "codex", "startup_mode": "agent"},
+        )
+
+    def test_the_coalesced_copy_lands_once_typing_settles(self):
+        out = self._run(
+            "tick(true); editTerminalOne({ initial_command: 'codex' }); runTimers();"
+            " return { follower: view(rows[1]), timer: terminalApplyAllTimer };",
+            [[template_draft(), False], [follower_draft(), False]],
+        )
+        self.assertEqual(out["follower"]["initial_command"], "codex")
+        self.assertIsNone(out["timer"])
+
+
 class TerminalApplyAllMarkupTests(unittest.TestCase):
     def test_launcher_ships_the_checkbox_and_the_module(self):
         html = INDEX_HTML.read_text(encoding="utf-8")

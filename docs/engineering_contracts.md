@@ -2571,7 +2571,10 @@ in `README.md`; state the rules a change has to keep.
   card shown. The other rows stay in the form, hidden (`.t-row-follows`), and
   are re-rendered from `terminal-apply-all.js` on every Terminal 1 edit, so
   launch, preset save and the explorer-retarget notice read real values and
-  unticking shows each row as it was given. A follower copies what the pane
+  unticking shows each row as it was given. Typing is coalesced, so every form
+  read and the untick first apply a copy still waiting. Only Terminal 1 has to
+  be launchable for the copy: a follower the form cannot read (a browser row
+  with no URL) still takes it. A follower copies what the pane
   runs and keeps its own title and tmux session name (copying a name would put
   two panes on one session, which a launch refuses); agent override is never
   copied and is cleared and locked in a follower; saved explorer state survives

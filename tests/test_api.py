@@ -22909,6 +22909,58 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         self.assertIn("explorer_source_font", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
         self.assertIn("explorer_theme", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
 
+    def _collected_agent_draft(self, *, mcp=False, auto=False):
+        """Run the launcher's real per-row reader over one Claude agent row."""
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node is required for the launcher draft reader")
+        launcher_js = self._static("js/launcher.js")
+
+        def cut(start, end):
+            begin = launcher_js.index(start)
+            return launcher_js[begin:launcher_js.index(end, begin)]
+
+        stubs = """
+            const BOXES = JSON.parse(process.argv[2]);
+            const LOCAL_WINDOWS_SHELLS_AVAILABLE = false;
+            const row = {
+                dataset: {},
+                querySelector(selector) {
+                    if (selector === '.t-title') { return { value: 'Agent' }; }
+                    if (selector === '.t-dir') { return { value: 'src' }; }
+                    if (selector === '.t-agent-mcp') { return { checked: BOXES.mcp }; }
+                    if (selector === '.t-agent-auto-mode') { return { checked: BOXES.auto }; }
+                    return null;
+                }
+            };
+            function getTerminalCommandMode() { return 'agent'; }
+            function buildTerminalInitialCommand() { return 'claude'; }
+            function getRowAgentSelection() { return 'claude'; }
+            function agentMcpSupported() { return true; }
+            function agentAutoModeFlag() { return '--auto'; }
+            function readRowTmuxFields() { return { tmux: false, tmux_session: '' }; }
+        """
+        script = "\n".join([
+            stubs,
+            cut("    function parseStringArrayDataset(", "    /* Which explorer rows"),
+            cut("    function readRowAgentMcpFlags(", "    /* Ticking the box only asks."),
+            cut("    function collectTerminalDraft(", "    function collectTerminalDrafts() {"),
+            "process.stdout.write(JSON.stringify(collectTerminalDraft(row, 0)));",
+        ])
+        with TemporaryDirectory() as script_dir:
+            script_path = Path(script_dir) / "harness.js"
+            script_path.write_text(script, encoding="utf-8")
+            completed = subprocess.run(
+                [node, str(script_path), json.dumps({"mcp": mcp, "auto": auto})],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        if completed.returncode != 0:
+            self.fail(f"node harness failed:\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
     def test_launcher_wires_the_mcp_toggle(self):
         """The MCP checkbox mirrors Auto mode in every place Auto mode is.
 
@@ -22932,11 +22984,9 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         )
         self.assertIn("t-agent-mcp", launcher_js)
         self.assertIn("t-agent-mcp-field", launcher_js)
-        collect = launcher_js[
-            launcher_js.index("function collectTerminalDrafts()"):
-            launcher_js.index("function renderCountOptions()")
-        ]
-        self.assertIn("agent_mcp:", collect)
+        # The row's box is what a launch or preset save reads.
+        self.assertTrue(self._collected_agent_draft(mcp=True)["agent_mcp"])
+        self.assertFalse(self._collected_agent_draft(mcp=False)["agent_mcp"])
         # A remote pane is offered the checkbox too now: its tools arrive over
         # the SSH reverse tunnel rather than from a local sidecar, so the
         # connection mode is no longer part of the question.
@@ -22996,11 +23046,8 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         self.assertIn("function syncTerminalAgentAutoModeState(row, commandMode, selectedAgent)", launcher_js)
         self.assertIn("t-agent-auto-mode", launcher_js)
         self.assertIn("t-agent-auto-field", launcher_js)
-        collect = launcher_js[
-            launcher_js.index("function collectTerminalDrafts()"):
-            launcher_js.index("function renderCountOptions()")
-        ]
-        self.assertIn("agent_auto_mode:", collect)
+        self.assertTrue(self._collected_agent_draft(auto=True)["agent_auto_mode"])
+        self.assertFalse(self._collected_agent_draft(auto=False)["agent_auto_mode"])
 
         # 7.b (OD-12 case a): the shared pane-field builder carries the toggle
         # into buildSessionsFromConfig, which serves both launch and restore.

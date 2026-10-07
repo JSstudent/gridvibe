@@ -838,117 +838,125 @@
         return (warningCount || retargetedCount) ? 'warning' : 'success';
     }
 
+    /* One row's draft. Throws when the row cannot be launched as it stands
+       (a browser row with no usable URL) -- the message names the field. */
+    function collectTerminalDraft(row, index) {
+        const commandMode = getTerminalCommandMode(row);
+        const initialCommand = buildTerminalInitialCommand(row);
+        const directory = row.querySelector('.t-dir').value.trim();
+        /* Persisted explorer tab paths are relative to the root the pane
+           was saved under, and the row's directory is what selects that
+           root. Editing it after importing a saved session retargets the
+           pane, so paths captured under the old root would reopen as
+           missing files — drop them and let the relaunched pane start on
+           its own root instead. */
+        const explorerTabsMatchRoot = directory === (row.dataset.explorerTabsDir || '');
+        /* Browser rows only expose the active URL as an input; the rest of
+           the tab strip rides along in the dataset so importing a saved
+           multi-tab pane and re-saving it keeps every tab. The visible
+           input is authoritative for the active slot — otherwise editing
+           the URL here would be overwritten by the stale stored tab. */
+        const browserActiveTab = Number(row.dataset.browserActiveTab) || 0;
+        const browserTabs = commandMode === 'browser'
+            ? parseStringArrayDataset(row.dataset.browserTabs)
+            : [];
+        if (commandMode === 'browser' && initialCommand) {
+            if (browserActiveTab < browserTabs.length) {
+                browserTabs[browserActiveTab] = initialCommand;
+            } else {
+                browserTabs.push(initialCommand);
+            }
+        }
+        const agentMcpFlags = readRowAgentMcpFlags(row, commandMode);
+        const tmuxFields = readRowTmuxFields(row);
+        return {
+            title: row.querySelector('.t-title')?.value.trim() || `Terminal ${index + 1}`,
+            directory,
+            /* An imported explorer row carries the root it was saved under
+               through the form, so re-saving a preset from here keeps a
+               root that is wider than the folder the pane was browsing.
+               It is dropped by the same signal as the tabs and the pin:
+               once the row's directory has been edited the saved root no
+               longer describes this row, and the launch derives one from
+               the directory the user typed instead. */
+            explorer_root_directory: commandMode === 'explorer' && explorerTabsMatchRoot
+                ? (row.dataset.explorerRootDir || '')
+                : '',
+            explorer_root_configured: commandMode === 'explorer' && explorerTabsMatchRoot
+                && row.dataset.explorerRootConfigured === 'true',
+            initial_command: initialCommand,
+            initial_command_mode: commandMode === 'agent'
+                ? 'agent'
+                : (commandMode === 'explorer' || commandMode === 'browser' ? commandMode : 'command'),
+            startup_mode: commandMode === 'agent'
+                ? 'agent'
+                : (commandMode === 'explorer' || commandMode === 'browser' ? commandMode : 'terminal'),
+            agent_selection: commandMode === 'agent' ? getRowAgentSelection(row) : '',
+            custom_agent: commandMode === 'agent'
+                ? (row.querySelector('.t-agent-custom')?.value.trim() || '')
+                : '',
+            agent_auto_mode: commandMode === 'agent'
+                && Boolean(agentAutoModeFlag(getRowAgentSelection(row)))
+                && Boolean(row.querySelector('.t-agent-auto-mode')?.checked),
+            agent_mcp: agentMcpFlags.agent_mcp,
+            agent_mcp_override: agentMcpFlags.agent_mcp_override,
+            explorer_tree_open: commandMode === 'explorer' && row.dataset.explorerTreeOpen === 'true',
+            explorer_git_open: commandMode === 'explorer' && row.dataset.explorerGitOpen === 'true',
+            explorer_git_follow_browsing: commandMode === 'explorer'
+                && row.dataset.explorerGitFollowBrowsing === 'true',
+            explorer_git_pin_active: commandMode === 'explorer' && explorerTabsMatchRoot
+                && row.dataset.explorerGitPinActive === 'true',
+            explorer_git_pinned_path: commandMode === 'explorer' && explorerTabsMatchRoot
+                ? (row.dataset.explorerGitPinnedPath || '')
+                : '',
+            explorer_git_pin_kind: commandMode === 'explorer' && explorerTabsMatchRoot
+                && row.dataset.explorerGitPinKind === 'file'
+                ? 'file'
+                : 'dir',
+            explorer_search_open: commandMode === 'explorer' && row.dataset.explorerSearchOpen === 'true',
+            explorer_open_tabs: commandMode === 'explorer' && explorerTabsMatchRoot
+                ? parseStringArrayDataset(row.dataset.explorerOpenTabs)
+                : [],
+            explorer_active_tab: commandMode === 'explorer' && explorerTabsMatchRoot
+                ? (row.dataset.explorerActiveTab || '')
+                : '',
+            explorer_tab_views: commandMode === 'explorer' && explorerTabsMatchRoot
+                ? parseExplorerTabViewsDataset(row.dataset.explorerTabViews)
+                : {},
+            explorer_md_preset: commandMode === 'explorer' ? (row.dataset.explorerMdPreset || '') : '',
+            explorer_md_font: commandMode === 'explorer' ? (row.dataset.explorerMdFont || '') : '',
+            explorer_source_font: commandMode === 'explorer' ? (row.dataset.explorerSourceFont || '') : '',
+            explorer_theme: commandMode === 'explorer' ? (row.dataset.explorerTheme || 'dark') : '',
+            /* Browser rows only expose the active URL as an input; the rest
+               of the tab strip rides along in the dataset so importing a
+               saved multi-tab pane and re-saving it keeps every tab. */
+            browser_tabs: browserTabs,
+            browser_active_tab: commandMode === 'browser'
+                ? Math.max(0, Math.min(browserTabs.length - 1, browserActiveTab))
+                : 0,
+            distribution: LOCAL_WINDOWS_SHELLS_AVAILABLE ? (row.querySelector('.t-distribution')?.value.trim() || '') : '',
+            use_wsl: LOCAL_WINDOWS_SHELLS_AVAILABLE && commandMode !== 'explorer' && commandMode !== 'browser'
+                ? Boolean(row.querySelector('.t-use-wsl')?.checked)
+                : false,
+            use_powershell: LOCAL_WINDOWS_SHELLS_AVAILABLE && commandMode !== 'explorer' && commandMode !== 'browser'
+                ? Boolean(row.querySelector('.t-use-powershell')?.checked)
+                : false,
+            tmux: tmuxFields.tmux,
+            tmux_session: tmuxFields.tmux_session
+        };
+    }
+
     function collectTerminalDrafts() {
+        /* Every reader of the form -- the launch, a preset save, a count
+           change -- reads the followers, so a copy still waiting on typing
+           lands first. */
+        flushTerminalTemplateSync();
         const rows = Array.from(document.querySelectorAll('.t-row'));
         if (!rows.length) {
             return DEFAULT_TERMINALS.map(item => ({ ...item }));
         }
 
-        const drafts = rows.map((row, index) => {
-            const commandMode = getTerminalCommandMode(row);
-            const initialCommand = buildTerminalInitialCommand(row);
-            const directory = row.querySelector('.t-dir').value.trim();
-            /* Persisted explorer tab paths are relative to the root the pane
-               was saved under, and the row's directory is what selects that
-               root. Editing it after importing a saved session retargets the
-               pane, so paths captured under the old root would reopen as
-               missing files — drop them and let the relaunched pane start on
-               its own root instead. */
-            const explorerTabsMatchRoot = directory === (row.dataset.explorerTabsDir || '');
-            /* Browser rows only expose the active URL as an input; the rest of
-               the tab strip rides along in the dataset so importing a saved
-               multi-tab pane and re-saving it keeps every tab. The visible
-               input is authoritative for the active slot — otherwise editing
-               the URL here would be overwritten by the stale stored tab. */
-            const browserActiveTab = Number(row.dataset.browserActiveTab) || 0;
-            const browserTabs = commandMode === 'browser'
-                ? parseStringArrayDataset(row.dataset.browserTabs)
-                : [];
-            if (commandMode === 'browser' && initialCommand) {
-                if (browserActiveTab < browserTabs.length) {
-                    browserTabs[browserActiveTab] = initialCommand;
-                } else {
-                    browserTabs.push(initialCommand);
-                }
-            }
-            const agentMcpFlags = readRowAgentMcpFlags(row, commandMode);
-            const tmuxFields = readRowTmuxFields(row);
-            return {
-                title: row.querySelector('.t-title')?.value.trim() || `Terminal ${index + 1}`,
-                directory,
-                /* An imported explorer row carries the root it was saved under
-                   through the form, so re-saving a preset from here keeps a
-                   root that is wider than the folder the pane was browsing.
-                   It is dropped by the same signal as the tabs and the pin:
-                   once the row's directory has been edited the saved root no
-                   longer describes this row, and the launch derives one from
-                   the directory the user typed instead. */
-                explorer_root_directory: commandMode === 'explorer' && explorerTabsMatchRoot
-                    ? (row.dataset.explorerRootDir || '')
-                    : '',
-                explorer_root_configured: commandMode === 'explorer' && explorerTabsMatchRoot
-                    && row.dataset.explorerRootConfigured === 'true',
-                initial_command: initialCommand,
-                initial_command_mode: commandMode === 'agent'
-                    ? 'agent'
-                    : (commandMode === 'explorer' || commandMode === 'browser' ? commandMode : 'command'),
-                startup_mode: commandMode === 'agent'
-                    ? 'agent'
-                    : (commandMode === 'explorer' || commandMode === 'browser' ? commandMode : 'terminal'),
-                agent_selection: commandMode === 'agent' ? getRowAgentSelection(row) : '',
-                custom_agent: commandMode === 'agent'
-                    ? (row.querySelector('.t-agent-custom')?.value.trim() || '')
-                    : '',
-                agent_auto_mode: commandMode === 'agent'
-                    && Boolean(agentAutoModeFlag(getRowAgentSelection(row)))
-                    && Boolean(row.querySelector('.t-agent-auto-mode')?.checked),
-                agent_mcp: agentMcpFlags.agent_mcp,
-                agent_mcp_override: agentMcpFlags.agent_mcp_override,
-                explorer_tree_open: commandMode === 'explorer' && row.dataset.explorerTreeOpen === 'true',
-                explorer_git_open: commandMode === 'explorer' && row.dataset.explorerGitOpen === 'true',
-                explorer_git_follow_browsing: commandMode === 'explorer'
-                    && row.dataset.explorerGitFollowBrowsing === 'true',
-                explorer_git_pin_active: commandMode === 'explorer' && explorerTabsMatchRoot
-                    && row.dataset.explorerGitPinActive === 'true',
-                explorer_git_pinned_path: commandMode === 'explorer' && explorerTabsMatchRoot
-                    ? (row.dataset.explorerGitPinnedPath || '')
-                    : '',
-                explorer_git_pin_kind: commandMode === 'explorer' && explorerTabsMatchRoot
-                    && row.dataset.explorerGitPinKind === 'file'
-                    ? 'file'
-                    : 'dir',
-                explorer_search_open: commandMode === 'explorer' && row.dataset.explorerSearchOpen === 'true',
-                explorer_open_tabs: commandMode === 'explorer' && explorerTabsMatchRoot
-                    ? parseStringArrayDataset(row.dataset.explorerOpenTabs)
-                    : [],
-                explorer_active_tab: commandMode === 'explorer' && explorerTabsMatchRoot
-                    ? (row.dataset.explorerActiveTab || '')
-                    : '',
-                explorer_tab_views: commandMode === 'explorer' && explorerTabsMatchRoot
-                    ? parseExplorerTabViewsDataset(row.dataset.explorerTabViews)
-                    : {},
-                explorer_md_preset: commandMode === 'explorer' ? (row.dataset.explorerMdPreset || '') : '',
-                explorer_md_font: commandMode === 'explorer' ? (row.dataset.explorerMdFont || '') : '',
-                explorer_source_font: commandMode === 'explorer' ? (row.dataset.explorerSourceFont || '') : '',
-                explorer_theme: commandMode === 'explorer' ? (row.dataset.explorerTheme || 'dark') : '',
-                /* Browser rows only expose the active URL as an input; the rest
-                   of the tab strip rides along in the dataset so importing a
-                   saved multi-tab pane and re-saving it keeps every tab. */
-                browser_tabs: browserTabs,
-                browser_active_tab: commandMode === 'browser'
-                    ? Math.max(0, Math.min(browserTabs.length - 1, browserActiveTab))
-                    : 0,
-                distribution: LOCAL_WINDOWS_SHELLS_AVAILABLE ? (row.querySelector('.t-distribution')?.value.trim() || '') : '',
-                use_wsl: LOCAL_WINDOWS_SHELLS_AVAILABLE && commandMode !== 'explorer' && commandMode !== 'browser'
-                    ? Boolean(row.querySelector('.t-use-wsl')?.checked)
-                    : false,
-                use_powershell: LOCAL_WINDOWS_SHELLS_AVAILABLE && commandMode !== 'explorer' && commandMode !== 'browser'
-                    ? Boolean(row.querySelector('.t-use-powershell')?.checked)
-                    : false,
-                tmux: tmuxFields.tmux,
-                tmux_session: tmuxFields.tmux_session
-            };
-        });
+        const drafts = rows.map(collectTerminalDraft);
 
         while (drafts.length < MAX_SESSIONS) {
             drafts.push({ ...DEFAULT_TERMINALS[drafts.length] });
@@ -2414,19 +2422,35 @@
         if (rows.length < 2 || !policy) {
             return;
         }
-        let drafts;
+        let first;
         try {
-            drafts = collectTerminalDrafts();
+            first = collectTerminalDraft(rows[0], 0);
         } catch (_error) {
             /* Terminal 1 is mid-edit into something the form cannot read yet
                (an empty browser URL). The followers keep their last copy until
                it reads again; the launch reports the field itself. */
             return;
         }
-        /* A row's tmux name is its own even while its box is unticked, so a
-           follower does not lose a typed name because Terminal 1 has tmux off. */
-        rows.forEach((row, index) => {
-            drafts[index].tmux_session = row.querySelector('.t-tmux-session')?.value.trim() || '';
+        const drafts = rows.map((row, index) => {
+            let draft = first;
+            if (index > 0) {
+                /* Only Terminal 1 has to read: a follower's settings are
+                   about to be replaced, so one it could not launch with (a
+                   browser row with no URL yet) must not block the copy. All
+                   the copy keeps from such a row is its title. */
+                try {
+                    draft = collectTerminalDraft(row, index);
+                } catch (_error) {
+                    draft = { title: row.querySelector('.t-title')?.value.trim() || '' };
+                }
+            }
+            /* A row's tmux name is its own even while its box is unticked, so
+               a follower does not lose a typed name because Terminal 1 has
+               tmux off. */
+            return {
+                ...draft,
+                tmux_session: row.querySelector('.t-tmux-session')?.value.trim() || ''
+            };
         });
         const followed = policy.applyTemplateToDrafts(drafts, rows.length);
         const template = document.createElement('template');
@@ -2467,8 +2491,10 @@
     }
 
     function toggleTerminalApplyAll(checkbox) {
+        /* Unticking shows each row with what it was last given, and that
+           includes the edit still waiting to be copied. */
+        flushTerminalTemplateSync();
         terminalApplyAll = Boolean(checkbox?.checked);
-        window.clearTimeout(terminalApplyAllTimer);
         if (terminalApplyAll) {
             applyTerminalTemplateToFollowers();
             /* The one card left is the one being edited, so open it. */
@@ -2496,9 +2522,19 @@
         }
         window.clearTimeout(terminalApplyAllTimer);
         terminalApplyAllTimer = window.setTimeout(
-            applyTerminalTemplateToFollowers,
+            flushTerminalTemplateSync,
             event.type === 'input' ? 250 : 0
         );
+    }
+
+    /* Copy now the edit a coalesced sync is still waiting on, if any. */
+    function flushTerminalTemplateSync() {
+        if (terminalApplyAllTimer === null) {
+            return;
+        }
+        window.clearTimeout(terminalApplyAllTimer);
+        terminalApplyAllTimer = null;
+        applyTerminalTemplateToFollowers();
     }
 
     /* Panel fold state is a per-browser view preference, so it lives in
@@ -2600,7 +2636,11 @@
         });
 
         const defaultDir = getStep2DefaultDirectory(normalized, connectionMode);
+        /* Every row is replaced, so a copy still waiting on the old rows'
+           typing has nothing left to copy. */
         terminalApplyAll = false;
+        window.clearTimeout(terminalApplyAllTimer);
+        terminalApplyAllTimer = null;
         buildTerminalRows(
             selectedCount,
             normalizeTerminalsForDisplay(normalized.terminals || DEFAULT_TERMINALS, defaultDir, connectionMode)
@@ -4101,7 +4141,10 @@
 
     async function launchSessions() {
         /* Read before the launch: `buildTerminalRows` rewrites the rows once
-           the group is open, and the edited directory is gone with them. */
+           the group is open, and the edited directory is gone with them.
+           Followers still owed Terminal 1's last edit get it first, so both
+           reads see the rows that launch. */
+        flushTerminalTemplateSync();
         const retargetedExplorer = retargetedExplorerRowTitles();
         const config = collectFormConfig();
         const button = document.getElementById('launchBtn');

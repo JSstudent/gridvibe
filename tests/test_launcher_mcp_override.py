@@ -501,7 +501,7 @@ class LauncherOverrideWiringTestCase(unittest.TestCase):
 
         collect = _slice(
             source,
-            "    function collectTerminalDrafts() {",
+            "    function collectTerminalDraft(row, index) {",
             "    function renderCountOptions()",
         )
         self.assertIn("readRowAgentMcpFlags(", collect)

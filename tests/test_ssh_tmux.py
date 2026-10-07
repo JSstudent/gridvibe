@@ -412,8 +412,11 @@ class ConnectTestCase(unittest.TestCase):
         self.assertIn(SessionStatus.ERROR, statuses)
         self.assertNotIn("pane", self.registry)
 
-    def _startup(self, state, *, startup_command="", new_window=None, answer=None):
+    def _startup(
+        self, state, *, startup_command="", new_window=None, answer=None, retired=False
+    ):
         client, transport = fake_client(answer or scripted(**{"new_window": (0, "%9\n")}))
+        self.transport = transport
         channel = MagicMock()
         connection = {
             "kind": "ssh", "client": client, "channel": channel,
@@ -423,6 +426,8 @@ class ConnectTestCase(unittest.TestCase):
         }
         if new_window is not None:
             connection["tmux_new_window"] = new_window
+        if retired:
+            connection["retired"] = True
         self.registry["pane"] = connection
         with patch.object(
             terminal, "_compose_agent_startup_command", return_value=startup_command
@@ -448,6 +453,19 @@ class ConnectTestCase(unittest.TestCase):
         self.assertEqual(len(transport.commands), 1)
         self.assertIn("send-keys", transport.commands[0])
         self.assertIn("claude", transport.commands[0])
+
+    def test_a_pane_closed_during_startup_gets_no_tmux_command(self):
+        # The close hands the client to the MCP tunnel's teardown, so it still
+        # answers -- the retirement flag is what has to stop the launch line.
+        self.session.initial_command_mode = "agent"
+        for new_window in (None, ""):
+            with self.subTest(new_window=new_window):
+                with self.assertRaises(OSError):
+                    self._startup(
+                        ssh_tmux.TMUX_CREATED, startup_command="claude",
+                        new_window=new_window, retired=True,
+                    )
+                self.assertEqual(self.transport.commands, [])
 
     def test_attached_or_home_created_agent_gets_no_launch_line_and_a_notice(self):
         self.session.initial_command_mode = "agent"
