@@ -63,6 +63,7 @@ from web.session_presentation import (  # noqa: F401 - compatibility re-exports
     _normalize_scroll_map,
     _normalize_workspace_layout,
 )
+from web.ssh_tmux import preset_tmux_fields
 
 logger = logging.getLogger(__name__)
 
@@ -326,6 +327,12 @@ def _normalize_terminal_entries(
                 "use_powershell": use_powershell,
             }
         )
+        # The experimental tmux launch option, stated only on an SSH terminal
+        # or agent pane that asked for it, so every other entry is unchanged.
+        if connection_mode == "ssh" and startup_mode in {"terminal", "agent"}:
+            tmux_fields = preset_tmux_fields(entry)
+            if tmux_fields["tmux"]:
+                normalized[-1].update(tmux_fields)
 
     return normalized
 
@@ -529,6 +536,12 @@ def _merge_workspace_session_config(
         saved_terminal["initial_command_mode"] = (
             startup_mode if startup_mode in {"agent", "explorer", "browser"} else "command"
         )
+        # Whether the pane runs in tmux follows the live pane, like its mode.
+        saved_terminal.pop("tmux", None)
+        saved_terminal.pop("tmux_session", None)
+        if workspace_terminal.get("tmux"):
+            saved_terminal["tmux"] = True
+            saved_terminal["tmux_session"] = workspace_terminal.get("tmux_session", "")
 
         # Where the pane is, its explorer boundary, and whether anybody chose
         # that boundary -- taken together or not at all.

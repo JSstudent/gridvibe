@@ -61,6 +61,7 @@ from web.pane_gates import (
 )
 from web.saved_sessions import _normalize_startup_mode
 from web.session_presentation import DEFAULT_BROWSER_URL, _normalize_browser_url
+from web.ssh_tmux import request_new_window
 from web.terminal_io import (
     CWD_SOURCE_LAUNCH,
     _local_shell_display_name,
@@ -225,6 +226,10 @@ def _relaunch_terminal_at(
     agent_handoffs.drop_bound(session_id, "pane relaunched")
     session_manager.update_session_status(session_id, SessionStatus.PENDING)
     effects.broadcast_status(session_id)
+    if getattr(session, "mode", "") == "ssh" and getattr(session, "tmux_session", ""):
+        # The next connection attaches to the same tmux session, so the fresh
+        # shell this relaunch asks for is a new window there, at `directory`.
+        request_new_window(session_id, directory)
     effects.start_connector(session_id)
     return session_manager.get_session(session_id).to_dict()
 

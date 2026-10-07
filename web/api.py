@@ -323,6 +323,8 @@ from web.session_shell import (  # noqa: F401 - re-exported for backwards compat
     apply_agent_pane_relaunch,
     apply_pane_shell_change,
 )
+from web.ssh_tmux import generate_session_name as generate_tmux_session_name
+from web.ssh_tmux import tmux_sessions_enabled
 from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatibility
     _MAX_TRACKED_SOCKET_CLIENTS,
     _MAX_TRACKED_TERMINAL_COMMAND_LENGTH,
@@ -347,6 +349,7 @@ from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatib
     _connect_session,
     _connect_ssh_session,
     _drain_until_prompt,
+    _end_tmux_session,
     _extract_terminal_cwd_from_buffer,
     _finalize_stream,
     _get_buffered_terminal_output,
@@ -514,6 +517,7 @@ def _public_app_config() -> Dict[str, Any]:
         },
         "ssh": {
             "host_key_policy": settings.ssh_host_key_policy,
+            "tmux_sessions": settings.ssh_tmux_sessions,
         },
         "terminal": {
             "font_family": settings.terminal_font_family,
@@ -625,6 +629,9 @@ def _normalize_app_config_update(data: Any, settings=None) -> Dict[str, Any]:
     ).strip().lower()
     if host_key_policy not in HOST_KEY_POLICY_OPTIONS:
         host_key_policy = settings.ssh_host_key_policy
+    tmux_sessions = ssh_settings.get("tmux_sessions", settings.ssh_tmux_sessions)
+    if not isinstance(tmux_sessions, bool):
+        tmux_sessions = settings.ssh_tmux_sessions
 
     terminal_settings = payload.get("terminal")
     if not isinstance(terminal_settings, dict):
@@ -684,6 +691,7 @@ def _normalize_app_config_update(data: Any, settings=None) -> Dict[str, Any]:
         },
         "ssh": {
             "host_key_policy": host_key_policy,
+            "tmux_sessions": tmux_sessions,
         },
         "terminal": {
             "font_family": font_family,
@@ -4149,6 +4157,15 @@ def split_session(session_id: str):
         root_directory = root_directory or directory
 
     title = f"Terminal {len(group_sessions) + 1}"
+    # A split of a tmux pane gets the tmux option with a session of its own,
+    # never the source pane's: two panes mirroring one session fight over it.
+    tmux_session = (
+        generate_tmux_session_name()
+        if source.mode == "ssh"
+        and getattr(source, "tmux_session", "")
+        and tmux_sessions_enabled()
+        else ""
+    )
     fields = {
         "host": host,
         "directory": directory,
@@ -4171,8 +4188,11 @@ def split_session(session_id: str):
         # though a terminal pane's own root would read as a derived one.
         "explorer_root_configured": bool(root_directory),
         "created_by_session_id": creator_session_id,
+        "tmux_session": tmux_session,
     }
     fields.update(overrides)
+    if fields.get("startup_mode") not in ("terminal", "agent"):
+        fields["tmux_session"] = ""
     # One level deeper than the pane that *asked*, which is not necessarily the
     # pane being halved: an agent can split a pane beside its own. A split
     # nobody claimed is a split a person made with the button, and an
@@ -4460,6 +4480,18 @@ def close_session(session_id: str):
     if not success:
         return jsonify({"error": "Session not found"}), 404
 
+    # A tmux pane's close detaches by default; its session keeps running on
+    # the host. Only the close dialog's "Also end the tmux session" ends it,
+    # before the transport closes, and never on any other close.
+    end_tmux = _truthy_query_flag(request.args.get("end_tmux"))
+    tmux_ended = False
+    if end_tmux:
+        try:
+            tmux_ended = _end_tmux_session(session_id)
+        except Exception:
+            # The pane is already gone from the manager, so its transport is
+            # closed below whatever happened here; the reply says it failed.
+            logger.warning("Ending the tmux session of %s failed", session_id, exc_info=True)
     _close_ssh_connection(session_id, clear_buffer=True)
     forget_pruned_workspaces(pruned_workspace_ids)
     # Closing the last pane of the last group in `default` empties it just as
@@ -4479,7 +4511,10 @@ def close_session(session_id: str):
                 workspace_id=pruned_workspace_id,
             )
 
-    return jsonify({"message": "Session closed successfully"})
+    payload = {"message": "Session closed successfully"}
+    if end_tmux:
+        payload["tmux_ended"] = tmux_ended
+    return jsonify(payload)
 
 
 @app.route('/api/sessions', methods=['DELETE'])

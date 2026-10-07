@@ -26,7 +26,8 @@
             agent_conversation_restore: false
         }),
         ssh: Object.freeze({
-            host_key_policy: 'auto-add'
+            host_key_policy: 'auto-add',
+            tmux_sessions: false
         }),
         terminal: Object.freeze({
             font_family: "Consolas, Monaco, 'Courier New', monospace",
@@ -190,6 +191,10 @@
         const conversationRestoreInput = document.getElementById('appAgentConversationRestore');
         if (conversationRestoreInput) {
             conversationRestoreInput.checked = workspace.agent_conversation_restore === true;
+        }
+        const tmuxSessionsInput = document.getElementById('appSshTmuxSessions');
+        if (tmuxSessionsInput) {
+            tmuxSessionsInput.checked = ssh.tmux_sessions === true;
         }
         if (sshHostKeyPolicyInput) {
             sshHostKeyPolicyInput.value = ['auto-add', 'known-hosts', 'strict'].includes(ssh.host_key_policy)
@@ -599,6 +604,19 @@
         return workspace;
     }
 
+    /* tmux_sessions is omitted when its checkbox is absent, so a page that
+       does not render it can never switch the experimental feature off. */
+    function collectSshSettingsForm() {
+        const ssh = {
+            host_key_policy: document.getElementById('appSshHostKeyPolicy')?.value || DEFAULT_APP_SETTINGS.ssh.host_key_policy
+        };
+        const tmuxSessionsInput = document.getElementById('appSshTmuxSessions');
+        if (tmuxSessionsInput) {
+            ssh.tmux_sessions = Boolean(tmuxSessionsInput.checked);
+        }
+        return ssh;
+    }
+
     function syncAutosaveIntervalLabel() {
         const input = document.getElementById('appWorkspaceAutosaveInterval');
         const value = document.getElementById('appWorkspaceAutosaveIntervalValue');
@@ -619,9 +637,7 @@
                back. minimize_cascade is omitted on the same rule whenever the
                window this dialog is open in is not a native one. */
             workspace: collectWorkspaceSettingsForm(),
-            ssh: {
-                host_key_policy: document.getElementById('appSshHostKeyPolicy')?.value || DEFAULT_APP_SETTINGS.ssh.host_key_policy
-            },
+            ssh: collectSshSettingsForm(),
             terminal: {
                 font_family: collectTerminalFontFamily(),
                 font_size: Number(document.getElementById('appTerminalFontSize')?.value)

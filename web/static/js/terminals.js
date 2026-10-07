@@ -2967,7 +2967,10 @@
             browser_active_tab: browserTabs.active_tab,
             distribution: connectionMode === 'wsl' ? (session.distribution || '') : '',
             use_wsl: connectionMode === 'wsl' ? Boolean(session.use_wsl) : false,
-            use_powershell: connectionMode === 'wsl' ? Boolean(session.use_powershell) : false
+            use_powershell: connectionMode === 'wsl' ? Boolean(session.use_powershell) : false,
+            /* The experimental tmux option rides along; the server keeps a
+               typed session name and drops a generated one. */
+            tmux_session: connectionMode === 'ssh' ? String(session.tmux_session || '') : ''
         };
     }
 
@@ -7340,7 +7343,36 @@
         if (!(await confirmDiscardExplorerEdit(index, 'Closing this pane'))) {
             return;
         }
+        /* A tmux pane detaches by default: its session may be one the
+           developer attached on purpose, so it is only ended when asked. */
+        let endTmuxSession = false;
+        const closingSession = terminals[index]?._session;
+        let askedAboutTmux = false;
+        if (
+            closingSession?.mode === 'ssh'
+            && closingSession?.tmux_session
+            && closingSession?.startup_mode !== 'explorer'
+        ) {
+            const proceed = await openGenericConfirmModal({
+                title: 'Close this tmux pane?',
+                copy: `The pane detaches from tmux session ${closingSession.tmux_session}, which keeps running on ${closingSession.host || 'the host'}.`,
+                checkboxLabel: 'Also end the tmux session',
+                confirmLabel: 'Close pane'
+            });
+            if (!proceed) {
+                return;
+            }
+            endTmuxSession = genericConfirmCheckboxChecked();
+            askedAboutTmux = true;
+        }
         const plan = previewTerminalClose(index);
+        /* The grid can change while the dialog is open. The answer belongs to
+           the pane it was asked about, so a different pane in this slot now
+           is not closed -- and never has its session ended. */
+        if (askedAboutTmux && plan && plan.sessionId !== closingSession.session_id) {
+            showTerminalToast('The panes changed while the dialog was open. Nothing was closed.', 'error');
+            return;
+        }
         if (!plan) {
             setWorkspaceSaveMessage(
                 'Close terminal failed: no neighboring pane can safely fill this layout',
@@ -7359,12 +7391,16 @@
         closeSnapshotsBySessionId.set(plan.sessionId, plan.snapshot);
 
         try {
-            const response = await fetch(`/api/sessions/${encodeURIComponent(plan.sessionId)}`, {
+            const closeQuery = endTmuxSession ? '?end_tmux=1' : '';
+            const response = await fetch(`/api/sessions/${encodeURIComponent(plan.sessionId)}${closeQuery}`, {
                 method: 'DELETE',
             });
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {
                 throw new Error(data.error || `Close terminal failed with status ${response.status}`);
+            }
+            if (endTmuxSession && data.tmux_ended === false) {
+                showTerminalToast('The tmux session could not be ended and is still running on the host.', 'error');
             }
 
             if (plan.closeLastPane) {

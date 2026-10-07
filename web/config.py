@@ -358,6 +358,7 @@ class RuntimeConfigState:
     app_config: Dict[str, Any]
     ssh_config: Dict[str, Any]
     ssh_host_key_policy: str
+    ssh_tmux_sessions: bool
     max_sessions: int
     terminal_font_size: int
     terminal_font_family: str
@@ -402,6 +403,12 @@ def _build_runtime_state(app_config: Dict[str, Any]) -> RuntimeConfigState:
     host_key_policy = str(ssh_config.get("host_key_policy", "auto-add")).strip().lower()
     if host_key_policy not in HOST_KEY_POLICY_OPTIONS:
         host_key_policy = "auto-add"
+    # Experimental, off by default: SSH terminal panes may run inside a named
+    # tmux session on the remote host (web/ssh_tmux.py). Off, every SSH pane
+    # opens a plain shell, as it always did.
+    ssh_tmux_sessions = ssh_config.get("tmux_sessions", False)
+    if not isinstance(ssh_tmux_sessions, bool):
+        ssh_tmux_sessions = False
 
     terminal_config = app_config.get("terminal", {})
     try:
@@ -488,6 +495,7 @@ def _build_runtime_state(app_config: Dict[str, Any]) -> RuntimeConfigState:
         app_config=app_config,
         ssh_config=ssh_config,
         ssh_host_key_policy=host_key_policy,
+        ssh_tmux_sessions=ssh_tmux_sessions,
         max_sessions=max_sessions,
         terminal_font_size=terminal_font_size,
         terminal_font_family=terminal_font_family,

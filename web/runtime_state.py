@@ -88,6 +88,7 @@ from web.session_presentation import (
     normalize_workspace_appearance,
     workspace_appearance_from_panes,
 )
+from web.ssh_tmux import tmux_sessions_enabled, tmux_snapshot_fields
 from web.state_files import (
     CrossProcessFileLock,
     StateFilePersistenceError,
@@ -236,6 +237,10 @@ _SESSION_SNAPSHOT_FIELDS = (
     "explorer_theme",
     "browser_tabs",
     "browser_active_tab",
+    # The remote tmux session an SSH pane attaches to. Written only while the
+    # experimental setting is on; a tmux pane's snapshot is then reduced to
+    # what `_tmux_pane_snapshot()` keeps.
+    "tmux_session",
 )
 
 
@@ -273,12 +278,37 @@ def _snapshot_session(session: Any) -> Dict[str, Any]:
         if isinstance(session, dict)
         else session.to_dict(include_conversation=True)
     )
+    if tmux_sessions_enabled():
+        tmux_fields = tmux_snapshot_fields(data)
+        if tmux_fields is not None:
+            return _tmux_pane_snapshot(tmux_fields)
     snapshot = {key: data.get(key) for key in _SESSION_SNAPSHOT_FIELDS}
+    # Off, no tmux name is made durable: the pane restores as an ordinary SSH
+    # terminal, and its session stays on the host untouched.
+    snapshot["tmux_session"] = ""
     if not conversation_restore_enabled():
         # The experimental restore is off: no conversation id is made durable.
         snapshot[CONVERSATION_PROVIDER_FIELD] = ""
         snapshot[CONVERSATION_ID_FIELD] = ""
     snapshot.update(capture_pane_paths(data))
+    return snapshot
+
+
+def _tmux_pane_snapshot(tmux_fields: Dict[str, Any]) -> Dict[str, Any]:
+    """A tmux pane captured as a plain SSH terminal that attaches to its session.
+
+    GridVibe restores the session and nothing else about the pane: no agent,
+    mode, startup command, conversation or observed directory. The fields
+    `tmux_snapshot_fields()` keeps are laid over a default terminal pane's, so
+    every other slot holds exactly what a fresh terminal would.
+    """
+    from sessions.manager import TerminalSession
+
+    plain = TerminalSession(
+        session_id="", group_id="", mode="ssh", **tmux_fields
+    ).to_dict(include_conversation=True)
+    snapshot = {key: plain.get(key) for key in _SESSION_SNAPSHOT_FIELDS}
+    snapshot.update(capture_pane_paths(plain))
     return snapshot
 
 

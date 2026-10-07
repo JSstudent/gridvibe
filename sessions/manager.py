@@ -183,6 +183,11 @@ class TerminalSession:
     # active tab's URL so every existing browser-pane reader keeps working.
     browser_tabs: List[str] = field(default_factory=list)
     browser_active_tab: int = 0
+    # The remote tmux session an SSH terminal pane runs in (the experimental
+    # `ssh.tmux_sessions` option, web/ssh_tmux.py). "" for every other pane.
+    # Validated and gated where a launch is prepared; the connector reads the
+    # gate again, so a name kept while the setting is off opens a plain shell.
+    tmux_session: str = ""
     status: SessionStatus = SessionStatus.PENDING
     created_at: float = field(default_factory=time.time)
     connected_at: Optional[float] = None
@@ -262,6 +267,7 @@ class TerminalSession:
             "explorer_theme": self.explorer_theme,
             "browser_tabs": list(self.browser_tabs),
             "browser_active_tab": self.browser_active_tab,
+            "tmux_session": self.tmux_session,
             "status": self.status.value,
             "created_at": self.created_at,
             "connected_at": self.connected_at,
@@ -1097,6 +1103,11 @@ class SessionManager:
             "explorer_theme": "dark",
             "browser_tabs": [],
             "browser_active_tab": 0,
+            "tmux_session": (
+                config.get("tmux_session")
+                if isinstance(config.get("tmux_session"), str)
+                else ""
+            ),
         }
         fields.update(deep_copy_presentation(presentation))
         return fields

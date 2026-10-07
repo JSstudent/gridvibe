@@ -140,6 +140,15 @@
                     <input id="appTerminalShellIntegration" type="checkbox">
                     <span>Shell integration</span>
                 </label>
+                {# Experimental, off by default: web/ssh_tmux.py
+                   tmux_sessions_enabled() gates the whole feature. #}
+                <label class="check-field multiline-check">
+                    <input id="appSshTmuxSessions" type="checkbox">
+                    <span class="check-copy">
+                        <strong>Run SSH terminals in tmux <span class="settings-experimental-badge">Experimental!</span></strong>
+                        <span>Adds a "Run in tmux" option to SSH terminal and agent panes in the launcher. Such a pane's session keeps running on the host after the pane closes or GridVibe exits, and the pane attaches to it again on reconnect or restore.</span>
+                    </span>
+                </label>
                 <div class="settings-hint">Font and size apply to every terminal in the current session (and to new sessions); check the box to push them to all active sessions. Max sessions applies to new launches. Shell integration adds one line to each new terminal's prompt so GridVibe can follow the directory you are in; turn it off to leave your prompt untouched.</div>
             </div>
             <div class="voice-settings-panel">

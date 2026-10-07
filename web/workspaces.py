@@ -49,6 +49,7 @@ from web.agent_handoffs import (
 )
 from web.agent_handoffs import handoffs as agent_handoffs
 from web.mcp_launch import LOCAL_PANE_MODE
+from web.ssh_tmux import launch_session_name, session_key, tmux_sessions_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -1011,6 +1012,89 @@ def _prepare_launch_sessions(
     return prepared_sessions
 
 
+def _settle_tmux_session_names(
+    prepared_sessions: List[Dict[str, Any]], *, restore: bool
+) -> None:
+    """Give each prepared pane the tmux session it launches into, or ``""``.
+
+    One captured answer for the whole launch: off, a request's tmux fields
+    are ignored like any field the API does not know.
+    """
+    enabled = tmux_sessions_enabled()
+    for prepared in prepared_sessions:
+        prepared["tmux_session"] = launch_session_name(
+            prepared, enabled=enabled, restore=restore
+        )
+        prepared.pop("tmux", None)
+
+
+#: Held across the tmux uniqueness check and the install it guards.
+_tmux_claim_lock = threading.Lock()
+
+
+def _tmux_pane_key(pane: Dict[str, Any], name: str) -> Tuple[str, str, str, str]:
+    """A requested pane's tmux identity, with the defaults its install applies.
+
+    Mirrors ``SessionManager._session_launch_fields``: an omitted SSH user is
+    ``root`` and an omitted port 22, so a request that leaves them out names
+    the same session as one that states them.
+    """
+    host = (
+        pane.get("host")
+        or pane.get("ip")
+        or pane.get("hostname")
+        or pane.get("distribution")
+        or "WSL"
+    )
+    return session_key(host, pane.get("port", 22), pane.get("username", "root"), name)
+
+
+def _refuse_shared_tmux_sessions(
+    prepared_sessions: List[Dict[str, Any]],
+    replaced_group_id: Optional[str],
+    *,
+    restore: bool,
+) -> None:
+    """One live pane per (host, port, user, tmux session).
+
+    tmux would let two panes attach one session, but they fight over its size
+    and make a restore ambiguous. A launch naming a session another live pane
+    holds is refused; a restore drops the name from the second pane instead,
+    which then opens a plain shell. Panes of the group this launch replaces
+    are not counted -- they are about to go.
+    """
+    if not any(pane.get("tmux_session") for pane in prepared_sessions):
+        return
+    session_manager = _manager()
+    with session_manager.lock:
+        live = list(session_manager.sessions.values())
+    taken = {
+        session_key(session.host, session.port, session.username, session.tmux_session)
+        for session in live
+        if getattr(session, "tmux_session", "")
+        and getattr(session, "mode", "") == "ssh"
+        and (not replaced_group_id or session.group_id != replaced_group_id)
+    }
+    for pane in prepared_sessions:
+        name = str(pane.get("tmux_session") or "")
+        if not name:
+            continue
+        key = _tmux_pane_key(pane, name)
+        if key not in taken:
+            taken.add(key)
+            continue
+        if restore:
+            logger.warning(
+                "Restored pane dropped tmux session %s: another pane holds it", name
+            )
+            pane["tmux_session"] = ""
+            continue
+        raise ValueError(
+            f"Another pane is already attached to the tmux session {name} on "
+            f"{key[0]}. Nothing was launched."
+        )
+
+
 def _pop_pane_tasks(sessions_config: List[Any]) -> Tuple[List[Any], Dict[int, Tuple[str, str]]]:
     """Take each pane's ``task`` off its config, validated, before anything reads it.
 
@@ -1288,6 +1372,7 @@ def launch_session_group(
         # Pure: no pane, group or workspace exists yet, so its refusals -- and
         # a tool launch's agent refusal below -- cost nothing to take back.
         prepared_sessions = _prepare_launch_sessions(sessions_config, connection_mode)
+        _settle_tmux_session_names(prepared_sessions, restore=is_restore)
         # A launch a tool asked for from inside a pane is validated whole
         # before a destination is resolved: an agent that cannot start there
         # refuses the launch rather than opening as the shell the launcher
@@ -1304,6 +1389,9 @@ def launch_session_group(
             # child a standing waiver of the gates it is itself held to.
             for pane in prepared_sessions:
                 pane["agent_mcp_override"] = False
+                # Nor a tmux session: one outlives GridVibe on the remote
+                # host, so it is the person's launcher option, never a tool's.
+                pane["tmux_session"] = ""
             launch_warnings = _sanitize_agent_launch_commands(
                 connection_mode, prepared_sessions, refuse_absent=True
             )
@@ -1390,18 +1478,33 @@ def launch_session_group(
         # no valid panes, a group id owned by another preset — raises before
         # anything live is touched, so a failed relaunch no longer leaves the
         # previous panes destroyed.
-        installation = session_manager.install_session_group(
-            prepared_sessions,
-            name=group_name,
-            connection_mode=connection_mode,
-            layout=layout,
-            group_id=stable_group_id,
-            saved_session_id=saved_session_id,
-            workspace_layout=workspace_layout,
-            workspace_id=workspace_id,
-            workspace_from_session_id=workspace_anchor,
-            opened_by=_launch_opened_by(data, tool_launch=tool_launch, is_restore=is_restore),
+        # The one-pane-per-tmux-session check and the install it guards run
+        # under one claim, so two concurrent launches naming the same session
+        # cannot both pass the check and both publish. Both steps are
+        # in-memory; a launch with no tmux pane never takes the claim.
+        tmux_claim = (
+            _tmux_claim_lock
+            if any(pane.get("tmux_session") for pane in prepared_sessions)
+            else nullcontext()
         )
+        with tmux_claim:
+            _refuse_shared_tmux_sessions(
+                prepared_sessions, stable_group_id, restore=is_restore
+            )
+            installation = session_manager.install_session_group(
+                prepared_sessions,
+                name=group_name,
+                connection_mode=connection_mode,
+                layout=layout,
+                group_id=stable_group_id,
+                saved_session_id=saved_session_id,
+                workspace_layout=workspace_layout,
+                workspace_id=workspace_id,
+                workspace_from_session_id=workspace_anchor,
+                opened_by=_launch_opened_by(
+                    data, tool_launch=tool_launch, is_restore=is_restore
+                ),
+            )
         group = installation.group
         created_sessions = installation.sessions
         # Slow teardown, outside every shared lock (guardrail 2).

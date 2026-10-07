@@ -132,6 +132,14 @@
         }
     }
 
+    function genericConfirmCheckboxChecked() {
+        const row = document.getElementById('genericConfirmCheckRow');
+        return Boolean(
+            row && row.style.display !== 'none'
+            && document.getElementById('genericConfirmCheck')?.checked
+        );
+    }
+
     function closeGenericConfirmModalForOwner(owner, result = false) {
         if (!owner || genericConfirmOwner !== owner) {
             return false;
@@ -148,7 +156,8 @@
         note = '',
         confirmLabel = 'Confirm',
         danger = false,
-        owner = null
+        owner = null,
+        checkboxLabel = ''
     } = {}) {
         const modal = document.getElementById('genericConfirmModal');
         if (!modal) {
@@ -159,6 +168,15 @@
         genericConfirmOwner = owner;
         document.getElementById('genericConfirmTitle').textContent = title;
         document.getElementById('genericConfirmCopy').textContent = copy;
+        /* An optional extra choice, unticked on every open; the caller reads
+           it with genericConfirmCheckboxChecked() once the promise settles. */
+        const checkRow = document.getElementById('genericConfirmCheckRow');
+        const checkInput = document.getElementById('genericConfirmCheck');
+        if (checkRow && checkInput) {
+            checkInput.checked = false;
+            document.getElementById('genericConfirmCheckLabel').textContent = checkboxLabel;
+            checkRow.style.display = checkboxLabel ? '' : 'none';
+        }
         const noteEl = document.getElementById('genericConfirmNote');
         noteEl.textContent = note || '';
         noteEl.hidden = !note;

@@ -84,6 +84,45 @@
 
     function onAppSettingsApplied(data) {
         installKind = data?.install_kind === 'source' ? 'source' : 'git';
+        syncAllTerminalTmuxState();
+    }
+
+    /* The experimental tmux option (App Settings -> Terminal). Off, the
+       launcher shows no tmux fields; a row's own choice is kept in the hidden
+       inputs, so saving a preset meanwhile does not drop it, and the server
+       ignores it at launch. */
+    function tmuxSessionsEnabled() {
+        return appSettings?.ssh?.tmux_sessions === true;
+    }
+
+    function terminalTmuxAvailable(row) {
+        const commandMode = getTerminalCommandMode(row);
+        return connectionMode === 'ssh'
+            && (commandMode === 'terminal' || commandMode === 'command' || commandMode === 'agent');
+    }
+
+    function syncTerminalTmuxState(row) {
+        const field = row.querySelector('.t-tmux-field');
+        if (!field) {
+            return;
+        }
+        field.classList.toggle('hidden', !(tmuxSessionsEnabled() && terminalTmuxAvailable(row)));
+        const enabled = Boolean(row.querySelector('.t-tmux')?.checked);
+        row.querySelector('.t-tmux-name-field')?.classList.toggle('hidden', !enabled);
+    }
+
+    function syncAllTerminalTmuxState() {
+        document.querySelectorAll('.t-row').forEach(row => syncTerminalTmuxState(row));
+    }
+
+    function readRowTmuxFields(row) {
+        if (!terminalTmuxAvailable(row) || !row.querySelector('.t-tmux')?.checked) {
+            return { tmux: false, tmux_session: '' };
+        }
+        return {
+            tmux: true,
+            tmux_session: row.querySelector('.t-tmux-session')?.value.trim() || ''
+        };
     }
 
     initTheme();
@@ -828,6 +867,7 @@
                 }
             }
             const agentMcpFlags = readRowAgentMcpFlags(row, commandMode);
+            const tmuxFields = readRowTmuxFields(row);
             return {
                 title: row.querySelector('.t-title')?.value.trim() || `Terminal ${index + 1}`,
                 directory,
@@ -899,7 +939,9 @@
                     : false,
                 use_powershell: LOCAL_WINDOWS_SHELLS_AVAILABLE && commandMode !== 'explorer' && commandMode !== 'browser'
                     ? Boolean(row.querySelector('.t-use-powershell')?.checked)
-                    : false
+                    : false,
+                tmux: tmuxFields.tmux,
+                tmux_session: tmuxFields.tmux_session
             };
         });
 
@@ -1041,6 +1083,7 @@
         initShowPasswordButton();
         initSshPingButton();
         bindModeFieldInteractions();
+        syncAllTerminalTmuxState();
     }
 
     function initShowPasswordButton() {
@@ -1584,6 +1627,7 @@
             if (powershellCheckbox) powershellCheckbox.checked = false;
         }
         syncTerminalWslState(row);
+        syncTerminalTmuxState(row);
         syncStartupModePicker(startupModeSelect);
     }
 
@@ -2105,6 +2149,7 @@
             overrideCheckbox?.addEventListener('change', () => {
                 handleAgentMcpOverrideToggle(overrideCheckbox);
             });
+            row.querySelector('.t-tmux')?.addEventListener('change', () => syncTerminalTmuxState(row));
             syncTerminalCommandState(row);
             syncTerminalWslState(row);
             scheduleAgentPreflight(row, 30);
@@ -2219,6 +2264,25 @@
                         <div class="field t-agent-custom-field ${commandUi.mode === 'agent' && commandUi.agentSelection === 'other' ? '' : 'hidden'}">
                             <label>Custom Agent</label>
                             <input class="t-agent-custom" type="text" value="${escHtml(commandUi.customAgent)}" placeholder="Enter agent command">
+                        </div>
+                        <div class="field t-tmux-field hidden">
+                            <label class="check-field">
+                                <input class="t-tmux" type="checkbox" ${terminal.tmux === true || terminal.tmux_session ? 'checked' : ''} aria-label="Run this pane in tmux">
+                                <span class="check-copy">
+                                    <strong>Run in tmux</strong>
+                                </span>
+                                <button
+                                    type="button"
+                                    class="tip-btn"
+                                    aria-expanded="false"
+                                    aria-label="Explain tmux sessions"
+                                    onclick="toggleInlineTip(this)"
+                                >?</button>
+                            </label>
+                            <div class="inline-tip">Experimental. The pane runs in a tmux session on the host that keeps running after the pane closes or GridVibe exits, and reattaches on reconnect or restore. Only the session is restored, not the agent or mode. Scrollback, mouse and key handling follow your own tmux config, so turn on <code>set -g mouse on</code> to scroll in the pane.</div>
+                            <div class="t-tmux-name-field">
+                                <input class="t-tmux-session" type="text" maxlength="64" value="${escHtml(terminal.tmux_session || '')}" placeholder="tmux session (blank = new gv-… session)" aria-label="tmux session name" title="Letters, digits, - and _. Name an existing session to attach to it.">
+                            </div>
                         </div>
                         ${LOCAL_WINDOWS_SHELLS_AVAILABLE ? `
                         <div class="field t-shell-field ${connectionMode === 'wsl' && commandUi.mode !== 'explorer' && commandUi.mode !== 'browser' ? '' : 'hidden'}">

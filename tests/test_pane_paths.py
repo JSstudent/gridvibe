@@ -875,6 +875,9 @@ class PanePathBuilderTestCase(unittest.TestCase):
             function readRowAgentMcpFlags() {
                 return { agent_mcp: false, agent_mcp_override: false };
             }
+            function readRowTmuxFields() {
+                return { tmux: false, tmux_session: '' };
+            }
         """
         launcher = STATIC_JS / "launcher.js"
         script = (
