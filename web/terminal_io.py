@@ -2860,6 +2860,7 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
         _send_connection_input(connection, f"{marker_command}{newline}")
 
     tmux_target = ""
+    tmux_unreachable = ""
     tmux_skip_reason = ""
     if tmux_name:
         tmux_target, tmux_unreachable, tmux_skip_reason = _tmux_startup_target(
@@ -2977,6 +2978,17 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
                 # life, so the snapshot dropped its pair and the workspace
                 # restored it fresh, next to panes that resumed exactly.
                 _mark_agent_conversation_saved(session_id, connection)
+    elif tmux_unreachable:
+        # No command is held back, but the shell still opened somewhere the
+        # reader did not ask for, and a tmux pane gets no `cd` to show it.
+        _publish_ssh_terminal_output(
+            session_id,
+            ssh_tmux.notice(
+                f"{tmux_unreachable} is not available, so this pane opened in "
+                "the home directory."
+            ),
+            connection,
+        )
 
     # Deliberately not the moment to arm an agent pane's retirement watch.
     # Nothing typed above has been *read* yet -- the pump only starts once this
@@ -3864,6 +3876,11 @@ def _connect_ssh_session(session_id: str, session: Any):
             if not stale:
                 connection.update(resources)
                 session_output_buffers[session_id] = _OutputBuffer()
+                if tmux_state == ssh_tmux.TMUX_MISSING:
+                    # A plain shell is what runs, agent and all, so the pane
+                    # must save as one: kept, the name would reduce its
+                    # snapshot to a bare tmux attach.
+                    session_manager.clear_tmux_session(session_id)
         if stale:
             logger.info("[%s] Session was removed before SSH startup completed", session_id)
             _shutdown_connection(resources)

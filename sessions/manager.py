@@ -1318,6 +1318,19 @@ class SessionManager:
 
             return session
 
+    def clear_tmux_session(self, session_id: str) -> None:
+        """Forget the tmux session a pane asked for, once its host had no tmux.
+
+        The pane is then a plain SSH shell, so every reader of the name -- the
+        snapshot that reduces a tmux pane, the close dialog, the shared-name
+        claim -- has to see one. Kept out of `update_session_metadata`, whose
+        allowlist is fed request fields: only the connect path decides this.
+        """
+        with self.lock:
+            session = self.sessions.get(session_id)
+            if session is not None:
+                session.tmux_session = ""
+
     def merge_browser_tabs(
         self,
         session_id: str,

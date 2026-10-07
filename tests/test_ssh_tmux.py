@@ -16,7 +16,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import api
-from sessions.manager import SessionStatus, TerminalSession
+from sessions.manager import SessionManager, SessionStatus, TerminalSession
 from web import config as web_config
 from web import runtime_state as web_runtime_state
 from web import saved_sessions as web_saved_sessions
@@ -403,6 +403,8 @@ class ConnectTestCase(unittest.TestCase):
         client.invoke_shell.assert_called_once()
         self.assertNotIn("tmux_session", self.registry["pane"])
         self.assertTrue(any("tmux was not found" in item.get("data", "") for item in self.emitted))
+        # The pane is a plain shell now, so it stops naming a session.
+        self.session_manager.clear_tmux_session.assert_called_once_with("pane")
 
     def test_a_tmux_failure_puts_the_pane_in_error(self):
         self._connect(answer=lambda _command: (1, "lost server"))
@@ -479,6 +481,29 @@ class ConnectTestCase(unittest.TestCase):
                 self.assertEqual(transport.commands, [])
                 self.assertTrue(any(words in item.get("data", "") for item in self.emitted))
 
+    def test_a_home_fallback_is_reported_without_a_startup_command(self):
+        self.session.launch_directory = "/srv/gone"
+        for state, new_window, words in [
+            (ssh_tmux.TMUX_CREATED_HOME, None, "/srv/gone is not available"),
+            (ssh_tmux.TMUX_ATTACHED, "/srv/gone", "/srv/gone is not available"),
+        ]:
+            with self.subTest(state=state):
+                self.emitted.clear()
+                self._startup(
+                    state, new_window=new_window,
+                    answer=scripted(**{"new_window": (11, "%9\n")}),
+                )
+                notices = [item.get("data", "") for item in self.emitted]
+                self.assertTrue(any(words in text for text in notices), notices)
+                self.assertTrue(any("home directory" in text for text in notices), notices)
+
+    def test_a_pane_that_reached_its_directory_gets_no_notice(self):
+        for state in (ssh_tmux.TMUX_CREATED, ssh_tmux.TMUX_ATTACHED):
+            with self.subTest(state=state):
+                self.emitted.clear()
+                self._startup(state)
+                self.assertEqual(self.emitted, [])
+
     def test_relaunch_opens_a_new_window_and_types_there(self):
         self.session.initial_command_mode = "agent"
         _channel, transport = self._startup(
@@ -531,6 +556,18 @@ class SnapshotTestCase(unittest.TestCase):
         self.assertFalse(snapshot["agent_mcp"])
         self.assertFalse(snapshot["agent_auto_mode"])
         self.assertEqual(set(snapshot), set(web_runtime_state._SESSION_SNAPSHOT_FIELDS))
+
+    def test_a_pane_whose_host_had_no_tmux_is_saved_whole(self):
+        manager = SessionManager()
+        pane = self._agent_pane()
+        manager.sessions[pane.session_id] = pane
+        manager.clear_tmux_session(pane.session_id)
+        with patch.object(web_runtime_state, "tmux_sessions_enabled", return_value=True):
+            snapshot = web_runtime_state._snapshot_session(pane)
+        self.assertEqual(snapshot["tmux_session"], "")
+        self.assertEqual(snapshot["startup_mode"], "agent")
+        self.assertEqual(snapshot["initial_command"], "claude")
+        self.assertEqual(snapshot["agent_selection"], "claude")
 
     def test_setting_off_writes_no_name(self):
         with patch.object(web_runtime_state, "tmux_sessions_enabled", return_value=False):
