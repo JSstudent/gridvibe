@@ -33,9 +33,9 @@ import re
 import threading
 import time
 import uuid
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
 
 from web import crew_history
 from web.agent_conversations import prepare_conversation_launch_fields
@@ -1030,6 +1030,44 @@ def _settle_tmux_session_names(
 
 #: Held across the tmux uniqueness check and the install it guards.
 _tmux_claim_lock = threading.Lock()
+_closing_tmux_sessions: Dict[Tuple[str, str, str, str], int] = {}
+
+
+@contextmanager
+def reserve_tmux_close(session_id: str, *, end_tmux: bool) -> Iterator[None]:
+    """Keep a closing pane's tmux identity claimed until its kill finishes.
+
+    Register before removing the pane, under the same claim as launch
+    admission. The reservation outlives the pane record; no shared lock is
+    held while the close performs SSH I/O. Counts also cover overlapping
+    closes, including one that finds the pane already removed.
+    """
+    key = None
+    if end_tmux:
+        with _tmux_claim_lock:
+            session_manager = _manager()
+            with session_manager.lock:
+                session = session_manager.sessions.get(session_id)
+                if (
+                    session is not None
+                    and session.mode == "ssh"
+                    and getattr(session, "tmux_session", "")
+                ):
+                    key = session_key(
+                        session.host, session.port, session.username, session.tmux_session
+                    )
+            if key is not None:
+                _closing_tmux_sessions[key] = _closing_tmux_sessions.get(key, 0) + 1
+    try:
+        yield
+    finally:
+        if key is not None:
+            with _tmux_claim_lock:
+                remaining = _closing_tmux_sessions[key] - 1
+                if remaining:
+                    _closing_tmux_sessions[key] = remaining
+                else:
+                    del _closing_tmux_sessions[key]
 
 
 def _tmux_pane_key(pane: Dict[str, Any], name: str) -> Tuple[str, str, str, str]:
@@ -1075,6 +1113,9 @@ def _refuse_shared_tmux_sessions(
         and getattr(session, "mode", "") == "ssh"
         and (not replaced_group_id or session.group_id != replaced_group_id)
     }
+    # A close removes its pane before sending the remote kill. Its claim
+    # remains even when this launch replaces that pane's former group.
+    taken.update(_closing_tmux_sessions)
     for pane in prepared_sessions:
         name = str(pane.get("tmux_session") or "")
         if not name:
@@ -1089,6 +1130,11 @@ def _refuse_shared_tmux_sessions(
             )
             pane["tmux_session"] = ""
             continue
+        if key in _closing_tmux_sessions:
+            raise ValueError(
+                f"The tmux session {name} on {key[0]} is still being ended. "
+                "Wait for that close to finish, then try again. Nothing was launched."
+            )
         raise ValueError(
             f"Another pane is already attached to the tmux session {name} on "
             f"{key[0]}. Nothing was launched."

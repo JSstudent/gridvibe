@@ -1862,7 +1862,10 @@ pane; whatever runs inside it keeps running because tmux keeps it running.
   concurrent launches cannot both claim a session. The key uses the install's
   own defaults (`root`, port 22). A launch is refused; a restore drops the name
   from the second pane, which opens a plain shell; the group a launch replaces
-  does not count against itself.
+  does not count against itself. An explicit tmux end reserves that identity
+  through `reserve_tmux_close()` before the pane is removed and until the kill
+  and transport close finish, including failure; admission counts the
+  reservation even if it replaces the old group. No shared lock spans SSH I/O.
 - **Every remote command is exact, quoted and bounded.** Targets are written
   `'=NAME'` (exact match, single-quoted so zsh's `=word` expansion cannot
   reach it); scripts run under `sh -c` whatever the login shell; directories go
@@ -1905,7 +1908,9 @@ pane; whatever runs inside it keeps running because tmux keeps it running.
   replacement. That connection opens `new-window` in the session at
   the stated directory or the pane's current one, with the same on-host
   `[ -d ]` check, and types the launch line there. The session and its other
-  windows are never ended for a relaunch.
+  windows are never ended for a relaunch. A failed `new-window` puts the pane
+  in ERROR even without a startup command, and the still-current connection
+  returns the request for Retry to open a window at the same directory.
 - **Close detaches unless the person asks.** The pane close dialog offers
   "Also end the tmux session"; only that sends `DELETE
   /api/sessions/<id>?end_tmux=1`, which retires the live connection from its

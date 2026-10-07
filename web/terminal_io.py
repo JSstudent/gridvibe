@@ -3020,9 +3020,16 @@ def _tmux_startup_target(
                 connection,
                 lambda client: ssh_tmux.new_window(client, tmux_name, new_window_directory),
             )
-        except ssh_tmux.TmuxError as exc:
-            logger.warning("tmux new-window failed for %s: %s", tmux_name, exc)
-            return "", "", "a new tmux window could not be opened"
+        except ssh_tmux.TmuxError:
+            # Report ERROR through the connector even for a plain terminal,
+            # and owe Retry the same window. A replacement connection must
+            # never inherit an intent from this one after it has retired.
+            session_id = str(getattr(session, "session_id", "") or "")
+            with _connection_gate(connection):
+                with connection_lock:
+                    if _ssh_connection_is_live(session_id, connection):
+                        ssh_tmux.request_new_window(session_id, new_window_directory)
+            raise
         unreachable = "" if in_directory else (new_window_directory or "the pane's directory")
         return pane_id, unreachable, ""
     state = str(connection.get("tmux_state") or "")

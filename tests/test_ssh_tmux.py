@@ -455,6 +455,35 @@ class ConnectTestCase(unittest.TestCase):
         self._connect(answer=scripted(prepare_status=0))
         self.assertEqual(self.registry["pane"]["tmux_new_window"], "/srv/other")
 
+    def test_a_failed_terminal_relaunch_reports_error_and_retry_opens_its_window(self):
+        ssh_tmux.request_new_window("pane", "/srv/other")
+        client, _ = self._connect(
+            answer=scripted(**{"new_window": (1, "cannot create window")}),
+            run_startup=True,
+        )
+        errors = [
+            call for call in self.session_manager.update_session_status.call_args_list
+            if call.args[1] == SessionStatus.ERROR
+        ]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("cannot create window", errors[0].kwargs["error_message"])
+        self.assertNotIn("pane", self.registry)
+        client.close.assert_called_once()
+
+        self.session_manager.update_session_status.reset_mock()
+        _, transport = self._connect(
+            answer=scripted(**{"new_window": (0, "%9\n")}), run_startup=True
+        )
+        commands = [command for command in transport.commands if "new-window" in command]
+        self.assertEqual(len(commands), 1)
+        self.assertIn("/srv/other", commands[0])
+        self.assertIsNone(ssh_tmux.take_new_window("pane"))
+        statuses = [
+            call.args[1] for call in self.session_manager.update_session_status.call_args_list
+        ]
+        self.assertIn(SessionStatus.CONNECTED, statuses)
+        self.assertNotIn(SessionStatus.ERROR, statuses)
+
     def test_a_retired_connection_leaves_the_relaunch_window_to_its_replacement(self):
         def answer(command):
             if "new-session" in command:
@@ -465,6 +494,22 @@ class ConnectTestCase(unittest.TestCase):
 
         self._connect(answer=answer)
         self.assertEqual(ssh_tmux.take_new_window("pane"), "/srv/next")
+
+    def test_a_failed_window_on_a_retired_connection_keeps_the_replacements_intent(self):
+        ssh_tmux.request_new_window("pane", "/srv/old")
+
+        def answer(command):
+            if "new-window" in command:
+                old = self.registry["pane"]
+                terminal._close_ssh_connection("pane", expected=old)
+                self.registry["pane"] = {"replacement": True}
+                ssh_tmux.request_new_window("pane", "/srv/next")
+                return 1, "old window failed"
+            return 0, ""
+
+        self._connect(answer=answer, run_startup=True)
+        self.assertEqual(ssh_tmux.take_new_window("pane"), "/srv/next")
+        self.assertEqual(self.registry["pane"], {"replacement": True})
 
     def test_end_tmux_session_survives_the_stream_ending_under_it(self):
         client, transport = fake_client()
@@ -882,6 +927,58 @@ process.stdout.write(JSON.stringify({
         self.assertFalse(response.get_json()["tmux_ended"])
         self.assertNotIn(pane["session_id"], api.ssh_connections)
         client.close.assert_called()
+
+    def test_a_tmux_name_cannot_be_reclaimed_until_its_close_finishes(self):
+        self._enable()
+        for outcome in ("success", "failure", "exception"):
+            with self.subTest(outcome=outcome):
+                name = f"closing-{outcome}"
+                pane = self._launch({"tmux_session": name}).get_json()["sessions"][0]
+                started = threading.Event()
+                finish = threading.Event()
+                responses = []
+                failures = []
+
+                def answer(_command):
+                    started.set()
+                    if not finish.wait(timeout=5):
+                        raise OSError("test did not release the kill command")
+                    if outcome == "exception":
+                        raise OSError("connection reset")
+                    return (0, "") if outcome == "success" else (1, "kill refused")
+
+                client, _ = fake_client(answer)
+                api.ssh_connections[pane["session_id"]] = {
+                    "kind": "ssh", "client": client, "tmux_session": name,
+                }
+
+                def close():
+                    try:
+                        with api.app.test_client() as closing_client:
+                            responses.append(closing_client.delete(
+                                f"/api/sessions/{pane['session_id']}?end_tmux=1"
+                            ))
+                    except Exception as exc:
+                        failures.append(exc)
+
+                thread = threading.Thread(target=close, daemon=True)
+                thread.start()
+                try:
+                    self.assertTrue(started.wait(timeout=5))
+                    self.assertIsNone(api.session_manager.get_session(pane["session_id"]))
+                    self.assertEqual(self._launch({"tmux_session": name}).status_code, 400)
+                    self.assertEqual(self._launch({
+                        "host": "other-box", "tmux_session": name,
+                    }).status_code, 201)
+                finally:
+                    finish.set()
+                    thread.join(timeout=5)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(failures, [])
+                self.assertEqual(len(responses), 1)
+                self.assertEqual(responses[0].status_code, 200)
+                self.assertIs(responses[0].get_json()["tmux_ended"], outcome == "success")
+                self.assertEqual(self._launch({"tmux_session": name}).status_code, 201)
 
     def test_split_of_a_tmux_pane_gets_its_own_session(self):
         self._enable()

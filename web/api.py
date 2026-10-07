@@ -442,6 +442,7 @@ from web.workspaces import (
     normalize_workspace_label,
     public_workspace_payload,
     rename_workspace_label,
+    reserve_tmux_close,
     restore_workspaces,
     workspace_has_groups,
     workspace_label,
@@ -4449,50 +4450,51 @@ def close_session(session_id: str):
     ``web/workspaces.py``. Use ``DELETE /api/workspaces/<id>`` for the variant
     that keeps the snapshot restorable.
     """
-    with session_manager.lock:
-        existing_session = session_manager.sessions.get(session_id)
-        group = (
-            session_manager.groups.get(existing_session.group_id)
-            if existing_session is not None
-            else None
-        )
-        success = session_manager.close_session(session_id)
-        if success:
-            group_id = existing_session.group_id
-            # Closing a pane empties its group, and an empty group is swept at
-            # once — there is no grace period left to ride (MW-06). Closing the
-            # last pane within five seconds of launch used to remove the
-            # session but leave the group behind forever, which kept a
-            # workspace alive with no panes in it and its snapshot
-            # unforgettable.
-            pruned_workspace_ids = session_manager.clear_disconnected_sessions()
-            closed_group_ids = (
-                [group_id] if group_id not in session_manager.groups else []
-            )
-            workspace_id = (
-                group.workspace_id if group else DEFAULT_WORKSPACE_ID
-            )
-        else:
-            pruned_workspace_ids = []
-            group_id = ""
-            closed_group_ids = []
-            workspace_id = DEFAULT_WORKSPACE_ID
-    if not success:
-        return jsonify({"error": "Session not found"}), 404
-
-    # A tmux pane's close detaches by default; its session keeps running on
-    # the host. Only the close dialog's "Also end the tmux session" ends it,
-    # before the transport closes, and never on any other close.
     end_tmux = _truthy_query_flag(request.args.get("end_tmux"))
-    tmux_ended = False
-    if end_tmux:
-        try:
-            tmux_ended = _end_tmux_session(session_id)
-        except Exception:
-            # The pane is already gone from the manager, so its transport is
-            # closed below whatever happened here; the reply says it failed.
-            logger.warning("Ending the tmux session of %s failed", session_id, exc_info=True)
-    _close_ssh_connection(session_id, clear_buffer=True)
+    with reserve_tmux_close(session_id, end_tmux=end_tmux):
+        with session_manager.lock:
+            existing_session = session_manager.sessions.get(session_id)
+            group = (
+                session_manager.groups.get(existing_session.group_id)
+                if existing_session is not None
+                else None
+            )
+            success = session_manager.close_session(session_id)
+            if success:
+                group_id = existing_session.group_id
+                # Closing a pane empties its group, and an empty group is swept at
+                # once — there is no grace period left to ride (MW-06). Closing the
+                # last pane within five seconds of launch used to remove the
+                # session but leave the group behind forever, which kept a
+                # workspace alive with no panes in it and its snapshot
+                # unforgettable.
+                pruned_workspace_ids = session_manager.clear_disconnected_sessions()
+                closed_group_ids = (
+                    [group_id] if group_id not in session_manager.groups else []
+                )
+                workspace_id = (
+                    group.workspace_id if group else DEFAULT_WORKSPACE_ID
+                )
+            else:
+                pruned_workspace_ids = []
+                group_id = ""
+                closed_group_ids = []
+                workspace_id = DEFAULT_WORKSPACE_ID
+        if not success:
+            return jsonify({"error": "Session not found"}), 404
+
+        # A tmux pane's close detaches by default; its session keeps running on
+        # the host. Only the close dialog's "Also end the tmux session" ends it,
+        # before the transport closes, and never on any other close.
+        tmux_ended = False
+        if end_tmux:
+            try:
+                tmux_ended = _end_tmux_session(session_id)
+            except Exception:
+                # The pane is already gone from the manager, so its transport is
+                # closed below whatever happened here; the reply says it failed.
+                logger.warning("Ending the tmux session of %s failed", session_id, exc_info=True)
+        _close_ssh_connection(session_id, clear_buffer=True)
     forget_pruned_workspaces(pruned_workspace_ids)
     # Closing the last pane of the last group in `default` empties it just as
     # surely as a prune empties a sibling; its snapshot goes the same way.
