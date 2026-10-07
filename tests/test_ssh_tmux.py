@@ -355,13 +355,14 @@ class ConnectTestCase(unittest.TestCase):
         self.session_manager.get_session.return_value = self.session
         self.addCleanup(ssh_tmux.forget_session, "pane")
 
-    def _connect(self, enabled=True, answer=None, run_startup=False):
+    def _connect(self, enabled=True, answer=None, run_startup=False, on_login=None):
         paramiko = MagicMock()
         paramiko.SSHException = type("SSHException", (Exception,), {})
         client = paramiko.SSHClient.return_value
         transport = FakeTransport(answer or scripted())
         client.get_transport.return_value = transport
         patches = [
+            patch.object(terminal, "connect_ssh_client", side_effect=on_login),
             patch.object(terminal, "paramiko", paramiko),
             patch.object(terminal, "_apply_host_key_policy"),
             patch.object(terminal, "_establish_mcp_tunnel"),
@@ -405,6 +406,81 @@ class ConnectTestCase(unittest.TestCase):
         self.assertTrue(any("tmux was not found" in item.get("data", "") for item in self.emitted))
         # The pane is a plain shell now, so it stops naming a session.
         self.session_manager.clear_tmux_session.assert_called_once_with("pane")
+
+    def _close_pane(self, *_args, **_kwargs):
+        # What the close route leaves behind: the pane gone from the manager
+        # and its connection retired from the registry.
+        self.session_manager.get_session.return_value = None
+        connection = self.registry.pop("pane", None)
+        if connection is not None:
+            connection["retired"] = True
+
+    def test_a_pane_closed_during_login_creates_no_tmux_session(self):
+        client, transport = self._connect(on_login=self._close_pane)
+        self.assertEqual(transport.commands, [])
+        client.close.assert_called()
+        self.assertNotIn("pane", self.registry)
+
+    def test_a_session_created_while_the_pane_goes_is_never_ended(self):
+        # Closed outright, or displaced by a restored group whose new pane ids
+        # carry the same tmux name: either way the old id is gone, and only the
+        # second leaves an owner -- so the connection never ends the session.
+        def replace(command):
+            self.registry["pane"] = {"replacement": True}
+
+        for goes in (self._close_pane, replace):
+            with self.subTest(goes=goes.__name__):
+                self.session_manager.get_session.return_value = self.session
+
+                def answer(command):
+                    if "new-session" in command:
+                        goes(command)
+                        return 10, ""
+                    return 0, ""
+
+                client, transport = self._connect(answer=answer)
+                self.assertFalse(
+                    any("kill-session" in command for command in transport.commands)
+                )
+                client.close.assert_called()
+
+    def test_a_failed_login_keeps_the_relaunch_window_for_the_retry(self):
+        ssh_tmux.request_new_window("pane", "/srv/other")
+
+        def refuse(*_args, **_kwargs):
+            raise OSError("Authentication failed")
+
+        self._connect(on_login=refuse)
+        self.assertNotIn("pane", self.registry)
+        self._connect(answer=scripted(prepare_status=0))
+        self.assertEqual(self.registry["pane"]["tmux_new_window"], "/srv/other")
+
+    def test_a_retired_connection_leaves_the_relaunch_window_to_its_replacement(self):
+        def answer(command):
+            if "new-session" in command:
+                # The relaunch retires this connection, then states its intent.
+                self.registry["pane"] = {"replacement": True}
+                ssh_tmux.request_new_window("pane", "/srv/next")
+            return 0, ""
+
+        self._connect(answer=answer)
+        self.assertEqual(ssh_tmux.take_new_window("pane"), "/srv/next")
+
+    def test_end_tmux_session_survives_the_stream_ending_under_it(self):
+        client, transport = fake_client()
+        connection = {"kind": "ssh", "client": client, "tmux_session": "work"}
+        self.registry["pane"] = connection
+
+        def answer(command):
+            # Killing the session ends the attach stream, and its reader
+            # retires the pane while the kill's exit status is still owed.
+            terminal._finalize_stream("pane", connection)
+            return (255, "") if client.close.called else (0, "")
+
+        transport.answer = answer
+        self.assertTrue(terminal._end_tmux_session("pane"))
+        self.assertNotIn("pane", self.registry)
+        client.close.assert_called_once()
 
     def test_a_tmux_failure_puts_the_pane_in_error(self):
         self._connect(answer=lambda _command: (1, "lost server"))

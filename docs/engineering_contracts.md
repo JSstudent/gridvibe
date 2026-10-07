@@ -1880,7 +1880,10 @@ pane; whatever runs inside it keeps running because tmux keeps it running.
   or the session's last shell exiting ends the stream as any SSH disconnect
   does. Missing tmux opens a plain shell with a notice and clears the pane's
   name (`SessionManager.clear_tmux_session`), so it saves, closes and restores
-  as the plain SSH pane it is.
+  as the plain SSH pane it is. `prepare()` runs only while the connection is
+  still the open pane's. A session it created for a pane that went during the
+  round trip is left running, like any detached session: a missing pane id is
+  no proof the name is unowned, since a restored group's new panes carry it.
 - **Nothing is typed into an existing session.** A tmux connection gets no
   prompt hook, no `cd` and no echo scrub. A startup or agent launch line is
   sent with `tmux send-keys` only into a session this connection created in the
@@ -1897,15 +1900,18 @@ pane; whatever runs inside it keeps running because tmux keeps it running.
   detaches. A mode switch to Files or Browser keeps `tmux_session`, so switching
   back attaches again. A relaunch that needs a fresh shell (agent change,
   stated directory) records `request_new_window()` before its connector starts;
-  the next connection takes it once and opens `new-window` in the session at
+  the next connection to reach the pane takes it once, at the registry insert,
+  so a failed login leaves it for the retry and a retired connection for its
+  replacement. That connection opens `new-window` in the session at
   the stated directory or the pane's current one, with the same on-host
   `[ -d ]` check, and types the launch line there. The session and its other
   windows are never ended for a relaunch.
 - **Close detaches unless the person asks.** The pane close dialog offers
   "Also end the tmux session"; only that sends `DELETE
-  /api/sessions/<id>?end_tmux=1`, which runs `kill-session` on the live
-  connection before the transport closes and always closes it, reporting
-  `tmux_ended`. The client re-checks that the pane it asked about is still the
+  /api/sessions/<id>?end_tmux=1`, which retires the live connection from its
+  reader, runs `kill-session` on its client and then closes the transport,
+  reporting `tmux_ended`. Retiring first keeps the attach stream that the kill
+  ends from closing the client before the kill's exit status arrives. The client re-checks that the pane it asked about is still the
   one in that slot. Workspace close and quit only detach.
 - **Restore brings back the session, nothing else.** With the gate on, a tmux
   pane's snapshot is `_tmux_pane_snapshot()`: host, port, user, title, name and

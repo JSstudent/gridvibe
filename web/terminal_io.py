@@ -3040,6 +3040,10 @@ def _end_tmux_session(session_id: str) -> bool:
     Asked only by a close the person chose "Also end the tmux session" on, and
     run before the transport closes. Follows the live connection, not the
     setting, so a session still attached can always be ended.
+
+    The connection is retired before the kill is sent. Ending the session ends
+    the attach stream, and a reader still owning the connection would close
+    the client under the kill and turn its success into a reported failure.
     """
     with connection_lock:
         connection = ssh_connections.get(session_id)
@@ -3048,12 +3052,30 @@ def _end_tmux_session(session_id: str) -> bool:
     tmux_name = str(connection.get("tmux_session") or "")
     if not tmux_name:
         return False
-    return ssh_tmux.kill(connection.get("client"), tmux_name)
+    with _connection_gate(connection):
+        with connection_lock:
+            if ssh_connections.get(session_id) is not connection:
+                return False
+            ssh_connections.pop(session_id, None)
+            connection["retired"] = True
+    try:
+        return ssh_tmux.kill(connection.get("client"), tmux_name)
+    finally:
+        _shutdown_connection(connection)
 
 
 def _connection_is_current(session_id, connection):
     with connection_lock:
         return connection is not None and ssh_connections.get(session_id) is connection
+
+
+def _ssh_connection_is_live(session_id, connection):
+    """Still this pane's connection, and the pane still exists."""
+    with connection_lock:
+        return (
+            _connection_is_current(session_id, connection)
+            and session_manager.get_session(session_id) is not None
+        )
 
 
 def _connection_status(session_id, connection, status, error_message=None):
@@ -3809,9 +3831,6 @@ def _connect_ssh_session(session_id: str, session: Any):
         if ssh_tmux.tmux_sessions_enabled(settings)
         else ""
     )
-    # A relaunch's request for a new tmux window is owed to this connection
-    # only, so it is taken whether or not this connection can honour it.
-    tmux_new_window = ssh_tmux.take_new_window(session_id)
     try:
         client = paramiko.SSHClient()
         _apply_host_key_policy(client, paramiko)
@@ -3843,6 +3862,13 @@ def _connect_ssh_session(session_id: str, session: Any):
         # be drawn at the right width.
         pty_cols, pty_rows = _terminal_size_for(session_id)
         tmux_state = ""
+        if tmux_name and not _ssh_connection_is_live(session_id, connection):
+            # Checked before the attach-or-create, which is a remote mutation:
+            # a pane closed during login must not leave a session behind.
+            logger.info("[%s] Session was removed before its tmux session was prepared", session_id)
+            _shutdown_connection({"client": client})
+            _close_ssh_connection(session_id, expected=connection)
+            return
         if tmux_name:
             launch_directory = str(
                 getattr(session, "launch_directory", "")
@@ -3865,15 +3891,20 @@ def _connect_ssh_session(session_id: str, session: Any):
         if tmux_attached:
             resources["tmux_session"] = tmux_name
             resources["tmux_state"] = tmux_state
-            if tmux_new_window is not None:
-                resources["tmux_new_window"] = tmux_new_window
 
         # Re-validate inside the lock so a concurrent close cannot slip between
         # the session check and the registry insert (which would leak the client).
         with connection_lock:
-            stale = (not _connection_is_current(session_id, connection)
-                     or session_manager.get_session(session_id) is None)
+            stale = not _ssh_connection_is_live(session_id, connection)
             if not stale:
+                # A relaunch's request for a new tmux window is owed to the
+                # connection that reaches the pane, so it is taken here, whether
+                # or not this one can honour it: a login that fails leaves it
+                # for the retry, and a retired connection leaves it for its
+                # replacement.
+                tmux_new_window = ssh_tmux.take_new_window(session_id)
+                if tmux_attached and tmux_new_window is not None:
+                    resources["tmux_new_window"] = tmux_new_window
                 connection.update(resources)
                 session_output_buffers[session_id] = _OutputBuffer()
                 if tmux_state == ssh_tmux.TMUX_MISSING:
@@ -3883,6 +3914,10 @@ def _connect_ssh_session(session_id: str, session: Any):
                     session_manager.clear_tmux_session(session_id)
         if stale:
             logger.info("[%s] Session was removed before SSH startup completed", session_id)
+            # A session `prepare()` created is left running, like any closed
+            # tmux pane's. A missing pane id is no proof it is unowned: a
+            # restored group's new panes carry the same name and may already
+            # be attaching to it.
             _shutdown_connection(resources)
             _close_ssh_connection(session_id, expected=connection)
             return
