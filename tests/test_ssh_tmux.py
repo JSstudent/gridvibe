@@ -989,6 +989,19 @@ process.stdout.write(JSON.stringify({
         name = response.get_json()["session"]["tmux_session"]
         self.assertRegex(name, r"^gv-[0-9a-f]{12}$")
 
+    def test_a_split_an_agent_asked_for_never_gets_a_tmux_session(self):
+        self._enable()
+        source = self._launch({"tmux_session": "work"}).get_json()["sessions"][0]
+        with patch.object(api.socketio, "start_background_task"):
+            response = self.client.post(
+                f"/api/sessions/{source['session_id']}/split",
+                json={"created_by_session_id": source["session_id"]},
+            )
+        self.assertEqual(response.status_code, 201)
+        created = response.get_json()["session"]
+        self.assertEqual(created["created_by_session_id"], source["session_id"])
+        self.assertEqual(created["tmux_session"], "")
+
 
 @unittest.skipUnless(NODE, "Node.js is required for the close-dialog test")
 class CloseDialogTestCase(unittest.TestCase):

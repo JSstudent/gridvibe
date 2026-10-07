@@ -1854,9 +1854,10 @@ pane; whatever runs inside it keeps running because tmux keeps it running.
   with no name generates `gv-<12 hex>`, and a name must match
   `[A-Za-z0-9_-]{1,64}` — refused at launch, dropped on restore. A tool launch
   (`origin_session_id` or `tool_launch`) never gets one: a session outlives
-  GridVibe on the host, so it is the person's launcher option. A split of a
-  tmux pane into a terminal or agent gets a newly generated name, never the
-  source's.
+  GridVibe on the host, so it is the person's launcher option. A person's
+  split of a tmux pane into a terminal or agent gets a newly generated name,
+  never the source's; a split an agent asked for (`created_by_session_id`)
+  gets none and opens a plain shell, like any tool launch.
 - **One live pane per (host, port, user, name).** `_refuse_shared_tmux_sessions()`
   runs with `install_session_group()` under `_tmux_claim_lock`, so two
   concurrent launches cannot both claim a session. The key uses the install's

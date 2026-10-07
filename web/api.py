@@ -4160,10 +4160,13 @@ def split_session(session_id: str):
     title = f"Terminal {len(group_sessions) + 1}"
     # A split of a tmux pane gets the tmux option with a session of its own,
     # never the source pane's: two panes mirroring one session fight over it.
+    # Only a person's split: a session outlives GridVibe on the host, so a
+    # split an agent asked for opens a plain shell, as a tool launch does.
     tmux_session = (
         generate_tmux_session_name()
         if source.mode == "ssh"
         and getattr(source, "tmux_session", "")
+        and not creator_session_id
         and tmux_sessions_enabled()
         else ""
     )

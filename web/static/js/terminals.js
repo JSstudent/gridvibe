@@ -2968,8 +2968,8 @@
             distribution: connectionMode === 'wsl' ? (session.distribution || '') : '',
             use_wsl: connectionMode === 'wsl' ? Boolean(session.use_wsl) : false,
             use_powershell: connectionMode === 'wsl' ? Boolean(session.use_powershell) : false,
-            /* The experimental tmux option rides along; the server keeps a
-               typed session name and drops a generated one. */
+            /* The experimental tmux option rides along; the server keeps the
+               session name, typed or generated, so the preset reattaches it. */
             tmux_session: connectionMode === 'ssh' ? String(session.tmux_session || '') : ''
         };
     }
