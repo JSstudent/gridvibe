@@ -3,8 +3,9 @@
 
    Page-agnostic: colours come from tokens.css only and the text colour is
    inherited, so the same stylesheet works on either page. Where the banner
-   sits in the page grid is the page's business — launcher.css owns its
-   grid-row, exactly as it owns the restore banner's.
+   sits, and what it floats over, is the page's business — launcher.css
+   places it, and gives it the opaque surface it paints its tint on through
+   --gv-notice-surface.
 
    Two structural guarantees live here:
 
@@ -12,9 +13,9 @@
       scrolls internally, so a 2 KB git error wraps to four lines and stops,
       and `overflow-wrap: anywhere` keeps an unbroken path from forcing
       horizontal overflow.
-   2. It is ordinary in-flow launcher content — deliberately unpositioned and
-      with no z-index of its own — so every dialog paints over it. A notice
-      belongs to the launcher behind the dialog, not on top of it: floating a
+   2. This sheet never lifts it: no z-index of its own. A page that floats
+      the banner keeps it below every dialog layer, because a notice belongs
+      to the page behind the dialog, not on top of it — floating a
       minutes-old error over a modal the user just opened reads as a bug. A
       persistent notice is still there when the dialog closes. */
 .gv-notice-banner {
@@ -27,7 +28,13 @@
     padding: 10px 16px;
     border: 1px solid var(--gv-accent);
     border-radius: var(--gv-radius-m, 12px);
-    background: var(--gv-accent-soft);
+    /* The severity tint is a translucent wash, layered over a surface the
+       page may supply: transparent in flow, opaque when the page floats the
+       banner over other content. */
+    --gv-notice-tint: var(--gv-accent-soft);
+    background:
+        linear-gradient(var(--gv-notice-tint), var(--gv-notice-tint)),
+        var(--gv-notice-surface, transparent);
     color: inherit;
     font-size: .85rem;
 }
@@ -100,7 +107,7 @@
    four icons are different shapes, so the state survives colour blindness. */
 .gv-notice-banner.is-error {
     border-color: var(--gv-danger);
-    background: var(--gv-danger-soft);
+    --gv-notice-tint: var(--gv-danger-soft);
 }
 
 .gv-notice-banner.is-error .gv-notice-icon {
@@ -109,7 +116,7 @@
 
 .gv-notice-banner.is-warning {
     border-color: var(--gv-warning);
-    background: var(--gv-warning-soft);
+    --gv-notice-tint: var(--gv-warning-soft);
 }
 
 .gv-notice-banner.is-warning .gv-notice-icon {
@@ -118,7 +125,7 @@
 
 .gv-notice-banner.is-success {
     border-color: var(--gv-success);
-    background: var(--gv-success-soft);
+    --gv-notice-tint: var(--gv-success-soft);
 }
 
 .gv-notice-banner.is-success .gv-notice-icon {
@@ -127,7 +134,7 @@
 
 .gv-notice-banner.is-info {
     border-color: var(--gv-accent);
-    background: var(--gv-accent-soft);
+    --gv-notice-tint: var(--gv-accent-soft);
 }
 
 .gv-notice-banner.is-info .gv-notice-icon {

@@ -175,6 +175,7 @@ Browser mode is the most reliable for microphone permissions. Settings apply liv
 ## Sessions & Workspaces
 
 - **Session tabs** — keep related panes together in draggable tabs. `Alt+1`–`Alt+9` switches, middle-click closes, and broadcast typing sends your keystrokes to every pane in the active tab.
+- **Same for all** — tick it in the launcher's Terminal Setup and every terminal launches with Terminal 1's settings, from one card. Each pane keeps its own title and tmux session, and override mode is never copied.
 - **Saved sessions** — save a setup as a reusable preset and import it later; re-saving one records where each pane is working now, not where the preset was created. Stored SSH passwords are encrypted, and are never written to a workspace snapshot.
 - **Save & restore** — GridVibe autosaves, and **Save Workspace** saves on demand. A restart brings back tabs, layouts, commands, the active group, and explorer presentation, with each pane reopening in the directory it was *working in*.
 - **Resume agent conversations** *(experimental, off by default)* — turn on **App Settings ▸ Agents ▸ Resume agent conversations on restore** and a restored Claude Code or Codex pane reopens the conversation it was in, once that conversation has had a prompt, rather than a new one. Saved presets and a relaunch from the pane's 🔄 dropdown always start fresh.

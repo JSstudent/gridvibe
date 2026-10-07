@@ -246,25 +246,40 @@
             padding: 0;
         }
 
-        /* Rows are placed explicitly because the two middle ones — the
-           notification banner and the restore banner — are usually absent:
-           with only two named rows a banner landed in the 1fr row and grew to
-           fill whatever the window gave it, which is why it ballooned as the
-           window was resized. Each optional banner owns a content-sized row of
-           its own, so they can never share a row or overlap, and a hidden one
-           collapses its row to nothing. */
+        /* Rows are placed explicitly because the restore banner and the
+           notification banner are usually absent: with only two named rows a
+           banner landed in the 1fr row and grew to fill whatever the window
+           gave it. Each optional banner owns a content-sized row of its own,
+           and a hidden one collapses its row to nothing.
+
+           The notification banner's row is the *last* one, below the columns
+           and their Launch / button bar, not above them. Notices come and go
+           on their own clock — a success dismisses itself after six seconds —
+           and a row above the columns pushed both of them down and pulled
+           them back up with every one. Below them, a notice only shortens the
+           1fr row from the bottom; the columns stack from the top, so no pane
+           moves (and .column reserves its scrollbar gutter, so a column that
+           starts to scroll does not narrow its cards either). */
         .app-frame {
             display: grid;
-            grid-template-rows: auto auto auto 1fr;
+            grid-template-rows: auto auto 1fr auto;
             min-height: 100vh;
             max-height: 100vh;
             overflow: hidden;
         }
 
         .app-titlebar { grid-row: 1; }
-        .gv-notice-banner { grid-row: 2; }
-        .restore-banner { grid-row: 3; }
-        .shell { grid-row: 4; }
+        .restore-banner { grid-row: 2; }
+        .shell { grid-row: 3; }
+        .gv-notice-banner { grid-row: 4; }
+
+        /* In flow, so every dialog paints over it with no layer of its own.
+           Scoped under .app-frame because notice-banner.css loads after this
+           sheet and would otherwise win back its top-banner margin; the side
+           margins line it up with the cards above it. */
+        .app-frame > .gv-notice-banner {
+            margin: 0 30px 14px;
+        }
 
         .app-titlebar {
             display: flex;
@@ -432,6 +447,7 @@
             gap: 12px;
             padding: 0 10px;
             overflow: auto;
+            scrollbar-gutter: stable;
         }
 
         .column-left {
@@ -962,6 +978,45 @@
 
         .add-terminal-btn:hover {
             background: rgba(0, 217, 255, 0.08);
+        }
+
+        /* Terminal Setup's "Same for all": Terminal 1 becomes the template
+           and the other rows follow it (launcher.js, terminal-apply-all.js). */
+        .apply-all-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 7px 10px;
+            border-radius: 10px;
+            border: 1px solid var(--border-muted);
+            color: var(--muted);
+            font-size: 0.78rem;
+            font-weight: 600;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .apply-all-toggle input {
+            width: 14px;
+            height: 14px;
+            margin: 0;
+            accent-color: var(--accent-strong);
+        }
+
+        .apply-all-toggle:has(input:checked) {
+            border-color: var(--border-active);
+            color: var(--accent);
+        }
+
+        .apply-all-toggle:has(input:disabled) {
+            cursor: default;
+            opacity: 0.5;
+        }
+
+        /* A row following Terminal 1 is not shown: Terminal 1's card stands
+           for every pane while the box is ticked. */
+        .t-row.t-row-follows {
+            display: none;
         }
 
         @keyframes tf-spin {
@@ -2370,6 +2425,22 @@
         }
 
         @media (max-width: 960px) {
+            /* The page scrolls as a whole here, so the last row can be far
+               below the fold. The banner floats at the bottom of the window
+               instead: above the launcher, below every dialog (.modal-shell
+               is 20, the app-settings and workspace layers far higher). */
+            .app-frame > .gv-notice-banner {
+                position: fixed;
+                bottom: 10px;
+                left: 50%;
+                z-index: 15;
+                width: min(760px, calc(100vw - 32px));
+                margin: 0;
+                transform: translateX(-50%);
+                --gv-notice-surface: var(--bg-deep);
+                box-shadow: var(--shadow);
+            }
+
             .shell {
                 grid-template-columns: 1fr;
                 grid-template-rows: auto auto;

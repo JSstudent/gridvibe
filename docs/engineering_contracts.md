@@ -1952,6 +1952,7 @@ in `README.md`; state the rules a change has to keep.
   live record and decided in one place.** `agent_mcp_override` is granted only
   by a person: the launcher's **Override** box or the pane menu's **Override**
   target, each behind the shared in-page warning, and only beside `agent_mcp`.
+  The launcher's **Same for all** never copies it to another row.
   `read_caller_request` in `web/pane_gates.py` is the one reader of every gated
   request — the pane transactions through `read_agent_request`, and the group
   move directly — and a caller that holds the grant carries `override` with
@@ -2555,8 +2556,28 @@ in `README.md`; state the rules a change has to keep.
   `notice-banner.js`: one replaceable slot, no stack/queue/history or second sink.
   `#message` is static helper text. Error/warning persist; success/info dismiss
   after six seconds; dismissal is cosmetic. Use `textContent`, icon/border/tint,
-  and `console.error` for errors only. Banner has no position/z-index; dialogs stay
-  above it. Contextual validation must not become another global sink.
+  and `console.error` for errors only. Contextual validation must not become
+  another global sink.
+- A notice never moves a launcher pane. The banner owns `.app-frame`'s last
+  grid row, below the columns and their Launch/button bar, so it only shortens
+  the space from the bottom while the columns stack from the top, and `.column`
+  keeps `scrollbar-gutter: stable` so a column that starts to scroll does not
+  narrow its cards. In that layout it is in flow with no position or z-index;
+  at the narrow breakpoint, where the page scrolls as a whole, it floats
+  `fixed` at the window's bottom on a layer below `.modal-shell` and every other
+  dialog. `notice-banner.css` never lifts it; the page supplies the opaque
+  `--gv-notice-surface` its tint paints on when it floats.
+- Terminal Setup's **Same for all** makes Terminal 1 the template and the only
+  card shown. The other rows stay in the form, hidden (`.t-row-follows`), and
+  are re-rendered from `terminal-apply-all.js` on every Terminal 1 edit, so
+  launch, preset save and the explorer-retarget notice read real values and
+  unticking shows each row as it was given. A follower copies what the pane
+  runs and keeps its own title and tmux session name (copying a name would put
+  two panes on one session, which a launch refuses); agent override is never
+  copied and is cleared and locked in a follower; saved explorer state survives
+  only on the same folder in explorer mode. Followers skip agent preflight,
+  since Terminal 1's answers for them. The box is page state: never saved, and
+  importing a preset turns it off so loading one never overwrites its rows.
 - Colors/radii come from `tokens.css` and existing theme tokens. Migrate literals
   in legacy CSS blocks being touched. Use stroke-style `currentColor` SVGs with
   explicit box/inline-flex centering; remove glyph font sizing and convert paired

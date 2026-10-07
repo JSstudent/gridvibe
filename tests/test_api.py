@@ -19965,26 +19965,59 @@ class UxInteractionButtonsTestCase(unittest.TestCase):
         self.assertNotIn(".message.error", launcher_css)
 
     def test_notice_banner_stays_below_every_dialog_layer(self):
-        """The banner is launcher content, not an overlay: it takes no
-        position and no stacking order of its own, so every dialog paints over
-        it. Floating a minutes-old notice on top of a modal the user just
+        """In the wide layout the banner is in-flow content with no layer of
+        its own; where a narrow window floats it, its layer stays below every
+        dialog: floating a minutes-old notice on top of a modal the user just
         opened reads as a bug — a persistent one is still there when the
-        dialog closes."""
+        dialog closes. Its own stylesheet never lifts it."""
         notice_css = self._static("css/notice-banner.css")
-        banner = re.search(r"\.gv-notice-banner \{(.*?)\}", notice_css, re.DOTALL)
-        self.assertIsNotNone(banner)
-        self.assertNotIn("z-index", banner.group(1))
-        self.assertNotIn("position:", banner.group(1))
-        # Nothing anywhere in the banner's own stylesheet lifts it either
-        # (comments stripped — the rule is about declarations).
+        # Nothing in the banner's own stylesheet lifts it (comments stripped —
+        # the rule is about declarations).
         self.assertNotIn("z-index", re.sub(r"/\*.*?\*/", "", notice_css, flags=re.DOTALL))
-        # The dialog layers it has to lose to are real.
+        launcher_css = self._static("css/launcher.css")
+        placements = re.findall(
+            r"\.app-frame > \.gv-notice-banner \{(.*?)\}", launcher_css, re.DOTALL
+        )
+        self.assertEqual(len(placements), 2)
+        wide, narrow = placements
+        self.assertNotIn("z-index", wide)
+        self.assertNotIn("position:", wide)
+        self.assertIn("position: fixed", narrow)
+        banner_layer = int(re.search(r"z-index:\s*(\d+)", narrow).group(1))
+        modal_shell = re.search(r"\n        \.modal-shell \{(.*?)\}", launcher_css, re.DOTALL)
+        self.assertIsNotNone(modal_shell)
+        # Every dialog layer it has to lose to: the launcher's modal shell and
+        # the overlay layers of the app-settings and workspace dialogs (their
+        # single-digit z-indexes are stacking inside those dialogs).
         dialog_layers = [
+            int(re.search(r"z-index:\s*(\d+)", modal_shell.group(1)).group(1))
+        ] + [
             int(match)
             for sheet in ("css/workspaces.css", "css/app-settings.css")
             for match in re.findall(r"z-index:\s*(\d+)", self._static(sheet))
+            if int(match) >= 20
         ]
-        self.assertTrue(dialog_layers)
+        self.assertLess(banner_layer, min(dialog_layers))
+
+    def test_notice_banner_row_is_below_the_columns(self):
+        """A notice used to own a grid row above the columns, so every one
+        that appeared, was replaced or dismissed itself pushed both columns
+        down and pulled them back up. Its row is now the last, below the
+        Launch / button bar, so a notice only shortens the space from the
+        bottom; the columns keep a stable scrollbar gutter so one that starts
+        to scroll does not narrow its cards."""
+        launcher_css = self._static("css/launcher.css")
+        app_frame = re.search(r"\n        \.app-frame \{(.*?)\}", launcher_css, re.DOTALL)
+        self.assertIsNotNone(app_frame)
+        self.assertIn("grid-template-rows: auto auto 1fr auto", app_frame.group(1))
+        self.assertIn(".shell { grid-row: 3; }", launcher_css)
+        self.assertIn(".gv-notice-banner { grid-row: 4; }", launcher_css)
+        column = re.search(r"\n        \.column \{(.*?)\}", launcher_css, re.DOTALL)
+        self.assertIsNotNone(column)
+        self.assertIn("scrollbar-gutter: stable", column.group(1))
+        # Below the columns in the markup too, so reading order matches.
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertLess(html.index('class="shell"'), html.index('id="gvNoticeBanner"'))
 
     def test_notice_banner_text_is_height_bounded(self):
         """D2 — no message length can eat the page: the text wraps to a capped
@@ -21865,12 +21898,12 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         launcher_css = self._static("css/launcher.css")
         app_frame = re.search(r"\n        \.app-frame \{(.*?)\}", launcher_css, re.DOTALL)
         self.assertIsNotNone(app_frame)
-        self.assertIn("grid-template-rows: auto auto auto 1fr", app_frame.group(1))
+        self.assertIn("grid-template-rows: auto auto 1fr auto", app_frame.group(1))
         for placement in (
             ".app-titlebar { grid-row: 1; }",
-            ".gv-notice-banner { grid-row: 2; }",
-            ".restore-banner { grid-row: 3; }",
-            ".shell { grid-row: 4; }",
+            ".restore-banner { grid-row: 2; }",
+            ".shell { grid-row: 3; }",
+            ".gv-notice-banner { grid-row: 4; }",
         ):
             self.assertIn(placement, launcher_css)
         # The declaration block, not the one-line grid-row placement above it.

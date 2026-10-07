@@ -49,8 +49,6 @@
     </div>
 </header>
 
-{% include 'partials/notice_banner.html' %}
-
 <div id="restoreWorkspaceBanner" class="restore-banner" hidden>
     <span id="restoreWorkspaceText" class="restore-banner-text">Previous workspace found.</span>
     <div class="restore-banner-actions">
@@ -166,6 +164,10 @@
                     Terminal Setup
                 </div>
                 <button type="button" class="add-terminal-btn" id="addTerminalBtn" onclick="addTerminalFromButton()">+ Add Terminal</button>
+                <label class="apply-all-toggle" title="Set up Terminal 1 once and every terminal launches with it. Each pane keeps its own title and its own tmux session; override mode is never copied.">
+                    <input id="terminalApplyAll" type="checkbox" onchange="toggleTerminalApplyAll(this)">
+                    <span>Same for all</span>
+                </label>
                 <button
                     type="button"
                     class="card-fold-btn"
@@ -338,6 +340,10 @@
         </div>
     </section>
 </div>
+
+{# Below the columns, in reading order as on screen: launcher.css gives it
+   the app-frame's last row, so a notice never moves the panes above it. #}
+{% include 'partials/notice_banner.html' %}
 </div>
 
 <div id="savedSessionsModal" class="modal-shell" aria-hidden="true">
@@ -459,6 +465,7 @@
 <script src="{{ url_for('static', filename='js/dashboard.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/terminal-icons.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/startup-mode-picker.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/terminal-apply-all.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/launcher.js') }}?v={{ version }}"></script>
 </body>
 </html>
