@@ -106,6 +106,7 @@ from web.pane_processes import (
     process_started_at,
     process_table,
 )
+from web.ssh_connect import connect_ssh_client
 from web.terminal_cwd import (
     CWD_EVENT_DIRECTORY,
     CWD_EVENT_SHELL_PID,
@@ -3784,7 +3785,8 @@ def _connect_ssh_session(session_id: str, session: Any):
             f"[{session_id}] paramiko.connect hostname={session.host} port={session.port}"
             f" user={session.username} password={'***' if session.password else None}"
         )
-        client.connect(
+        connect_ssh_client(
+            client,
             hostname=session.host,
             port=session.port,
             username=session.username,

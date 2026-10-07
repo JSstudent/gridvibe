@@ -34,10 +34,6 @@ logger = logging.getLogger(__name__)
 #: name is passed to a remote shell, so anything else is refused at launch and
 #: dropped on restore.
 TMUX_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-#: The shape GridVibe generates. A preset drops a name of this shape (each
-#: launch of it gets its own session) and keeps any other, because naming a
-#: known session is the point of typing one.
-GENERATED_NAME_PATTERN = re.compile(r"^gv-[0-9a-f]{12}$")
 
 TMUX_EXEC_TIMEOUT = 10.0
 TMUX_MAX_OUTPUT_BYTES = 8192
@@ -97,10 +93,6 @@ def normalize_session_name(value: Any) -> str:
     return name if TMUX_NAME_PATTERN.match(name) else ""
 
 
-def is_generated_name(value: Any) -> bool:
-    return bool(GENERATED_NAME_PATTERN.match(str(value or "")))
-
-
 def launch_session_name(config: Dict[str, Any], *, enabled: bool, restore: bool) -> str:
     """The tmux session one requested pane launches into, or ``""``.
 
@@ -141,15 +133,16 @@ def launch_session_name(config: Dict[str, Any], *, enabled: bool, restore: bool)
 def preset_tmux_fields(entry: Dict[str, Any]) -> Dict[str, Any]:
     """The tmux launch option a reusable preset keeps for one pane.
 
-    The option, always; the name only when somebody typed it. A generated name
-    belongs to the one pane that got it, so every launch of the preset makes
-    its own session.
+    The option and its name, typed or generated alike, so a launch of the
+    preset attaches to the session the saved pane ran in -- the same session a
+    workspace restore reattaches. Only a preset saved before any launch has no
+    name yet; its launch generates one.
     """
     name = normalize_session_name(entry.get("tmux_session"))
     wanted = entry.get("tmux") is True or bool(name)
     if not wanted:
         return {"tmux": False, "tmux_session": ""}
-    return {"tmux": True, "tmux_session": "" if is_generated_name(name) else name}
+    return {"tmux": True, "tmux_session": name}
 
 
 def session_key(host: Any, port: Any, username: Any, name: str) -> Tuple[str, str, str, str]:

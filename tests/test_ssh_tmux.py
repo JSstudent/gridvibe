@@ -157,10 +157,10 @@ class GateAndNamesTestCase(unittest.TestCase):
                     ssh_tmux.launch_session_name(other, enabled=True, restore=False), ""
                 )
 
-    def test_preset_keeps_the_option_and_a_typed_name_but_not_a_generated_one(self):
+    def test_preset_keeps_the_option_and_its_name_typed_or_generated(self):
         self.assertEqual(
             ssh_tmux.preset_tmux_fields({"tmux_session": "gv-0123456789ab"}),
-            {"tmux": True, "tmux_session": ""},
+            {"tmux": True, "tmux_session": "gv-0123456789ab"},
         )
         self.assertEqual(
             ssh_tmux.preset_tmux_fields({"tmux_session": "work"}),
@@ -181,13 +181,41 @@ class GateAndNamesTestCase(unittest.TestCase):
             "ssh",
             minimum_count=3,
         )
-        self.assertEqual((entries[0]["tmux"], entries[0]["tmux_session"]), (True, ""))
+        self.assertEqual(
+            (entries[0]["tmux"], entries[0]["tmux_session"]), (True, "gv-0123456789ab")
+        )
         self.assertEqual((entries[1]["tmux"], entries[1]["tmux_session"]), (True, "work"))
         self.assertNotIn("tmux", entries[2])
         local = web_saved_sessions._normalize_terminal_entries(
             [{"title": "A", "tmux": True}], "wsl", minimum_count=1
         )
         self.assertNotIn("tmux", local[0])
+
+    def test_saving_a_live_workspace_keeps_its_generated_session(self):
+        # The preset was saved before launch, so it holds the option with no
+        # name; the live pane got a generated one, which the save must keep so
+        # the next launch reattaches instead of starting another session.
+        base = {
+            "connection_mode": "ssh",
+            "terminal_count": 1,
+            "ssh": {"host": "box", "username": "dev"},
+            "terminals": [{"title": "A", "tmux": True, "tmux_session": ""}],
+        }
+        workspace = {
+            "terminal_count": 1,
+            "terminals": [{"title": "A", "tmux_session": "gv-0123456789ab"}],
+        }
+        merged = web_saved_sessions._merge_workspace_session_config(base, workspace)
+        saved = merged["terminals"][0]
+        self.assertEqual((saved["tmux"], saved["tmux_session"]), (True, "gv-0123456789ab"))
+        self.assertEqual(
+            ssh_tmux.launch_session_name(
+                {"mode": "ssh", "startup_mode": "terminal", **saved},
+                enabled=True,
+                restore=False,
+            ),
+            "gv-0123456789ab",
+        )
 
 
 class RemoteCommandsTestCase(unittest.TestCase):
@@ -588,6 +616,47 @@ class HttpTestCase(unittest.TestCase):
             self.assertIn(hook, launcher)
         settings_js = (ROOT / "web/static/js/app-settings.js").read_text(encoding="utf-8")
         self.assertIn("appSshTmuxSessions", settings_js)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for shared launch-field tests")
+    def test_the_shared_launch_fields_carry_the_tmux_option(self):
+        # Both launch surfaces build each pane's request through
+        # buildPaneLaunchFields; a field it leaves out never reaches the server.
+        harness = r"""
+const fs = require('fs');
+const vm = require('vm');
+const sandbox = {
+    console,
+    document: { getElementById: () => null, addEventListener: () => {} }
+};
+sandbox.globalThis = sandbox;
+sandbox.window = sandbox;
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);
+const build = sandbox.buildPaneLaunchFields;
+process.stdout.write(JSON.stringify({
+    generated: build({ startup_mode: 'terminal', tmux: true, tmux_session: '' }),
+    named: build({ startup_mode: 'agent', tmux: true, tmux_session: ' work ' }),
+    off: build({ startup_mode: 'terminal' }),
+    explorer: build({ startup_mode: 'explorer', tmux: true, tmux_session: 'x' })
+}));
+"""
+        with TemporaryDirectory() as script_dir:
+            script_path = Path(script_dir) / "harness.js"
+            script_path.write_text(harness, encoding="utf-8")
+            completed = subprocess.run(
+                [shutil.which("node"), str(script_path), str(ROOT / "web/static/js/shared.js")],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        if completed.returncode != 0:
+            self.fail(f"node harness failed:\n{completed.stderr}")
+        result = json.loads(completed.stdout)
+        pick = lambda fields: (fields["tmux"], fields["tmux_session"])  # noqa: E731
+        self.assertEqual(pick(result["generated"]), (True, ""))
+        self.assertEqual(pick(result["named"]), (True, "work"))
+        self.assertEqual(pick(result["off"]), (False, ""))
+        self.assertEqual(pick(result["explorer"]), (False, ""))
 
     def test_close_detaches_unless_asked_to_end_the_session(self):
         self._enable()

@@ -485,7 +485,14 @@
             explorer_theme: resolvedStartupMode === 'explorer' ? (terminal?.explorer_theme || 'dark') : '',
             startup_mode: resolvedStartupMode,
             use_wsl: shellFlagsAllowed && Boolean(terminal?.use_wsl),
-            use_powershell: shellFlagsAllowed && Boolean(terminal?.use_powershell)
+            use_powershell: shellFlagsAllowed && Boolean(terminal?.use_powershell),
+            /* The experimental tmux option. Both launch surfaces end here, so
+               leaving it out launched every "Run in tmux" pane as a plain
+               shell. The server applies the setting and the SSH-only rule. */
+            tmux: shellFlagsAllowed && terminal?.tmux === true,
+            tmux_session: shellFlagsAllowed && typeof terminal?.tmux_session === 'string'
+                ? terminal.tmux_session.trim()
+                : ''
         };
     }
     function getDirectoryName(path) {
