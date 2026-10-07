@@ -179,6 +179,8 @@ Browser mode is the most reliable for microphone permissions. Settings apply liv
 - **Saved sessions** — save a setup as a reusable preset and import it later; re-saving one records where each pane is working now, not where the preset was created. Stored SSH passwords are encrypted, and are never written to a workspace snapshot.
 - **Save & restore** — GridVibe autosaves, and **Save Workspace** saves on demand. A restart brings back tabs, layouts, commands, the active group, and explorer presentation, with each pane reopening in the directory it was *working in*.
 - **Resume agent conversations** *(experimental, off by default)* — turn on **App Settings ▸ Agents ▸ Resume agent conversations on restore** and a restored Claude Code or Codex pane reopens the conversation it was in, once that conversation has had a prompt, rather than a new one. Saved presets and a relaunch from the pane's 🔄 dropdown always start fresh.
+- **SSH terminals in tmux** *(experimental, off by default)* — turn on **App Settings ▸ Terminal ▸ Run SSH terminals in tmux** and tick **Run in tmux** on an SSH terminal or agent row. The pane runs in a tmux session on the host that keeps running after the pane closes or GridVibe exits, and reattaches on reconnect, restore or a preset launch; only the session comes back, not the agent or mode.
+- **Ending a tmux session** — closing a tmux pane detaches by default; tick **Also end the tmux session** in its close dialog to end it. Scrollback and mouse follow your own `~/.tmux.conf`.
 - **Close & restart** — voluntary close, manual restart, and update restart share one in-page choice: continue without saving, save every workspace, or save every preset and then every workspace. A pane-list mismatch offers **Synchronize panes & retry save**; a failed save leaves the app open.
 - **Multiple workspaces** — optionally keep separate projects in separate windows, move tabs between them without restarting terminals, and switch with `Alt+W` / `Alt+Shift+W`.
 - **The launcher follows you** — opening it from a workspace (`Alt+Q`) brings its window up on that workspace's screen, with the next launch already aimed at that workspace. The caret beside **Launch** picks any other destination, and a launcher already on that screen stays where you put it.
@@ -348,7 +350,7 @@ On a narrow pane, an agent pane hides its name and keeps just the agent's icon. 
 
 ## Configuration
 
-Everything lives in **App Settings** — the same dialog from the gear on the launcher *or* a session window. It covers theme, surface mode, the **Agents** section (which side the agent dashboard sidebar docks to, and the experimental agent conversation restore), terminal font and size, max sessions, shell integration, autosave interval, SSH host-key policy, all voice options, and, in the native window, whether minimizing one GridVibe window minimizes them all. The one exception is **Multiple workspaces**, whose switch sits in the launcher's Workspaces card because it changes what every launch does.
+Everything lives in **App Settings** — the same dialog from the gear on the launcher *or* a session window. It covers theme, surface mode, the **Agents** section (which side the agent dashboard sidebar docks to, and the experimental agent conversation restore), terminal font and size, max sessions, shell integration, the experimental SSH tmux sessions, autosave interval, SSH host-key policy, all voice options, and, in the native window, whether minimizing one GridVibe window minimizes them all. The one exception is **Multiple workspaces**, whose switch sits in the launcher's Workspaces card because it changes what every launch does.
 
 On disk, settings load from `config.json` (git-ignored) falling back to `default_config.json`:
 
@@ -358,7 +360,7 @@ On disk, settings load from `config.json` (git-ignored) falling back to `default
   "appearance": { "theme": "dark" },
   "terminal": { "max_sessions": 16, "font_size": 14, "shell_integration": true },
   "workspace": { "surface_mode": "normal", "agent_sidebar_side": "left", "autosave_interval_minutes": 5, "multi_workspace_enabled": false, "minimize_cascade": false, "agent_conversation_restore": false },
-  "ssh": { "host_key_policy": "auto-add" },
+  "ssh": { "host_key_policy": "auto-add", "tmux_sessions": false },
   "explorer_search": { "max_files": 2000, "max_matches": 5000, "timeout_seconds": 20 }
 }
 ```

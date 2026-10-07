@@ -21,6 +21,7 @@ Regression history and audit narratives do not belong in this reference.
 - [Workspace lifecycle and windows](#workspace-lifecycle-and-windows)
 - [Agent dashboard](#agent-dashboard)
 - [Agent conversation restore](#agent-conversation-restore)
+- [SSH tmux sessions](#ssh-tmux-sessions)
 - [Agent tools (MCP)](#agent-tools-mcp)
 - [Architecture and extraction boundaries](#architecture-and-extraction-boundaries)
 - [UI and styling](#ui-and-styling)
@@ -71,6 +72,10 @@ Regression history and audit narratives do not belong in this reference.
   accepted only from the panel's own frame and read for its status alone; the
   page can forge it, so it may never do more than reload that frame or show the
   stale notice.
+- GridVibe leaves processes running on a remote host after it exits only for
+  panes the person launched with tmux; closing such a pane detaches, and only
+  the close dialog's explicit choice ends the session. See
+  [SSH tmux sessions](#ssh-tmux-sessions).
 - `POST /api/sessions/<id>/agent-conversation` is the one route an agent's own
   process calls without a page. It is authorised by a per-connection pane token
   rather than by origin; see
@@ -167,6 +172,11 @@ changing any field that survives restart; it owns the complete save/restore flow
   stays confined to its own root. A launcher row carries a hydrated explorer
   root back out of the form, dropped by the same edited-directory signal that
   drops its saved tabs and pin.
+- **Experimental settings gate through one predicate each.**
+  `workspace.agent_conversation_restore` through `conversation_restore_enabled()`
+  and `ssh.tmux_sessions` through `tmux_sessions_enabled()`; consumers never
+  read either key directly. A tmux pane's reduced snapshot is described in
+  [SSH tmux sessions](#ssh-tmux-sessions).
 - Persistence failures raise the store's `StateFilePersistenceError` subclass;
   callers report a retryable failure, never claim a save succeeded. Runtime-state
   reads validate without rewriting. Commits retain per-workspace ticket/revision
@@ -180,6 +190,8 @@ changing any field that survives restart; it owns the complete save/restore flow
 
 ## Terminal transport and working directories
 
+- An SSH pane attached to a tmux session follows its own startup, input and
+  working-directory rules; see [SSH tmux sessions](#ssh-tmux-sessions).
 - Decode UTF-8 incrementally per connection, including cwd observation and final
   EOF residue; malformed bytes produce replacement characters. Never assume
   stream reads or writes are complete.
@@ -488,6 +500,9 @@ changing any field that survives restart; it owns the complete save/restore flow
 
 ## Pane transitions
 
+- A tmux pane detaches on every close or mode switch and keeps its session; a
+  relaunch opens a new tmux window instead of a fresh shell. See
+  [SSH tmux sessions](#ssh-tmux-sessions).
 - `session_modes.py` and `session_shell.py` own transactions without Flask globals.
   Validate every fallible input and resolve directories before presentation
   cleanup, metadata mutation, teardown, or restart. Refusal leaves the whole pane,
@@ -1816,6 +1831,89 @@ template and always starts fresh.
   unknown source) or `409` (the pane moved on). The response never echoes the
   id. The token is the only `GRIDVIBE_*` variable outside the sidecar's
   identity list.
+
+## SSH tmux sessions
+
+An SSH terminal or agent pane launched with "Run in tmux" runs inside a named
+tmux session on the remote host, so the session outlives the pane's connection
+and GridVibe itself. The session is the one thing GridVibe restores for such a
+pane; whatever runs inside it keeps running because tmux keeps it running.
+`web/ssh_tmux.py` owns every tmux-specific rule and remote command.
+
+- **Experimental and off by default.** `ssh.tmux_sessions` (App Settings ▸
+  Terminal) gates the whole feature through one predicate,
+  `tmux_sessions_enabled()`, read from a captured settings generation. Off, a
+  request's `tmux`/`tmux_session` fields are ignored, every connect opens a
+  plain shell, a capture writes `tmux_session: ""`, and no tmux session on any
+  host is touched. The connect path reads the gate once per connection, so a
+  pane attached when the switch goes off stays attached until it reconnects. A
+  new consumer asks the same predicate.
+- **One field, validated where a launch is prepared.** `TerminalSession.tmux_session`
+  holds the name; `""` means not a tmux pane. `launch_session_name()` applies
+  the gate and admits only SSH panes in terminal or agent mode: `tmux: true`
+  with no name generates `gv-<12 hex>`, and a name must match
+  `[A-Za-z0-9_-]{1,64}` — refused at launch, dropped on restore. A tool launch
+  (`origin_session_id` or `tool_launch`) never gets one: a session outlives
+  GridVibe on the host, so it is the person's launcher option. A split of a
+  tmux pane into a terminal or agent gets a newly generated name, never the
+  source's.
+- **One live pane per (host, port, user, name).** `_refuse_shared_tmux_sessions()`
+  runs with `install_session_group()` under `_tmux_claim_lock`, so two
+  concurrent launches cannot both claim a session. The key uses the install's
+  own defaults (`root`, port 22). A launch is refused; a restore drops the name
+  from the second pane, which opens a plain shell; the group a launch replaces
+  does not count against itself.
+- **Every remote command is exact, quoted and bounded.** Targets are written
+  `'=NAME'` (exact match, single-quoted so zsh's `=word` expansion cannot
+  reach it); scripts run under `sh -c` whatever the login shell; directories go
+  through `shlex.quote` with a leading `~` kept expandable. Each command runs on
+  its own exec channel with one absolute deadline over open, request, read and
+  exit status, and a watchdog closes that channel if the host never
+  acknowledges a request. Every failure surfaces as `TmuxError`. The default
+  tmux server is used and no tmux option is ever set.
+- **Connect: attach or create in one round trip, then attach.**
+  `prepare()` answers missing (tmux not on the non-interactive `PATH`),
+  attached, created in the launch directory, or created in the home directory
+  because the launch directory is empty or missing on the host; anything else
+  puts the pane in ERROR with tmux's message. The interactive channel is a PTY
+  (`xterm-256color`) whose root process is `tmux attach-session`, so a detach
+  or the session's last shell exiting ends the stream as any SSH disconnect
+  does. Missing tmux opens a plain shell with a notice and clears the pane's
+  name (`SessionManager.clear_tmux_session`), so it saves, closes and restores
+  as the plain SSH pane it is.
+- **Nothing is typed into an existing session.** A tmux connection gets no
+  prompt hook, no `cd` and no echo scrub. A startup or agent launch line is
+  sent with `tmux send-keys` only into a session this connection created in the
+  launch directory, or into a window a relaunch opened. An attach or a
+  home-directory create types nothing and the pane says why; a pending handoff
+  is marked undeliverable with the same reason. Every tmux write goes through
+  `_run_tmux_write()`, which holds the pane's write lock and refuses a retired
+  connection — the SSH client answering is no proof the pane is open.
+- **Working directory comes from tmux.** The prompt hook's escapes do not pass
+  through tmux, so `effective_directory()` asks `#{pane_current_path}` as its
+  process source, and the typed marker probe is refused on a tmux connection.
+  Nothing writes the answer into a snapshot.
+- **Transitions detach; relaunches open a window.** Closing the channel only
+  detaches. A mode switch to Files or Browser keeps `tmux_session`, so switching
+  back attaches again. A relaunch that needs a fresh shell (agent change,
+  stated directory) records `request_new_window()` before its connector starts;
+  the next connection takes it once and opens `new-window` in the session at
+  the stated directory or the pane's current one, with the same on-host
+  `[ -d ]` check, and types the launch line there. The session and its other
+  windows are never ended for a relaunch.
+- **Close detaches unless the person asks.** The pane close dialog offers
+  "Also end the tmux session"; only that sends `DELETE
+  /api/sessions/<id>?end_tmux=1`, which runs `kill-session` on the live
+  connection before the transport closes and always closes it, reporting
+  `tmux_ended`. The client re-checks that the pane it asked about is still the
+  one in that slot. Workspace close and quit only detach.
+- **Restore brings back the session, nothing else.** With the gate on, a tmux
+  pane's snapshot is `_tmux_pane_snapshot()`: host, port, user, title, name and
+  the launch directory in both directory slots, every other field a plain
+  terminal's default — no agent, mode, startup command, conversation or
+  observed directory. A reusable preset keeps the option and the name, typed or
+  generated, so launching it reattaches the same session; a second launch while
+  that pane is open is refused like any shared name.
 
 ## Agent tools (MCP)
 

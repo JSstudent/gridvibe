@@ -229,6 +229,16 @@ Rules that hold for all three:
 - **No lock spans the two halves.** The manager snapshot is taken and released,
   *then* the file locks are acquired. Never hold `SessionManager.lock` while
   writing a state file or emitting.
+- **A tmux pane is captured as the session it runs in, nothing more.** While
+  the experimental `ssh.tmux_sessions` setting is on (gate:
+  `tmux_sessions_enabled()`), a pane with a `tmux_session` is reduced by
+  `_tmux_pane_snapshot()` to host, port, user, title, the session name and its
+  launch directory in both directory slots; every other field is a plain
+  terminal's default, so no agent, mode, startup command, conversation or
+  observed directory is stored. Off, every pane writes `tmux_session: ""` and is
+  captured as it always was. A pane whose host had no tmux has its name cleared
+  at connect, so it is captured as the plain SSH pane it became. See
+  [SSH tmux sessions](engineering_contracts.md#ssh-tmux-sessions).
 - `manually_saved_at` pins a slot the user saved by hand, so the auto-slot cap
   (`MAX_AUTO_WORKSPACE_SLOTS`) only ever collects *stale closed* automatic
   slots — never a live workspace, never a pinned one.
@@ -309,6 +319,12 @@ server state.**
   resume; it refuses a pair on any other launch. A
   conversation the provider no longer has shows the CLI's own error; it is
   never retried as a new one.
+- **A restored tmux pane is a terminal that attaches.** Its stored name rides
+  the normal launch path (`launch_session_name()`, `restore: True`), so an
+  invalid name, or one another open pane already holds on that host, is
+  dropped and the pane opens a plain shell instead of failing the restore. A
+  session that has gone is recreated in the stored launch directory, or the
+  home directory with a notice when that folder is missing on the host.
 - A restore is claimed atomically per workspace id (`already_restoring`), and a
   workspace that already has groups is refused (`already_live`) rather than
   duplicating every tab. The slot's exact id is reused, so the next autosave
