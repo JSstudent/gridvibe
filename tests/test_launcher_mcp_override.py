@@ -65,6 +65,11 @@ def _launcher_helpers() -> str:
                 "    function syncTerminalAgentMcpState(row, commandMode, selectedAgent) {",
                 "    function _resetAgentOptionLabels(select) {",
             ),
+            _slice(
+                source,
+                "    function isTerminalFollowerRow(row) {",
+                "    function setTerminalRowFollows(row, follows) {",
+            ),
         ]
     )
 
@@ -120,7 +125,7 @@ function el({ classes = [], checked = false, disabled = false, dataset = {}, chi
 
 /* A row as the launcher renders it for an agent whose MCP box is shown. */
 function makeRow({ mode = 'agent', agent = 'claude', mcp = false, override = false,
-                   overrideAgent = agent, mcpShown = true } = {}) {
+                   overrideAgent = agent, mcpShown = true, follows = false } = {}) {
     const mcpBox = el({ checked: mcp });
     const overrideBox = el({ checked: override, disabled: !mcp });
     const mcpField = el({
@@ -147,6 +152,7 @@ function makeRow({ mode = 'agent', agent = 'claude', mcp = false, override = fal
     };
     return {
         dataset: { commandMode: mode },
+        classList: { contains: name => follows && name === 't-row-follows' },
         querySelector: selector => nodes[selector] || null,
         select, mcpBox, overrideBox, mcpField, overrideField
     };
@@ -243,6 +249,11 @@ async function main() {
     row.select.value = 'agent:codex';
     sync(row);
     out.syncOtherAgentWithTools = boxState(row);
+
+    row = makeRow({ mcp: true, override: true, follows: true });
+    sync(row);
+    out.syncFollower = boxState(row);
+    out.readFollower = readRowAgentMcpFlags(row, row.dataset.commandMode);
 
     /* ---- form -> launch payload / preset ---- */
     const read = r => readRowAgentMcpFlags(r, r.dataset.commandMode);
@@ -404,6 +415,15 @@ class LauncherOverrideToggleTestCase(unittest.TestCase):
         self.assertFalse(state["override"])
         self.assertFalse(state["overrideDisabled"])
 
+    def test_a_row_following_terminal_one_never_carries_override(self):
+        # "Same for all" copies MCP, but override is a consent given per row:
+        # a follower's box is cleared and locked even beside ticked MCP.
+        state = self.out["syncFollower"]
+        self.assertTrue(state["mcp"])
+        self.assertFalse(state["override"])
+        self.assertTrue(state["overrideDisabled"])
+        self.assertFalse(self.out["readFollower"]["agent_mcp_override"])
+
     def test_leaving_agent_mode_clears_the_override(self):
         self.assertFalse(self.out["leaveAgent"]["override"])
 
@@ -472,7 +492,7 @@ class LauncherOverrideWiringTestCase(unittest.TestCase):
         source = LAUNCHER_JS.read_text(encoding="utf-8")
         bind = _slice(
             source,
-            "    function bindTerminalRowInteractions() {",
+            "    function bindTerminalRowInteractions(",
             "    function buildTerminalRows(",
         )
         self.assertIn("'.t-agent-mcp-override'", bind)
@@ -481,7 +501,7 @@ class LauncherOverrideWiringTestCase(unittest.TestCase):
 
         collect = _slice(
             source,
-            "    function collectTerminalDrafts() {",
+            "    function collectTerminalDraft(row, index) {",
             "    function renderCountOptions()",
         )
         self.assertIn("readRowAgentMcpFlags(", collect)

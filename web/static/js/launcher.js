@@ -84,6 +84,45 @@
 
     function onAppSettingsApplied(data) {
         installKind = data?.install_kind === 'source' ? 'source' : 'git';
+        syncAllTerminalTmuxState();
+    }
+
+    /* The experimental tmux option (App Settings -> Terminal). Off, the
+       launcher shows no tmux fields; a row's own choice is kept in the hidden
+       inputs, so saving a preset meanwhile does not drop it, and the server
+       ignores it at launch. */
+    function tmuxSessionsEnabled() {
+        return appSettings?.ssh?.tmux_sessions === true;
+    }
+
+    function terminalTmuxAvailable(row) {
+        const commandMode = getTerminalCommandMode(row);
+        return connectionMode === 'ssh'
+            && (commandMode === 'terminal' || commandMode === 'command' || commandMode === 'agent');
+    }
+
+    function syncTerminalTmuxState(row) {
+        const field = row.querySelector('.t-tmux-field');
+        if (!field) {
+            return;
+        }
+        field.classList.toggle('hidden', !(tmuxSessionsEnabled() && terminalTmuxAvailable(row)));
+        const enabled = Boolean(row.querySelector('.t-tmux')?.checked);
+        row.querySelector('.t-tmux-name-field')?.classList.toggle('hidden', !enabled);
+    }
+
+    function syncAllTerminalTmuxState() {
+        document.querySelectorAll('.t-row').forEach(row => syncTerminalTmuxState(row));
+    }
+
+    function readRowTmuxFields(row) {
+        if (!terminalTmuxAvailable(row) || !row.querySelector('.t-tmux')?.checked) {
+            return { tmux: false, tmux_session: '' };
+        }
+        return {
+            tmux: true,
+            tmux_session: row.querySelector('.t-tmux-session')?.value.trim() || ''
+        };
     }
 
     initTheme();
@@ -140,6 +179,11 @@
     let activeWorkspaceLayout = null;
     let cachedWslDistros = null;
     let lastTerminalSetupTargetSignature = '';
+    /* Terminal Setup's "Same for all" box. Page state only: it is never
+       saved, and importing a preset turns it off (applySessionConfig), so a
+       preset's own per-pane rows are never overwritten just by loading it. */
+    let terminalApplyAll = false;
+    let terminalApplyAllTimer = null;
     let installKind = 'git';
     const agentPreflightRequestState = new WeakMap();
     const agentPreflightTimerState = new WeakMap();
@@ -794,114 +838,125 @@
         return (warningCount || retargetedCount) ? 'warning' : 'success';
     }
 
+    /* One row's draft. Throws when the row cannot be launched as it stands
+       (a browser row with no usable URL) -- the message names the field. */
+    function collectTerminalDraft(row, index) {
+        const commandMode = getTerminalCommandMode(row);
+        const initialCommand = buildTerminalInitialCommand(row);
+        const directory = row.querySelector('.t-dir').value.trim();
+        /* Persisted explorer tab paths are relative to the root the pane
+           was saved under, and the row's directory is what selects that
+           root. Editing it after importing a saved session retargets the
+           pane, so paths captured under the old root would reopen as
+           missing files — drop them and let the relaunched pane start on
+           its own root instead. */
+        const explorerTabsMatchRoot = directory === (row.dataset.explorerTabsDir || '');
+        /* Browser rows only expose the active URL as an input; the rest of
+           the tab strip rides along in the dataset so importing a saved
+           multi-tab pane and re-saving it keeps every tab. The visible
+           input is authoritative for the active slot — otherwise editing
+           the URL here would be overwritten by the stale stored tab. */
+        const browserActiveTab = Number(row.dataset.browserActiveTab) || 0;
+        const browserTabs = commandMode === 'browser'
+            ? parseStringArrayDataset(row.dataset.browserTabs)
+            : [];
+        if (commandMode === 'browser' && initialCommand) {
+            if (browserActiveTab < browserTabs.length) {
+                browserTabs[browserActiveTab] = initialCommand;
+            } else {
+                browserTabs.push(initialCommand);
+            }
+        }
+        const agentMcpFlags = readRowAgentMcpFlags(row, commandMode);
+        const tmuxFields = readRowTmuxFields(row);
+        return {
+            title: row.querySelector('.t-title')?.value.trim() || `Terminal ${index + 1}`,
+            directory,
+            /* An imported explorer row carries the root it was saved under
+               through the form, so re-saving a preset from here keeps a
+               root that is wider than the folder the pane was browsing.
+               It is dropped by the same signal as the tabs and the pin:
+               once the row's directory has been edited the saved root no
+               longer describes this row, and the launch derives one from
+               the directory the user typed instead. */
+            explorer_root_directory: commandMode === 'explorer' && explorerTabsMatchRoot
+                ? (row.dataset.explorerRootDir || '')
+                : '',
+            explorer_root_configured: commandMode === 'explorer' && explorerTabsMatchRoot
+                && row.dataset.explorerRootConfigured === 'true',
+            initial_command: initialCommand,
+            initial_command_mode: commandMode === 'agent'
+                ? 'agent'
+                : (commandMode === 'explorer' || commandMode === 'browser' ? commandMode : 'command'),
+            startup_mode: commandMode === 'agent'
+                ? 'agent'
+                : (commandMode === 'explorer' || commandMode === 'browser' ? commandMode : 'terminal'),
+            agent_selection: commandMode === 'agent' ? getRowAgentSelection(row) : '',
+            custom_agent: commandMode === 'agent'
+                ? (row.querySelector('.t-agent-custom')?.value.trim() || '')
+                : '',
+            agent_auto_mode: commandMode === 'agent'
+                && Boolean(agentAutoModeFlag(getRowAgentSelection(row)))
+                && Boolean(row.querySelector('.t-agent-auto-mode')?.checked),
+            agent_mcp: agentMcpFlags.agent_mcp,
+            agent_mcp_override: agentMcpFlags.agent_mcp_override,
+            explorer_tree_open: commandMode === 'explorer' && row.dataset.explorerTreeOpen === 'true',
+            explorer_git_open: commandMode === 'explorer' && row.dataset.explorerGitOpen === 'true',
+            explorer_git_follow_browsing: commandMode === 'explorer'
+                && row.dataset.explorerGitFollowBrowsing === 'true',
+            explorer_git_pin_active: commandMode === 'explorer' && explorerTabsMatchRoot
+                && row.dataset.explorerGitPinActive === 'true',
+            explorer_git_pinned_path: commandMode === 'explorer' && explorerTabsMatchRoot
+                ? (row.dataset.explorerGitPinnedPath || '')
+                : '',
+            explorer_git_pin_kind: commandMode === 'explorer' && explorerTabsMatchRoot
+                && row.dataset.explorerGitPinKind === 'file'
+                ? 'file'
+                : 'dir',
+            explorer_search_open: commandMode === 'explorer' && row.dataset.explorerSearchOpen === 'true',
+            explorer_open_tabs: commandMode === 'explorer' && explorerTabsMatchRoot
+                ? parseStringArrayDataset(row.dataset.explorerOpenTabs)
+                : [],
+            explorer_active_tab: commandMode === 'explorer' && explorerTabsMatchRoot
+                ? (row.dataset.explorerActiveTab || '')
+                : '',
+            explorer_tab_views: commandMode === 'explorer' && explorerTabsMatchRoot
+                ? parseExplorerTabViewsDataset(row.dataset.explorerTabViews)
+                : {},
+            explorer_md_preset: commandMode === 'explorer' ? (row.dataset.explorerMdPreset || '') : '',
+            explorer_md_font: commandMode === 'explorer' ? (row.dataset.explorerMdFont || '') : '',
+            explorer_source_font: commandMode === 'explorer' ? (row.dataset.explorerSourceFont || '') : '',
+            explorer_theme: commandMode === 'explorer' ? (row.dataset.explorerTheme || 'dark') : '',
+            /* Browser rows only expose the active URL as an input; the rest
+               of the tab strip rides along in the dataset so importing a
+               saved multi-tab pane and re-saving it keeps every tab. */
+            browser_tabs: browserTabs,
+            browser_active_tab: commandMode === 'browser'
+                ? Math.max(0, Math.min(browserTabs.length - 1, browserActiveTab))
+                : 0,
+            distribution: LOCAL_WINDOWS_SHELLS_AVAILABLE ? (row.querySelector('.t-distribution')?.value.trim() || '') : '',
+            use_wsl: LOCAL_WINDOWS_SHELLS_AVAILABLE && commandMode !== 'explorer' && commandMode !== 'browser'
+                ? Boolean(row.querySelector('.t-use-wsl')?.checked)
+                : false,
+            use_powershell: LOCAL_WINDOWS_SHELLS_AVAILABLE && commandMode !== 'explorer' && commandMode !== 'browser'
+                ? Boolean(row.querySelector('.t-use-powershell')?.checked)
+                : false,
+            tmux: tmuxFields.tmux,
+            tmux_session: tmuxFields.tmux_session
+        };
+    }
+
     function collectTerminalDrafts() {
+        /* Every reader of the form -- the launch, a preset save, a count
+           change -- reads the followers, so a copy still waiting on typing
+           lands first. */
+        flushTerminalTemplateSync();
         const rows = Array.from(document.querySelectorAll('.t-row'));
         if (!rows.length) {
             return DEFAULT_TERMINALS.map(item => ({ ...item }));
         }
 
-        const drafts = rows.map((row, index) => {
-            const commandMode = getTerminalCommandMode(row);
-            const initialCommand = buildTerminalInitialCommand(row);
-            const directory = row.querySelector('.t-dir').value.trim();
-            /* Persisted explorer tab paths are relative to the root the pane
-               was saved under, and the row's directory is what selects that
-               root. Editing it after importing a saved session retargets the
-               pane, so paths captured under the old root would reopen as
-               missing files — drop them and let the relaunched pane start on
-               its own root instead. */
-            const explorerTabsMatchRoot = directory === (row.dataset.explorerTabsDir || '');
-            /* Browser rows only expose the active URL as an input; the rest of
-               the tab strip rides along in the dataset so importing a saved
-               multi-tab pane and re-saving it keeps every tab. The visible
-               input is authoritative for the active slot — otherwise editing
-               the URL here would be overwritten by the stale stored tab. */
-            const browserActiveTab = Number(row.dataset.browserActiveTab) || 0;
-            const browserTabs = commandMode === 'browser'
-                ? parseStringArrayDataset(row.dataset.browserTabs)
-                : [];
-            if (commandMode === 'browser' && initialCommand) {
-                if (browserActiveTab < browserTabs.length) {
-                    browserTabs[browserActiveTab] = initialCommand;
-                } else {
-                    browserTabs.push(initialCommand);
-                }
-            }
-            const agentMcpFlags = readRowAgentMcpFlags(row, commandMode);
-            return {
-                title: row.querySelector('.t-title')?.value.trim() || `Terminal ${index + 1}`,
-                directory,
-                /* An imported explorer row carries the root it was saved under
-                   through the form, so re-saving a preset from here keeps a
-                   root that is wider than the folder the pane was browsing.
-                   It is dropped by the same signal as the tabs and the pin:
-                   once the row's directory has been edited the saved root no
-                   longer describes this row, and the launch derives one from
-                   the directory the user typed instead. */
-                explorer_root_directory: commandMode === 'explorer' && explorerTabsMatchRoot
-                    ? (row.dataset.explorerRootDir || '')
-                    : '',
-                explorer_root_configured: commandMode === 'explorer' && explorerTabsMatchRoot
-                    && row.dataset.explorerRootConfigured === 'true',
-                initial_command: initialCommand,
-                initial_command_mode: commandMode === 'agent'
-                    ? 'agent'
-                    : (commandMode === 'explorer' || commandMode === 'browser' ? commandMode : 'command'),
-                startup_mode: commandMode === 'agent'
-                    ? 'agent'
-                    : (commandMode === 'explorer' || commandMode === 'browser' ? commandMode : 'terminal'),
-                agent_selection: commandMode === 'agent' ? getRowAgentSelection(row) : '',
-                custom_agent: commandMode === 'agent'
-                    ? (row.querySelector('.t-agent-custom')?.value.trim() || '')
-                    : '',
-                agent_auto_mode: commandMode === 'agent'
-                    && Boolean(agentAutoModeFlag(getRowAgentSelection(row)))
-                    && Boolean(row.querySelector('.t-agent-auto-mode')?.checked),
-                agent_mcp: agentMcpFlags.agent_mcp,
-                agent_mcp_override: agentMcpFlags.agent_mcp_override,
-                explorer_tree_open: commandMode === 'explorer' && row.dataset.explorerTreeOpen === 'true',
-                explorer_git_open: commandMode === 'explorer' && row.dataset.explorerGitOpen === 'true',
-                explorer_git_follow_browsing: commandMode === 'explorer'
-                    && row.dataset.explorerGitFollowBrowsing === 'true',
-                explorer_git_pin_active: commandMode === 'explorer' && explorerTabsMatchRoot
-                    && row.dataset.explorerGitPinActive === 'true',
-                explorer_git_pinned_path: commandMode === 'explorer' && explorerTabsMatchRoot
-                    ? (row.dataset.explorerGitPinnedPath || '')
-                    : '',
-                explorer_git_pin_kind: commandMode === 'explorer' && explorerTabsMatchRoot
-                    && row.dataset.explorerGitPinKind === 'file'
-                    ? 'file'
-                    : 'dir',
-                explorer_search_open: commandMode === 'explorer' && row.dataset.explorerSearchOpen === 'true',
-                explorer_open_tabs: commandMode === 'explorer' && explorerTabsMatchRoot
-                    ? parseStringArrayDataset(row.dataset.explorerOpenTabs)
-                    : [],
-                explorer_active_tab: commandMode === 'explorer' && explorerTabsMatchRoot
-                    ? (row.dataset.explorerActiveTab || '')
-                    : '',
-                explorer_tab_views: commandMode === 'explorer' && explorerTabsMatchRoot
-                    ? parseExplorerTabViewsDataset(row.dataset.explorerTabViews)
-                    : {},
-                explorer_md_preset: commandMode === 'explorer' ? (row.dataset.explorerMdPreset || '') : '',
-                explorer_md_font: commandMode === 'explorer' ? (row.dataset.explorerMdFont || '') : '',
-                explorer_source_font: commandMode === 'explorer' ? (row.dataset.explorerSourceFont || '') : '',
-                explorer_theme: commandMode === 'explorer' ? (row.dataset.explorerTheme || 'dark') : '',
-                /* Browser rows only expose the active URL as an input; the rest
-                   of the tab strip rides along in the dataset so importing a
-                   saved multi-tab pane and re-saving it keeps every tab. */
-                browser_tabs: browserTabs,
-                browser_active_tab: commandMode === 'browser'
-                    ? Math.max(0, Math.min(browserTabs.length - 1, browserActiveTab))
-                    : 0,
-                distribution: LOCAL_WINDOWS_SHELLS_AVAILABLE ? (row.querySelector('.t-distribution')?.value.trim() || '') : '',
-                use_wsl: LOCAL_WINDOWS_SHELLS_AVAILABLE && commandMode !== 'explorer' && commandMode !== 'browser'
-                    ? Boolean(row.querySelector('.t-use-wsl')?.checked)
-                    : false,
-                use_powershell: LOCAL_WINDOWS_SHELLS_AVAILABLE && commandMode !== 'explorer' && commandMode !== 'browser'
-                    ? Boolean(row.querySelector('.t-use-powershell')?.checked)
-                    : false
-            };
-        });
+        const drafts = rows.map(collectTerminalDraft);
 
         while (drafts.length < MAX_SESSIONS) {
             drafts.push({ ...DEFAULT_TERMINALS[drafts.length] });
@@ -1041,6 +1096,7 @@
         initShowPasswordButton();
         initSshPingButton();
         bindModeFieldInteractions();
+        syncAllTerminalTmuxState();
     }
 
     function initShowPasswordButton() {
@@ -1584,6 +1640,7 @@
             if (powershellCheckbox) powershellCheckbox.checked = false;
         }
         syncTerminalWslState(row);
+        syncTerminalTmuxState(row);
         syncStartupModePicker(startupModeSelect);
     }
 
@@ -1661,9 +1718,12 @@
         overrideField.classList.toggle('hidden', !shown);
         overrideField.classList.toggle('is-disabled', !mcpOn);
         const checkbox = overrideField.querySelector('.t-agent-mcp-override');
+        /* A row following Terminal 1 never carries override: "Same for all"
+           copies settings, and this is a consent given per row. */
+        const follows = isTerminalFollowerRow(row);
         if (checkbox) {
-            checkbox.disabled = !mcpOn;
-            if (!mcpOn || agentChanged) {
+            checkbox.disabled = !mcpOn || follows;
+            if (!mcpOn || agentChanged || follows) {
                 checkbox.checked = false;
                 /* Withdraws a confirmation still open for the old answer. */
                 checkbox.dataset.consentEpoch = String(Number(checkbox.dataset.consentEpoch || 0) + 1);
@@ -1989,7 +2049,10 @@
             return;
         }
 
-        if (getTerminalCommandMode(row) !== 'agent') {
+        /* A follower runs the agent Terminal 1 runs, on the same target and
+           shell, so Terminal 1's check already answers for it — and one check
+           per follower on every edit would be one SSH probe per pane. */
+        if (getTerminalCommandMode(row) !== 'agent' || isTerminalFollowerRow(row)) {
             clearAgentPreflight(row);
             return;
         }
@@ -2076,8 +2139,8 @@
         scheduleAgentPreflight(row, 120);
     }
 
-    function bindTerminalRowInteractions() {
-        document.querySelectorAll('.t-row').forEach(row => {
+    function bindTerminalRowInteractions(rows = document.querySelectorAll('.t-row')) {
+        rows.forEach(row => {
             const wslCheckbox = row.querySelector('.t-use-wsl');
             const powershellCheckbox = row.querySelector('.t-use-powershell');
             const distributionInput = row.querySelector('.t-distribution');
@@ -2105,6 +2168,7 @@
             overrideCheckbox?.addEventListener('change', () => {
                 handleAgentMcpOverrideToggle(overrideCheckbox);
             });
+            row.querySelector('.t-tmux')?.addEventListener('change', () => syncTerminalTmuxState(row));
             syncTerminalCommandState(row);
             syncTerminalWslState(row);
             scheduleAgentPreflight(row, 30);
@@ -2122,153 +2186,180 @@
 
         container.innerHTML = Array.from({ length: count }, (_, index) => {
             const terminal = usableDrafts[index] || DEFAULT_TERMINALS[index];
-            const commandUi = normalizeTerminalCommandUi(terminal);
-            if (connectionMode !== 'wsl' && commandUi.mode === 'browser') {
-                commandUi.mode = 'terminal';
-                commandUi.commandValue = '';
-            }
             const rowCollapsed = index < previousFoldState.length
                 ? previousFoldState[index]
                 : count >= 3;
-            return `
-                <div
-                    class="t-row${rowCollapsed ? ' t-row-collapsed' : ''}"
-                    data-command-mode="${escHtml(commandUi.mode)}"
-                    data-explorer-tree-open="${terminal.explorer_tree_open ? 'true' : 'false'}"
-                    data-explorer-git-open="${terminal.explorer_git_open ? 'true' : 'false'}"
-                    data-explorer-git-follow-browsing="${terminal.explorer_git_follow_browsing ? 'true' : 'false'}"
-                    data-explorer-git-pin-active="${terminal.explorer_git_pin_active ? 'true' : 'false'}"
-                    data-explorer-git-pinned-path="${escHtml(terminal.explorer_git_pinned_path || '')}"
-                    data-explorer-git-pin-kind="${terminal.explorer_git_pin_kind === 'file' ? 'file' : 'dir'}"
-                    data-explorer-search-open="${terminal.explorer_search_open ? 'true' : 'false'}"
-                    data-explorer-open-tabs="${escHtml(JSON.stringify(Array.isArray(terminal.explorer_open_tabs) ? terminal.explorer_open_tabs : []))}"
-                    data-explorer-tabs-dir="${escHtml(terminal.directory || '')}"
-                    data-explorer-root-dir="${escHtml(terminal.explorer_root_directory || '')}"
-                    data-explorer-root-configured="${terminal.explorer_root_configured ? 'true' : 'false'}"
-                    data-explorer-active-tab="${escHtml(terminal.explorer_active_tab || '')}"
-                    data-explorer-tab-views="${escHtml(JSON.stringify(terminal.explorer_tab_views && typeof terminal.explorer_tab_views === 'object' ? terminal.explorer_tab_views : {}))}"
-                    data-explorer-md-preset="${escHtml(terminal.explorer_md_preset || '')}"
-                    data-explorer-md-font="${escHtml(terminal.explorer_md_font || '')}"
-                    data-explorer-source-font="${escHtml(terminal.explorer_source_font || '')}"
-                    data-explorer-theme="${escHtml(terminal.explorer_theme || 'dark')}"
-                    data-browser-tabs="${escHtml(JSON.stringify(Array.isArray(terminal.browser_tabs) ? terminal.browser_tabs : []))}"
-                    data-browser-active-tab="${escHtml(String(Number(terminal.browser_active_tab) || 0))}"
-                >
-                    <div class="t-row-head" onclick="onTerminalRowHeadClick(event)">
-                        <span class="t-badge">T${index + 1}</span>
-                        <input class="t-title" type="text" value="${escHtml(terminal.title || `Terminal ${index + 1}`)}" placeholder="Terminal ${index + 1}" aria-label="Terminal ${index + 1} title">
-                        <button
-                            type="button"
-                            class="t-row-fold-btn"
-                            onclick="toggleTerminalRowFold(this)"
-                            aria-expanded="${rowCollapsed ? 'false' : 'true'}"
-                            aria-label="Fold Terminal ${index + 1} settings"
-                            title="Fold Terminal ${index + 1} settings"
-                        >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m6 9 6 6 6-6"></path></svg>
-                        </button>
-                        <span class="t-status-dot"></span>
-                    </div>
-                    <div class="t-fields">
-                        <div class="field">
-                            <label>Subdirectory</label>
-                            <input class="t-dir" type="text" value="${escHtml(terminal.directory || '')}" placeholder="Relative to Step 2 folder" title="Optional path inside the Step 2 default folder">
-                        </div>
-                        <div class="field">
-                            <label>Startup Mode</label>
-                            <select class="startup-mode-select">
-                                ${renderStartupModeOptions(commandUi)}
-                            </select>
-                        </div>
-                        <div class="field t-command-field ${commandUi.mode === 'command' ? '' : 'hidden'}">
-                            <label>Initial Command</label>
-                            <input class="t-cmd" type="text" value="${escHtml(commandUi.mode === 'command' ? commandUi.commandValue : '')}" placeholder="Blank = shell only">
-                        </div>
-                        <div class="field t-browser-field ${commandUi.mode === 'browser' ? '' : 'hidden'}">
-                            <label>Browser URL</label>
-                            <!-- Each mode seeds only its own input. commandValue is the
-                                 draft's single initial_command, so in agent mode it holds
-                                 the agent name ("claude") — piping it into the hidden URL
-                                 box left the pane pointed at http://claude/ the moment the
-                                 user switched to Browser. -->
-                            <input class="t-browser-url" type="url" value="${escHtml(commandUi.mode === 'browser' ? (commandUi.commandValue || DEFAULT_BROWSER_PANE_URL) : DEFAULT_BROWSER_PANE_URL)}" placeholder="${escHtml(DEFAULT_BROWSER_PANE_URL)}">
-                        </div>
-                        <div class="field t-agent-field ${commandUi.mode === 'agent' ? '' : 'hidden'}">
-                            <details class="agent-preflight-disclosure">
-                                <summary class="agent-preflight-summary">
-                                    <span class="agent-preflight-summary-label"></span>
-                                </summary>
-                                <div class="agent-preflight-copy"></div>
-                            </details>
-                            <label class="check-field t-agent-auto-field ${commandUi.mode === 'agent' && agentAutoModeFlag(commandUi.agentSelection) ? '' : 'hidden'}">
-                                <input class="t-agent-auto-mode" type="checkbox" ${commandUi.agentAutoMode ? 'checked' : ''} aria-label="Launch agent in auto mode">
-                                <span class="check-copy">
-                                    <strong>Auto mode</strong>
-                                </span>
-                                <button
-                                    type="button"
-                                    class="tip-btn"
-                                    aria-expanded="false"
-                                    aria-label="Explain auto mode"
-                                    onclick="toggleInlineTip(this)"
-                                >?</button>
-                            </label>
-                            <div class="inline-tip t-agent-auto-help"></div>
-                            ${renderTerminalAgentMcpFields(commandUi)}
-                        </div>
-                        <div class="field t-agent-custom-field ${commandUi.mode === 'agent' && commandUi.agentSelection === 'other' ? '' : 'hidden'}">
-                            <label>Custom Agent</label>
-                            <input class="t-agent-custom" type="text" value="${escHtml(commandUi.customAgent)}" placeholder="Enter agent command">
-                        </div>
-                        ${LOCAL_WINDOWS_SHELLS_AVAILABLE ? `
-                        <div class="field t-shell-field ${connectionMode === 'wsl' && commandUi.mode !== 'explorer' && commandUi.mode !== 'browser' ? '' : 'hidden'}">
-                            <div class="field-label-row">
-                                <label>Shell</label>
-                                <button
-                                    type="button"
-                                    class="tip-btn"
-                                    aria-expanded="false"
-                                    aria-label="Show WSL shell tip"
-                                    onclick="toggleInlineTip(this)"
-                                >?</button>
-                            </div>
-                            <div class="check-stack">
-                                <label class="check-field">
-                                    <input class="t-use-wsl" type="checkbox" ${terminal.use_wsl ? 'checked' : ''}>
-                                    <span class="check-copy">
-                                        <strong>Prefer WSL</strong>
-                                    </span>
-                                </label>
-                                <label class="check-field">
-                                    <input class="t-use-powershell" type="checkbox" ${terminal.use_powershell ? 'checked' : ''}>
-                                    <span class="check-copy">
-                                        <strong>Use PowerShell</strong>
-                                    </span>
-                                </label>
-                            </div>
-                            <div class="inline-tip">Leave both off for cmd. WSL and PowerShell are mutually exclusive per pane.</div>
-                        </div>
-                        <div class="field t-distribution-field ${connectionMode === 'wsl' && terminal.use_wsl ? '' : 'hidden'}">
-                            <div class="field-label-row">
-                                <label>Ubuntu Distro</label>
-                                <button
-                                    type="button"
-                                    class="tip-btn"
-                                    aria-expanded="false"
-                                    aria-label="Show Ubuntu distro tip"
-                                    onclick="toggleUbuntuDistroTip(this)"
-                                >?</button>
-                            </div>
-                            <input class="t-distribution" type="text" value="${escHtml(terminal.distribution || '')}" placeholder="Ubuntu">
-                            <div class="inline-tip">Checking local WSL distros...</div>
-                        </div>
-                        ` : ''}
-                    </div>
-                </div>
-            `;
+            return terminalRowMarkup(terminal, index, rowCollapsed);
         }).join('');
 
         bindTerminalRowInteractions();
+        syncTerminalApplyAllControl();
+        if (terminalApplyAll) {
+            applyTerminalTemplateToFollowers();
+        }
+    }
+
+    function terminalRowMarkup(terminal, index, rowCollapsed) {
+        const commandUi = normalizeTerminalCommandUi(terminal);
+        if (connectionMode !== 'wsl' && commandUi.mode === 'browser') {
+            commandUi.mode = 'terminal';
+            commandUi.commandValue = '';
+        }
+        return `
+            <div
+                class="t-row${rowCollapsed ? ' t-row-collapsed' : ''}"
+                data-command-mode="${escHtml(commandUi.mode)}"
+                data-explorer-tree-open="${terminal.explorer_tree_open ? 'true' : 'false'}"
+                data-explorer-git-open="${terminal.explorer_git_open ? 'true' : 'false'}"
+                data-explorer-git-follow-browsing="${terminal.explorer_git_follow_browsing ? 'true' : 'false'}"
+                data-explorer-git-pin-active="${terminal.explorer_git_pin_active ? 'true' : 'false'}"
+                data-explorer-git-pinned-path="${escHtml(terminal.explorer_git_pinned_path || '')}"
+                data-explorer-git-pin-kind="${terminal.explorer_git_pin_kind === 'file' ? 'file' : 'dir'}"
+                data-explorer-search-open="${terminal.explorer_search_open ? 'true' : 'false'}"
+                data-explorer-open-tabs="${escHtml(JSON.stringify(Array.isArray(terminal.explorer_open_tabs) ? terminal.explorer_open_tabs : []))}"
+                data-explorer-tabs-dir="${escHtml(terminal.directory || '')}"
+                data-explorer-root-dir="${escHtml(terminal.explorer_root_directory || '')}"
+                data-explorer-root-configured="${terminal.explorer_root_configured ? 'true' : 'false'}"
+                data-explorer-active-tab="${escHtml(terminal.explorer_active_tab || '')}"
+                data-explorer-tab-views="${escHtml(JSON.stringify(terminal.explorer_tab_views && typeof terminal.explorer_tab_views === 'object' ? terminal.explorer_tab_views : {}))}"
+                data-explorer-md-preset="${escHtml(terminal.explorer_md_preset || '')}"
+                data-explorer-md-font="${escHtml(terminal.explorer_md_font || '')}"
+                data-explorer-source-font="${escHtml(terminal.explorer_source_font || '')}"
+                data-explorer-theme="${escHtml(terminal.explorer_theme || 'dark')}"
+                data-browser-tabs="${escHtml(JSON.stringify(Array.isArray(terminal.browser_tabs) ? terminal.browser_tabs : []))}"
+                data-browser-active-tab="${escHtml(String(Number(terminal.browser_active_tab) || 0))}"
+            >
+                <div class="t-row-head" onclick="onTerminalRowHeadClick(event)">
+                    <span class="t-badge">T${index + 1}</span>
+                    <input class="t-title" type="text" value="${escHtml(terminal.title || `Terminal ${index + 1}`)}" placeholder="Terminal ${index + 1}" aria-label="Terminal ${index + 1} title">
+                    <button
+                        type="button"
+                        class="t-row-fold-btn"
+                        onclick="toggleTerminalRowFold(this)"
+                        aria-expanded="${rowCollapsed ? 'false' : 'true'}"
+                        aria-label="Fold Terminal ${index + 1} settings"
+                        title="Fold Terminal ${index + 1} settings"
+                    >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m6 9 6 6 6-6"></path></svg>
+                    </button>
+                    <span class="t-status-dot"></span>
+                </div>
+                <div class="t-fields">
+                    <div class="field">
+                        <label>Subdirectory</label>
+                        <input class="t-dir" type="text" value="${escHtml(terminal.directory || '')}" placeholder="Relative to Step 2 folder" title="Optional path inside the Step 2 default folder">
+                    </div>
+                    <div class="field">
+                        <label>Startup Mode</label>
+                        <select class="startup-mode-select">
+                            ${renderStartupModeOptions(commandUi)}
+                        </select>
+                    </div>
+                    <div class="field t-command-field ${commandUi.mode === 'command' ? '' : 'hidden'}">
+                        <label>Initial Command</label>
+                        <input class="t-cmd" type="text" value="${escHtml(commandUi.mode === 'command' ? commandUi.commandValue : '')}" placeholder="Blank = shell only">
+                    </div>
+                    <div class="field t-browser-field ${commandUi.mode === 'browser' ? '' : 'hidden'}">
+                        <label>Browser URL</label>
+                        <!-- Each mode seeds only its own input. commandValue is the
+                             draft's single initial_command, so in agent mode it holds
+                             the agent name ("claude") — piping it into the hidden URL
+                             box left the pane pointed at http://claude/ the moment the
+                             user switched to Browser. -->
+                        <input class="t-browser-url" type="url" value="${escHtml(commandUi.mode === 'browser' ? (commandUi.commandValue || DEFAULT_BROWSER_PANE_URL) : DEFAULT_BROWSER_PANE_URL)}" placeholder="${escHtml(DEFAULT_BROWSER_PANE_URL)}">
+                    </div>
+                    <div class="field t-agent-field ${commandUi.mode === 'agent' ? '' : 'hidden'}">
+                        <details class="agent-preflight-disclosure">
+                            <summary class="agent-preflight-summary">
+                                <span class="agent-preflight-summary-label"></span>
+                            </summary>
+                            <div class="agent-preflight-copy"></div>
+                        </details>
+                        <label class="check-field t-agent-auto-field ${commandUi.mode === 'agent' && agentAutoModeFlag(commandUi.agentSelection) ? '' : 'hidden'}">
+                            <input class="t-agent-auto-mode" type="checkbox" ${commandUi.agentAutoMode ? 'checked' : ''} aria-label="Launch agent in auto mode">
+                            <span class="check-copy">
+                                <strong>Auto mode</strong>
+                            </span>
+                            <button
+                                type="button"
+                                class="tip-btn"
+                                aria-expanded="false"
+                                aria-label="Explain auto mode"
+                                onclick="toggleInlineTip(this)"
+                            >?</button>
+                        </label>
+                        <div class="inline-tip t-agent-auto-help"></div>
+                        ${renderTerminalAgentMcpFields(commandUi)}
+                    </div>
+                    <div class="field t-agent-custom-field ${commandUi.mode === 'agent' && commandUi.agentSelection === 'other' ? '' : 'hidden'}">
+                        <label>Custom Agent</label>
+                        <input class="t-agent-custom" type="text" value="${escHtml(commandUi.customAgent)}" placeholder="Enter agent command">
+                    </div>
+                    <div class="field t-tmux-field hidden">
+                        <label class="check-field">
+                            <input class="t-tmux" type="checkbox" ${terminal.tmux === true || (terminal.tmux !== false && terminal.tmux_session) ? 'checked' : ''} aria-label="Run this pane in tmux">
+                            <span class="check-copy">
+                                <strong>Run in tmux</strong>
+                            </span>
+                            <button
+                                type="button"
+                                class="tip-btn"
+                                aria-expanded="false"
+                                aria-label="Explain tmux sessions"
+                                onclick="toggleInlineTip(this)"
+                            >?</button>
+                        </label>
+                        <div class="inline-tip">Experimental. The pane runs in a tmux session on the host that keeps running after the pane closes or GridVibe exits, and reattaches on reconnect or restore. Only the session is restored, not the agent or mode. Scrollback, mouse and key handling follow your own tmux config, so turn on <code>set -g mouse on</code> to scroll in the pane.</div>
+                        <div class="t-tmux-name-field">
+                            <input class="t-tmux-session" type="text" maxlength="64" value="${escHtml(terminal.tmux_session || '')}" placeholder="tmux session (blank = new &lt;session name&gt;_… session)" aria-label="tmux session name" title="Letters, digits, - and _. Name an existing session to attach to it.">
+                        </div>
+                    </div>
+                    ${LOCAL_WINDOWS_SHELLS_AVAILABLE ? `
+                    <div class="field t-shell-field ${connectionMode === 'wsl' && commandUi.mode !== 'explorer' && commandUi.mode !== 'browser' ? '' : 'hidden'}">
+                        <div class="field-label-row">
+                            <label>Shell</label>
+                            <button
+                                type="button"
+                                class="tip-btn"
+                                aria-expanded="false"
+                                aria-label="Show WSL shell tip"
+                                onclick="toggleInlineTip(this)"
+                            >?</button>
+                        </div>
+                        <div class="check-stack">
+                            <label class="check-field">
+                                <input class="t-use-wsl" type="checkbox" ${terminal.use_wsl ? 'checked' : ''}>
+                                <span class="check-copy">
+                                    <strong>Prefer WSL</strong>
+                                </span>
+                            </label>
+                            <label class="check-field">
+                                <input class="t-use-powershell" type="checkbox" ${terminal.use_powershell ? 'checked' : ''}>
+                                <span class="check-copy">
+                                    <strong>Use PowerShell</strong>
+                                </span>
+                            </label>
+                        </div>
+                        <div class="inline-tip">Leave both off for cmd. WSL and PowerShell are mutually exclusive per pane.</div>
+                    </div>
+                    <div class="field t-distribution-field ${connectionMode === 'wsl' && terminal.use_wsl ? '' : 'hidden'}">
+                        <div class="field-label-row">
+                            <label>Ubuntu Distro</label>
+                            <button
+                                type="button"
+                                class="tip-btn"
+                                aria-expanded="false"
+                                aria-label="Show Ubuntu distro tip"
+                                onclick="toggleUbuntuDistroTip(this)"
+                            >?</button>
+                        </div>
+                        <input class="t-distribution" type="text" value="${escHtml(terminal.distribution || '')}" placeholder="Ubuntu">
+                        <div class="inline-tip">Checking local WSL distros...</div>
+                    </div>
+                    ` : ''}
+                </div>
+            </div>
+        `;
     }
 
     function toggleTerminalRowFold(button) {
@@ -2302,6 +2393,148 @@
         if (button) {
             toggleTerminalRowFold(button);
         }
+    }
+
+    /* ── "Same for all" ──
+
+       Terminal 1 is the template and the only card on show; every other row
+       is re-rendered from it (terminal-apply-all.js decides what is copied
+       and what each pane keeps) and hidden. The hidden rows still hold the
+       real values, so the launch, the preset save and the explorer-retarget
+       notice read the form exactly as before, and unticking shows each row
+       with what it was given. */
+    function isTerminalFollowerRow(row) {
+        return Boolean(row?.classList?.contains('t-row-follows'));
+    }
+
+    function setTerminalRowFollows(row, follows) {
+        row.classList.toggle('t-row-follows', follows);
+        /* Recompute the controls with rules of their own (override needs
+           MCP and never rides in a follower), and the preflight a row skips
+           while it follows. */
+        syncTerminalCommandState(row);
+        scheduleAgentPreflight(row, 60);
+    }
+
+    function applyTerminalTemplateToFollowers() {
+        const rows = Array.from(document.querySelectorAll('#terminalRows .t-row'));
+        const policy = window.GridVibeTerminalApplyAll;
+        if (rows.length < 2 || !policy) {
+            return;
+        }
+        let first;
+        try {
+            first = collectTerminalDraft(rows[0], 0);
+        } catch (_error) {
+            /* Terminal 1 is mid-edit into something the form cannot read yet
+               (an empty browser URL). The followers keep their last copy until
+               it reads again; the launch reports the field itself. */
+            return;
+        }
+        const drafts = rows.map((row, index) => {
+            let draft = first;
+            if (index > 0) {
+                /* Only Terminal 1 has to read: a follower's settings are
+                   about to be replaced, so one it could not launch with (a
+                   browser row with no URL yet) must not block the copy. All
+                   the copy keeps from such a row is its title. */
+                try {
+                    draft = collectTerminalDraft(row, index);
+                } catch (_error) {
+                    draft = { title: row.querySelector('.t-title')?.value.trim() || '' };
+                }
+            }
+            /* A row's tmux name is its own even while its box is unticked, so
+               a follower does not lose a typed name because Terminal 1 has
+               tmux off. */
+            return {
+                ...draft,
+                tmux_session: row.querySelector('.t-tmux-session')?.value.trim() || ''
+            };
+        });
+        const followed = policy.applyTemplateToDrafts(drafts, rows.length);
+        const template = document.createElement('template');
+        rows.slice(1).forEach((row, offset) => {
+            const index = offset + 1;
+            template.innerHTML = terminalRowMarkup(
+                followed[index],
+                index,
+                row.classList.contains('t-row-collapsed')
+            ).trim();
+            const replacement = template.content.firstElementChild;
+            replacement.classList.add('t-row-follows');
+            row.replaceWith(replacement);
+            bindTerminalRowInteractions([replacement]);
+            setTerminalRowFollows(replacement, true);
+        });
+    }
+
+    function releaseTerminalFollowers() {
+        document.querySelectorAll('#terminalRows .t-row.t-row-follows')
+            .forEach(row => setTerminalRowFollows(row, false));
+    }
+
+    /* The box, and Terminal 1's badge: while it stands for every pane it
+       says so, since it is the one card left on show. */
+    function syncTerminalApplyAllControl() {
+        const checkbox = document.getElementById('terminalApplyAll');
+        if (checkbox) {
+            checkbox.checked = terminalApplyAll;
+            checkbox.disabled = selectedCount < 2;
+        }
+        const badge = document.querySelector('#terminalRows .t-row .t-badge');
+        if (badge) {
+            const all = terminalApplyAll && selectedCount > 1;
+            badge.textContent = all ? 'All' : 'T1';
+            badge.title = all ? `Applies to all ${selectedCount} terminals` : '';
+        }
+    }
+
+    function toggleTerminalApplyAll(checkbox) {
+        /* Unticking shows each row with what it was last given, and that
+           includes the edit still waiting to be copied. */
+        flushTerminalTemplateSync();
+        terminalApplyAll = Boolean(checkbox?.checked);
+        if (terminalApplyAll) {
+            applyTerminalTemplateToFollowers();
+            /* The one card left is the one being edited, so open it. */
+            const first = document.querySelector('#terminalRows .t-row');
+            if (first?.classList.contains('t-row-collapsed')) {
+                toggleTerminalRowFold(first.querySelector('.t-row-fold-btn'));
+            }
+        } else {
+            releaseTerminalFollowers();
+        }
+        syncTerminalApplyAllControl();
+    }
+
+    /* An edit to Terminal 1's settings re-renders the followers. Typing is
+       coalesced; a pick or a tick applies at once. Terminal 1's title and
+       tmux name are its own and copy nowhere, so they re-render nothing. */
+    function scheduleTerminalTemplateSync(event) {
+        if (!terminalApplyAll) {
+            return;
+        }
+        const firstRow = document.querySelector('#terminalRows .t-row');
+        const target = event.target;
+        if (!firstRow || !firstRow.contains(target) || target.matches?.('.t-title, .t-tmux-session')) {
+            return;
+        }
+        window.clearTimeout(terminalApplyAllTimer);
+        terminalApplyAllTimer = window.setTimeout(
+            flushTerminalTemplateSync,
+            event.type === 'input' ? 250 : 0
+        );
+    }
+
+    /* Copy now the edit a coalesced sync is still waiting on, if any. */
+    function flushTerminalTemplateSync() {
+        if (terminalApplyAllTimer === null) {
+            return;
+        }
+        window.clearTimeout(terminalApplyAllTimer);
+        terminalApplyAllTimer = null;
+        applyTerminalTemplateToFollowers();
     }
 
     /* Panel fold state is a per-browser view preference, so it lives in
@@ -2403,6 +2636,11 @@
         });
 
         const defaultDir = getStep2DefaultDirectory(normalized, connectionMode);
+        /* Every row is replaced, so a copy still waiting on the old rows'
+           typing has nothing left to copy. */
+        terminalApplyAll = false;
+        window.clearTimeout(terminalApplyAllTimer);
+        terminalApplyAllTimer = null;
         buildTerminalRows(
             selectedCount,
             normalizeTerminalsForDisplay(normalized.terminals || DEFAULT_TERMINALS, defaultDir, connectionMode)
@@ -3903,7 +4141,10 @@
 
     async function launchSessions() {
         /* Read before the launch: `buildTerminalRows` rewrites the rows once
-           the group is open, and the edited directory is gone with them. */
+           the group is open, and the edited directory is gone with them.
+           Followers still owed Terminal 1's last edit get it first, so both
+           reads see the rows that launch. */
+        flushTerminalTemplateSync();
         const retargetedExplorer = retargetedExplorerRowTitles();
         const config = collectFormConfig();
         const button = document.getElementById('launchBtn');
@@ -4116,6 +4357,8 @@
     renderLayoutOptions();
     renderModeFields();
     buildTerminalRows(selectedCount, DEFAULT_TERMINALS);
+    document.getElementById('terminalRows').addEventListener('input', scheduleTerminalTemplateSync);
+    document.getElementById('terminalRows').addEventListener('change', scheduleTerminalTemplateSync);
     restoreLauncherPanelFolds();
     updateTerminalTargetSignature(connectionMode, collectModeInputs());
     loadPersistedConfig(true);

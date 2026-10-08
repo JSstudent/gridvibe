@@ -875,12 +875,16 @@ class PanePathBuilderTestCase(unittest.TestCase):
             function readRowAgentMcpFlags() {
                 return { agent_mcp: false, agent_mcp_override: false };
             }
+            function readRowTmuxFields() {
+                return { tmux: false, tmux_session: '' };
+            }
+            function flushTerminalTemplateSync() {}
         """
         launcher = STATIC_JS / "launcher.js"
         script = (
             stubs
             + self._slice(launcher, "    function parseStringArrayDataset(", "    /* Which explorer rows")
-            + self._slice(launcher, "    function collectTerminalDrafts(", "    function renderCountOptions(")
+            + self._slice(launcher, "    function collectTerminalDraft(", "    function renderCountOptions(")
             + "\nprocess.stdout.write(JSON.stringify(collectTerminalDrafts()[0]));\n"
         )
         with TemporaryDirectory() as script_dir:

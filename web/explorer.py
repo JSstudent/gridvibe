@@ -43,6 +43,7 @@ from web.process_bounds import (
     terminate_process_tree,
 )
 from web.rename_noreplace import rename_noreplace
+from web.ssh_connect import connect_ssh_client
 
 try:
     import paramiko
@@ -3930,7 +3931,8 @@ def _open_ssh_sftp(session: Any) -> Tuple[Any, Any]:
 
     client = paramiko.SSHClient()
     _apply_host_key_policy(client, paramiko)
-    client.connect(
+    connect_ssh_client(
+        client,
         hostname=session.host,
         port=session.port,
         username=session.username,

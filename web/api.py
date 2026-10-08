@@ -310,6 +310,8 @@ from web.session_modes import (  # noqa: F401 - re-exported for backwards compat
     _refresh_pane_cwd,
     apply_agent_pane_mode_change,
     apply_pane_mode_change,
+    apply_pane_tmux_change,
+    list_pane_tmux_sessions,
 )
 from web.session_presentation import (
     PresentationValidationError,
@@ -323,6 +325,9 @@ from web.session_shell import (  # noqa: F401 - re-exported for backwards compat
     apply_agent_pane_relaunch,
     apply_pane_shell_change,
 )
+from web.ssh_tmux import generate_session_name as generate_tmux_session_name
+from web.ssh_tmux import normalize_session_name as normalize_tmux_session_name
+from web.ssh_tmux import tmux_sessions_enabled
 from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatibility
     _MAX_TRACKED_SOCKET_CLIENTS,
     _MAX_TRACKED_TERMINAL_COMMAND_LENGTH,
@@ -347,6 +352,7 @@ from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatib
     _connect_session,
     _connect_ssh_session,
     _drain_until_prompt,
+    _end_tmux_session,
     _extract_terminal_cwd_from_buffer,
     _finalize_stream,
     _get_buffered_terminal_output,
@@ -439,6 +445,7 @@ from web.workspaces import (
     normalize_workspace_label,
     public_workspace_payload,
     rename_workspace_label,
+    reserve_tmux_close,
     restore_workspaces,
     workspace_has_groups,
     workspace_label,
@@ -514,6 +521,7 @@ def _public_app_config() -> Dict[str, Any]:
         },
         "ssh": {
             "host_key_policy": settings.ssh_host_key_policy,
+            "tmux_sessions": settings.ssh_tmux_sessions,
         },
         "terminal": {
             "font_family": settings.terminal_font_family,
@@ -625,6 +633,9 @@ def _normalize_app_config_update(data: Any, settings=None) -> Dict[str, Any]:
     ).strip().lower()
     if host_key_policy not in HOST_KEY_POLICY_OPTIONS:
         host_key_policy = settings.ssh_host_key_policy
+    tmux_sessions = ssh_settings.get("tmux_sessions", settings.ssh_tmux_sessions)
+    if not isinstance(tmux_sessions, bool):
+        tmux_sessions = settings.ssh_tmux_sessions
 
     terminal_settings = payload.get("terminal")
     if not isinstance(terminal_settings, dict):
@@ -684,6 +695,7 @@ def _normalize_app_config_update(data: Any, settings=None) -> Dict[str, Any]:
         },
         "ssh": {
             "host_key_policy": host_key_policy,
+            "tmux_sessions": tmux_sessions,
         },
         "terminal": {
             "font_family": font_family,
@@ -4149,6 +4161,18 @@ def split_session(session_id: str):
         root_directory = root_directory or directory
 
     title = f"Terminal {len(group_sessions) + 1}"
+    # A split of a tmux pane gets the tmux option with a session of its own,
+    # never the source pane's: two panes mirroring one session fight over it.
+    # Only a person's split: a session outlives GridVibe on the host, so a
+    # split an agent asked for opens a plain shell, as a tool launch does.
+    tmux_session = (
+        generate_tmux_session_name(group.name)
+        if source.mode == "ssh"
+        and getattr(source, "tmux_session", "")
+        and not creator_session_id
+        and tmux_sessions_enabled()
+        else ""
+    )
     fields = {
         "host": host,
         "directory": directory,
@@ -4171,8 +4195,14 @@ def split_session(session_id: str):
         # though a terminal pane's own root would read as a derived one.
         "explorer_root_configured": bool(root_directory),
         "created_by_session_id": creator_session_id,
+        "tmux_session": tmux_session,
+        # Generated for this pane, so its connection creates the session.
+        "tmux_fresh": bool(tmux_session),
     }
     fields.update(overrides)
+    if fields.get("startup_mode") not in ("terminal", "agent"):
+        fields["tmux_session"] = ""
+        fields["tmux_fresh"] = False
     # One level deeper than the pane that *asked*, which is not necessarily the
     # pane being halved: an agent can split a pane beside its own. A split
     # nobody claimed is a split a person made with the button, and an
@@ -4285,6 +4315,37 @@ def change_session_shell(session_id: str):
     except ShellTransitionError as exc:
         return jsonify({"error": exc.message}), exc.status_code
     return jsonify(payload)
+
+
+@app.route('/api/sessions/<session_id>/tmux', methods=['POST'])
+def change_session_tmux(session_id: str):
+    """Restart a pane with or without tmux from the person's reset menu."""
+    body = request.get_json(silent=True) or {}
+    try:
+        payload = apply_pane_tmux_change(
+            session_id,
+            body.get("enabled"),
+            attach=body.get("session"),
+            effects=ModeTransitionEffects(
+                close_connection=_close_ssh_connection,
+                broadcast_status=_broadcast_session_status,
+                start_connector=lambda pane_session_id: socketio.start_background_task(
+                    _connect_session, pane_session_id
+                ),
+            ),
+        )
+    except ModeTransitionError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+    return jsonify(payload)
+
+
+@app.route('/api/sessions/<session_id>/tmux-sessions', methods=['GET'])
+def list_session_tmux_sessions(session_id: str):
+    """The detached tmux sessions on a pane's host, for the reset menu's list."""
+    try:
+        return jsonify(list_pane_tmux_sessions(session_id))
+    except ModeTransitionError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
 
 
 @app.route('/api/sessions/<session_id>/agent-relaunch', methods=['POST'])
@@ -4429,38 +4490,74 @@ def close_session(session_id: str):
     ``web/workspaces.py``. Use ``DELETE /api/workspaces/<id>`` for the variant
     that keeps the snapshot restorable.
     """
-    with session_manager.lock:
-        existing_session = session_manager.sessions.get(session_id)
-        group = (
-            session_manager.groups.get(existing_session.group_id)
-            if existing_session is not None
-            else None
-        )
-        success = session_manager.close_session(session_id)
-        if success:
-            group_id = existing_session.group_id
-            # Closing a pane empties its group, and an empty group is swept at
-            # once — there is no grace period left to ride (MW-06). Closing the
-            # last pane within five seconds of launch used to remove the
-            # session but leave the group behind forever, which kept a
-            # workspace alive with no panes in it and its snapshot
-            # unforgettable.
-            pruned_workspace_ids = session_manager.clear_disconnected_sessions()
-            closed_group_ids = (
-                [group_id] if group_id not in session_manager.groups else []
+    end_tmux = _truthy_query_flag(request.args.get("end_tmux"))
+    # Ending a session is consent about one named session, so the request
+    # names it. A pane that no longer holds that name -- switched to another
+    # session from another window while the dialog was open -- is not closed
+    # at all, and its replacement session is never ended.
+    end_tmux_name = ""
+    if end_tmux:
+        end_tmux_name = normalize_tmux_session_name(request.args.get("tmux_session"))
+        if not end_tmux_name:
+            return jsonify({
+                "error": "Ending a tmux session needs the name of the session to end. Nothing was closed."
+            }), 400
+    with reserve_tmux_close(session_id, tmux_name=end_tmux_name):
+        with session_manager.lock:
+            existing_session = session_manager.sessions.get(session_id)
+            if (
+                end_tmux_name
+                and existing_session is not None
+                and str(getattr(existing_session, "tmux_session", "") or "") != end_tmux_name
+            ):
+                return jsonify({
+                    "error": (
+                        f"This pane is no longer in tmux session {end_tmux_name}. "
+                        "Nothing was closed."
+                    ),
+                    "tmux_changed": True,
+                }), 409
+            group = (
+                session_manager.groups.get(existing_session.group_id)
+                if existing_session is not None
+                else None
             )
-            workspace_id = (
-                group.workspace_id if group else DEFAULT_WORKSPACE_ID
-            )
-        else:
-            pruned_workspace_ids = []
-            group_id = ""
-            closed_group_ids = []
-            workspace_id = DEFAULT_WORKSPACE_ID
-    if not success:
-        return jsonify({"error": "Session not found"}), 404
+            success = session_manager.close_session(session_id)
+            if success:
+                group_id = existing_session.group_id
+                # Closing a pane empties its group, and an empty group is swept at
+                # once — there is no grace period left to ride (MW-06). Closing the
+                # last pane within five seconds of launch used to remove the
+                # session but leave the group behind forever, which kept a
+                # workspace alive with no panes in it and its snapshot
+                # unforgettable.
+                pruned_workspace_ids = session_manager.clear_disconnected_sessions()
+                closed_group_ids = (
+                    [group_id] if group_id not in session_manager.groups else []
+                )
+                workspace_id = (
+                    group.workspace_id if group else DEFAULT_WORKSPACE_ID
+                )
+            else:
+                pruned_workspace_ids = []
+                group_id = ""
+                closed_group_ids = []
+                workspace_id = DEFAULT_WORKSPACE_ID
+        if not success:
+            return jsonify({"error": "Session not found"}), 404
 
-    _close_ssh_connection(session_id, clear_buffer=True)
+        # A tmux pane's close detaches by default; its session keeps running on
+        # the host. Only the close dialog's "Also end the tmux session" ends it,
+        # before the transport closes, and never on any other close.
+        tmux_ended = False
+        if end_tmux_name:
+            try:
+                tmux_ended = _end_tmux_session(session_id, end_tmux_name)
+            except Exception:
+                # The pane is already gone from the manager, so its transport is
+                # closed below whatever happened here; the reply says it failed.
+                logger.warning("Ending the tmux session of %s failed", session_id, exc_info=True)
+        _close_ssh_connection(session_id, clear_buffer=True)
     forget_pruned_workspaces(pruned_workspace_ids)
     # Closing the last pane of the last group in `default` empties it just as
     # surely as a prune empties a sibling; its snapshot goes the same way.
@@ -4479,7 +4576,10 @@ def close_session(session_id: str):
                 workspace_id=pruned_workspace_id,
             )
 
-    return jsonify({"message": "Session closed successfully"})
+    payload = {"message": "Session closed successfully"}
+    if end_tmux:
+        payload["tmux_ended"] = tmux_ended
+    return jsonify(payload)
 
 
 @app.route('/api/sessions', methods=['DELETE'])

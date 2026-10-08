@@ -16,6 +16,11 @@
             <div>
                 <div id="genericConfirmTitle" class="modal-title">Are you sure?</div>
                 <div id="genericConfirmCopy" class="modal-copy"></div>
+                {# Optional, shown only when a caller passes `checkboxLabel`. #}
+                <label id="genericConfirmCheckRow" class="check-field" style="display: none">
+                    <input id="genericConfirmCheck" type="checkbox">
+                    <span id="genericConfirmCheckLabel"></span>
+                </label>
             </div>
         </div>
         <div class="modal-actions">

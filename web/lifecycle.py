@@ -599,6 +599,9 @@ def _live_group_config(group: Dict[str, Any]) -> Dict[str, Any]:
         "distribution",
         "use_wsl",
         "use_powershell",
+        # A tmux pane's preset keeps the option and its session name, typed or
+        # generated, so a launch of it reattaches that pane's own session.
+        "tmux_session",
     )
     for pane in panes:
         terminals.append(

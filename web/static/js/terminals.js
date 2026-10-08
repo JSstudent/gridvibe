@@ -34,6 +34,10 @@
         applyAppConfigUpdate(payload);
     }
 
+    function onAppSettingsApplied(data) {
+        applyAppConfigTmux(data);
+    }
+
     initTheme();
 
     function normalizeSurfaceMode(mode) {
@@ -200,11 +204,19 @@
         applyAppConfigSurfaceMode(message);
         applyAppConfigAgentSidebarSide(message);
         applyAppConfigTerminalFont(message);
+        applyAppConfigTmux(message);
         applyAppConfigMultiWorkspace(message);
         /* Voice enable/engine and the push-to-talk keybind are saved from the
            same App Settings dialog, so re-read both here instead of leaving
            open tabs on boot-time values until a restart (stage J issue 3). */
         _refreshVoiceRuntimeState();
+    }
+
+    function applyAppConfigTmux(message) {
+        const enabled = message?.ssh?.tmux_sessions;
+        if (typeof enabled !== 'boolean') return;
+        appSettings.ssh = { ...appSettings.ssh, tmux_sessions: enabled };
+        terminals.forEach((pane, index) => syncPaneShellControls(index, pane?._session));
     }
 
     /* The whole window is reloaded when the mode changes elsewhere: the flag
@@ -327,6 +339,7 @@
                 return;
             }
             const data = await response.json();
+            applyAppConfigTmux(data);
             applyAppConfigTheme(data);
             /* Reconciling is not an explicit save, so it goes through the
                change-only path — it must never discard this window's own
@@ -2967,7 +2980,10 @@
             browser_active_tab: browserTabs.active_tab,
             distribution: connectionMode === 'wsl' ? (session.distribution || '') : '',
             use_wsl: connectionMode === 'wsl' ? Boolean(session.use_wsl) : false,
-            use_powershell: connectionMode === 'wsl' ? Boolean(session.use_powershell) : false
+            use_powershell: connectionMode === 'wsl' ? Boolean(session.use_powershell) : false,
+            /* The experimental tmux option rides along; the server keeps the
+               session name, typed or generated, so the preset reattaches it. */
+            tmux_session: connectionMode === 'ssh' ? String(session.tmux_session || '') : ''
         };
     }
 
@@ -7340,7 +7356,48 @@
         if (!(await confirmDiscardExplorerEdit(index, 'Closing this pane'))) {
             return;
         }
+        /* A tmux pane detaches by default: its session may be one the
+           developer attached on purpose, so it is only ended when asked. */
+        let endTmuxSession = false;
+        const closingSession = terminals[index]?._session;
+        /* The session the dialog names, captured before it opens: ending one
+           is consent about that session, not about whatever this pane holds
+           by the time the answer comes back. */
+        const confirmedTmuxSession = String(closingSession?.tmux_session || '');
+        let askedAboutTmux = false;
+        if (
+            closingSession?.mode === 'ssh'
+            && closingSession?.tmux_session
+            && closingSession?.startup_mode !== 'explorer'
+        ) {
+            const proceed = await openGenericConfirmModal({
+                title: 'Close this tmux pane?',
+                copy: `The pane detaches from tmux session ${confirmedTmuxSession}, which keeps running on ${closingSession.host || 'the host'}.`,
+                checkboxLabel: 'Also end the tmux session',
+                confirmLabel: 'Close pane'
+            });
+            if (!proceed) {
+                return;
+            }
+            endTmuxSession = genericConfirmCheckboxChecked();
+            askedAboutTmux = true;
+        }
         const plan = previewTerminalClose(index);
+        /* The grid can change while the dialog is open. The answer belongs to
+           the pane it was asked about, so a different pane in this slot now
+           is not closed -- and never has its session ended. */
+        if (askedAboutTmux && plan && plan.sessionId !== closingSession.session_id) {
+            showTerminalToast('The panes changed while the dialog was open. Nothing was closed.', 'error');
+            return;
+        }
+        /* The same pane can be moved to another tmux session from another
+           window without its id changing. The server refuses that too, for a
+           switch landing after this check; this one only spares the request. */
+        if (endTmuxSession
+            && String(terminals[index]?._session?.tmux_session || '') !== confirmedTmuxSession) {
+            showTerminalToast('The pane moved to another tmux session while the dialog was open. Nothing was closed.', 'error');
+            return;
+        }
         if (!plan) {
             setWorkspaceSaveMessage(
                 'Close terminal failed: no neighboring pane can safely fill this layout',
@@ -7359,12 +7416,18 @@
         closeSnapshotsBySessionId.set(plan.sessionId, plan.snapshot);
 
         try {
-            const response = await fetch(`/api/sessions/${encodeURIComponent(plan.sessionId)}`, {
+            const closeQuery = endTmuxSession
+                ? `?end_tmux=1&tmux_session=${encodeURIComponent(confirmedTmuxSession)}`
+                : '';
+            const response = await fetch(`/api/sessions/${encodeURIComponent(plan.sessionId)}${closeQuery}`, {
                 method: 'DELETE',
             });
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {
                 throw new Error(data.error || `Close terminal failed with status ${response.status}`);
+            }
+            if (endTmuxSession && data.tmux_ended === false) {
+                showTerminalToast('The tmux session could not be ended and is still running on the host.', 'error');
             }
 
             if (plan.closeLastPane) {

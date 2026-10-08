@@ -80,6 +80,7 @@ from web.pane_gates import (  # noqa: F401 - LINEAGE_GATE/SELF_GATE re-exported
     refuse,
     what_ends,
 )
+from web.ssh_tmux import request_new_window
 from web.terminal_io import (
     LOCAL_SHELL_KINDS,
     _local_shell_display_name,
@@ -551,6 +552,11 @@ def apply_pane_shell_change(
     before_start = getattr(effects, "before_start", None)
     if before_start is not None:
         before_start(session_id)
+    if getattr(session, "mode", "") == "ssh" and getattr(session, "tmux_session", ""):
+        # The next connection attaches to the same tmux session, so the fresh
+        # shell a relaunch needs is a new window there, where the pane is now.
+        # The session and the developer's other windows are never touched.
+        request_new_window(session_id, "")
     effects.start_connector(session_id)
 
     return session_manager.get_session(session_id).to_dict()

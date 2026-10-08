@@ -108,6 +108,41 @@ EMPTY_CONVERSATION_FIELDS = {
     CONVERSATION_RESUME_FIELD: False,
 }
 
+#: An agent pane once its agent is gone and the pane is a plain SSH terminal:
+#: the launch line, the agent's choices and its conversation go with it. Shared
+#: by the relaunch-as-shell transitions and by a tmux session ending under the
+#: pane, so both leave the same record behind.
+AGENT_ENDS_AS_TERMINAL: Dict[str, Any] = {
+    "startup_mode": "terminal",
+    "initial_command": "",
+    "initial_command_mode": "command",
+    "agent_selection": "",
+    "custom_agent": "",
+    "agent_auto_mode": False,
+    "agent_mcp": False,
+    "agent_mcp_override": False,
+    **EMPTY_CONVERSATION_FIELDS,
+}
+
+#: A terminal pane relaunched as a plain shell: the startup command it was
+#: launched with goes too, or the new shell types it again (a server restarts).
+TERMINAL_ENDS_AS_PLAIN_SHELL: Dict[str, Any] = {
+    "initial_command": "",
+    "initial_command_mode": "command",
+}
+
+
+def plain_shell_fields(session: Any) -> Dict[str, Any]:
+    """The fields that leave ``session`` a plain shell, whatever it launched.
+
+    An agent pane loses its agent; a terminal pane loses its startup command.
+    Only reads the pane, so a caller may ask it under a lock.
+    """
+    if str(getattr(session, "startup_mode", "") or "") == "agent":
+        return dict(AGENT_ENDS_AS_TERMINAL)
+    return dict(TERMINAL_ENDS_AS_PLAIN_SHELL)
+
+
 #: The subcommand and the method. Codex's app server is the supported way to
 #: read a stored thread's metadata without resuming it; the alternative is
 #: scraping ``session_index.jsonl``, which is provider-owned state with no

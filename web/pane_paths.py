@@ -14,8 +14,9 @@ There are four facts, and each one has exactly one meaning here:
     recorded directory otherwise -- never a guess, because an absent
     observation is absent, not wrong.
 ``launch_directory``
-    Where the pane was originally built. Nothing moves it; it is retained as a
-    record and no longer clamps anything.
+    Where the pane was originally built. Only restarting a pane into tmux
+    moves it, because that builds the pane again in its current directory; it
+    is otherwise retained as a record and no longer clamps anything.
 ``explorer_root_directory``
     The explorer's confinement boundary, saved independently of the launch
     directory: a terminal may work inside a subdirectory while Files is

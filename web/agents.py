@@ -33,6 +33,7 @@ from web.hostkeys import _apply_host_key_policy
 from web.mcp_launch import OPENCODE_CONFIG_STYLE, pane_can_run_the_sidecar
 from web.paths import BASE_DIR
 from web.saved_sessions import _normalize_connection_mode
+from web.ssh_connect import connect_ssh_client
 
 try:
     import paramiko
@@ -1427,7 +1428,8 @@ def _detect_ssh_command(binary: str, target: Dict[str, Any]) -> Dict[str, Any]:
     try:
         client = paramiko.SSHClient()
         _apply_host_key_policy(client, paramiko)
-        client.connect(
+        connect_ssh_client(
+            client,
             hostname=host,
             port=port,
             username=username,
