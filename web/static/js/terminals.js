@@ -34,6 +34,10 @@
         applyAppConfigUpdate(payload);
     }
 
+    function onAppSettingsApplied(data) {
+        applyAppConfigTmux(data);
+    }
+
     initTheme();
 
     function normalizeSurfaceMode(mode) {
@@ -200,11 +204,19 @@
         applyAppConfigSurfaceMode(message);
         applyAppConfigAgentSidebarSide(message);
         applyAppConfigTerminalFont(message);
+        applyAppConfigTmux(message);
         applyAppConfigMultiWorkspace(message);
         /* Voice enable/engine and the push-to-talk keybind are saved from the
            same App Settings dialog, so re-read both here instead of leaving
            open tabs on boot-time values until a restart (stage J issue 3). */
         _refreshVoiceRuntimeState();
+    }
+
+    function applyAppConfigTmux(message) {
+        const enabled = message?.ssh?.tmux_sessions;
+        if (typeof enabled !== 'boolean') return;
+        appSettings.ssh = { ...appSettings.ssh, tmux_sessions: enabled };
+        terminals.forEach((pane, index) => syncPaneShellControls(index, pane?._session));
     }
 
     /* The whole window is reloaded when the mode changes elsewhere: the flag
@@ -327,6 +339,7 @@
                 return;
             }
             const data = await response.json();
+            applyAppConfigTmux(data);
             applyAppConfigTheme(data);
             /* Reconciling is not an explicit save, so it goes through the
                change-only path — it must never discard this window's own

@@ -1013,17 +1013,20 @@ def _prepare_launch_sessions(
 
 
 def _settle_tmux_session_names(
-    prepared_sessions: List[Dict[str, Any]], *, restore: bool
+    prepared_sessions: List[Dict[str, Any]], *, restore: bool, stem: str = ""
 ) -> None:
     """Give each prepared pane the tmux session it launches into, or ``""``.
 
     One captured answer for the whole launch: off, a request's tmux fields
-    are ignored like any field the API does not know.
+    are ignored like any field the API does not know. A generated name starts
+    with ``stem``, the session name the launch asked for; the tab's final name
+    is settled later, but its uniqueness suffix is no help to a name that
+    already ends in random digits.
     """
     enabled = tmux_sessions_enabled()
     for prepared in prepared_sessions:
         prepared["tmux_session"] = launch_session_name(
-            prepared, enabled=enabled, restore=restore
+            prepared, enabled=enabled, restore=restore, stem=stem
         )
         prepared.pop("tmux", None)
 
@@ -1031,6 +1034,83 @@ def _settle_tmux_session_names(
 #: Held across the tmux uniqueness check and the install it guards.
 _tmux_claim_lock = threading.Lock()
 _closing_tmux_sessions: Dict[Tuple[str, str, str, str], int] = {}
+
+
+def _live_tmux_claims(manager: Any, *, exclude: Any = None) -> Set[Tuple[str, str, str, str]]:
+    """Every (host, port, user, name) a live pane other than ``exclude`` holds.
+
+    Read under the manager lock by the caller.
+    """
+    return {
+        session_key(other.host, other.port, other.username, other.tmux_session)
+        for other in manager.sessions.values()
+        if other is not exclude
+        and other.mode == "ssh"
+        and getattr(other, "tmux_session", "")
+    }
+
+
+def tmux_names_held_elsewhere(session_id: str) -> Set[str]:
+    """Session names on this pane's host that another pane holds or is ending.
+
+    Attaching to one would be refused, so a list offering sessions to attach
+    to leaves them out.
+    """
+    with _tmux_claim_lock:
+        manager = _manager()
+        with manager.lock:
+            session = manager.sessions.get(session_id)
+            if session is None:
+                return set()
+            host_key = session_key(session.host, session.port, session.username, "")[:3]
+            taken = _live_tmux_claims(manager, exclude=session) | set(_closing_tmux_sessions)
+    return {key[3] for key in taken if key[:3] == host_key}
+
+
+def change_live_pane_tmux(
+    session_id: str,
+    expected_session: Any,
+    expected_state: Tuple[Any, ...],
+    state_of: Callable[[Any], Tuple[Any, ...]],
+    name: str,
+    directory: str,
+    metadata_fields: Dict[str, Any],
+) -> None:
+    """Change one existing pane's tmux claim and launch directory atomically.
+
+    The caller resolves the directory before entering this lock. Launch admission
+    uses the same claim lock, so it cannot take a name between our check and the
+    pane metadata write. The manager lock also rechecks the pane after that I/O,
+    through the caller's ``state_of``, against what it planned with.
+    """
+    with _tmux_claim_lock:
+        manager = _manager()
+        with manager.lock:
+            session = manager.sessions.get(session_id)
+            if session is not expected_session:
+                raise ValueError("Pane changed while its directory was being read")
+            if state_of(session) != expected_state:
+                raise ValueError("Pane changed while its directory was being read")
+            if session.mode != "ssh" or session.startup_mode not in {"terminal", "agent"}:
+                raise ValueError("Only SSH terminal and agent panes can change tmux mode")
+            if str(session.tmux_session or "") == name:
+                raise ValueError("Pane tmux mode changed while its directory was being read")
+            if name:
+                key = session_key(session.host, session.port, session.username, name)
+                if key in _closing_tmux_sessions:
+                    raise ValueError(f"The tmux session {name} is still being ended")
+                if key in _live_tmux_claims(manager, exclude=session):
+                    raise ValueError(f"Another pane is already attached to tmux session {name}")
+            session.tmux_session = name
+            session.directory = directory
+            session.current_directory = None
+            if name:
+                # The connect path creates the session in the launch directory
+                # before `directory`, and a tmux snapshot keeps it: the pane is
+                # built again here, so here is where it was launched.
+                session.launch_directory = directory
+            for field, value in metadata_fields.items():
+                setattr(session, field, value)
 
 
 @contextmanager
@@ -1418,7 +1498,11 @@ def launch_session_group(
         # Pure: no pane, group or workspace exists yet, so its refusals -- and
         # a tool launch's agent refusal below -- cost nothing to take back.
         prepared_sessions = _prepare_launch_sessions(sessions_config, connection_mode)
-        _settle_tmux_session_names(prepared_sessions, restore=is_restore)
+        _settle_tmux_session_names(
+            prepared_sessions,
+            restore=is_restore,
+            stem=str(data.get("session_name") or "").strip(),
+        )
         # A launch a tool asked for from inside a pane is validated whole
         # before a destination is resolved: an agent that cannot start there
         # refuses the launch rather than opening as the shell the launcher

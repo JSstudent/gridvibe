@@ -2311,7 +2311,7 @@
                         </label>
                         <div class="inline-tip">Experimental. The pane runs in a tmux session on the host that keeps running after the pane closes or GridVibe exits, and reattaches on reconnect or restore. Only the session is restored, not the agent or mode. Scrollback, mouse and key handling follow your own tmux config, so turn on <code>set -g mouse on</code> to scroll in the pane.</div>
                         <div class="t-tmux-name-field">
-                            <input class="t-tmux-session" type="text" maxlength="64" value="${escHtml(terminal.tmux_session || '')}" placeholder="tmux session (blank = new gv-… session)" aria-label="tmux session name" title="Letters, digits, - and _. Name an existing session to attach to it.">
+                            <input class="t-tmux-session" type="text" maxlength="64" value="${escHtml(terminal.tmux_session || '')}" placeholder="tmux session (blank = new &lt;session name&gt;_… session)" aria-label="tmux session name" title="Letters, digits, - and _. Name an existing session to attach to it.">
                         </div>
                     </div>
                     ${LOCAL_WINDOWS_SHELLS_AVAILABLE ? `

@@ -3172,6 +3172,54 @@ def _decoded_terminal_output(session_id, connection, data=b'', *, final=False):
     _publish_ssh_terminal_output(session_id, output, connection)
 
 
+def pane_host_tmux_sessions(session_id: str) -> Tuple[bool, Optional[List[Dict[str, Any]]]]:
+    """The tmux sessions on a live SSH pane's host, asked over its own client.
+
+    Returns ``(connected, sessions)``: ``connected`` is False when the pane has
+    no live SSH connection to ask through, and ``sessions`` is None when the
+    host has no tmux. The client is captured under the registry lock and the
+    remote command runs outside it; a failure raises ``ssh_tmux.TmuxError``.
+    """
+    with connection_lock:
+        connection = ssh_connections.get(session_id)
+        client = (
+            connection.get("client")
+            if connection is not None and connection.get("kind") == "ssh"
+            else None
+        )
+    if client is None:
+        return False, None
+    return True, ssh_tmux.list_sessions(client)
+
+
+def _forget_ended_tmux_session(session_id: str, connection: Dict[str, Any]) -> None:
+    """Drop the name of a tmux session that ended under its attached pane.
+
+    ``exit`` in the session's last shell ends the session, and with it this
+    stream. Kept, the name would make Retry create the session again; dropped,
+    the pane is the plain SSH terminal the person left. A detach, or a
+    transport that dropped, keeps it: the session is still there to attach to.
+    Asked outside the locks, then applied only by the connection that still
+    owns the pane, and only to the name it was attached under.
+    """
+    tmux_name = str(connection.get("tmux_session") or "")
+    if not tmux_name or not _connection_is_current(session_id, connection):
+        return
+    if not ssh_tmux.session_ended(connection.get("client"), tmux_name):
+        return
+    with connection_lock:
+        if not _connection_is_current(session_id, connection):
+            return
+        session = session_manager.get_session(session_id)
+        if session is None or getattr(session, "tmux_session", "") != tmux_name:
+            return
+        session_manager.clear_tmux_session(session_id)
+    logger.info("[%s] tmux session %s ended; the pane is a plain SSH terminal now", session_id, tmux_name)
+    _publish_ssh_terminal_output(
+        session_id, ssh_tmux.notice(ssh_tmux.ended_notice(tmux_name)), connection
+    )
+
+
 def _stream_ssh_output(session_id: str, connection=None):
     """Read from the captured channel, never from its replacement."""
     if connection is None:
@@ -3194,6 +3242,7 @@ def _stream_ssh_output(session_id: str, connection=None):
                 break
             _decoded_terminal_output(session_id, connection, data)
         _decoded_terminal_output(session_id, connection, final=True)
+        _forget_ended_tmux_session(session_id, connection)
     except Exception as exc:
         if _connection_is_current(session_id, connection):
             _connection_status(session_id, connection, SessionStatus.ERROR, str(exc))

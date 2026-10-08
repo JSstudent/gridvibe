@@ -61,12 +61,21 @@ from web.pane_gates import (
 )
 from web.saved_sessions import _normalize_startup_mode
 from web.session_presentation import DEFAULT_BROWSER_URL, _normalize_browser_url
-from web.ssh_tmux import request_new_window
+from web.ssh_tmux import (
+    TmuxError,
+    forget_session,
+    generate_session_name,
+    normalize_session_name,
+    request_new_window,
+    tmux_sessions_enabled,
+)
 from web.terminal_io import (
     CWD_SOURCE_LAUNCH,
     _local_shell_display_name,
     effective_directory,
+    pane_host_tmux_sessions,
 )
+from web.workspaces import change_live_pane_tmux, tmux_names_held_elsewhere
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +115,138 @@ class ModeTransitionEffects:
     close_connection: Callable[..., Any]
     broadcast_status: Callable[[str], Any]
     start_connector: Callable[[str], Any]
+
+
+#: What a tmux restart was planned against. The directory read between the
+#: plan and the write can take seconds, and a relaunch from another window in
+#: that time changes the agent rather than the mode or directory -- so the
+#: agent's launch shape and conversation are part of the recheck too.
+_TMUX_RESTART_STATE_FIELDS = (
+    "mode",
+    "startup_mode",
+    "tmux_session",
+    "directory",
+    "initial_command",
+    "initial_command_mode",
+    "agent_selection",
+    "custom_agent",
+    "agent_conversation_id",
+)
+
+
+def _tmux_restart_state(session: Any) -> tuple:
+    return tuple(getattr(session, field, None) for field in _TMUX_RESTART_STATE_FIELDS)
+
+
+#: An agent pane relaunched as a plain shell: the agent is what ends.
+_AGENT_ENDS_AS_TERMINAL: Dict[str, Any] = {
+    "startup_mode": "terminal",
+    "initial_command": "",
+    "initial_command_mode": "command",
+    "agent_selection": "",
+    "custom_agent": "",
+    "agent_auto_mode": False,
+    "agent_mcp": False,
+    "agent_mcp_override": False,
+    **EMPTY_CONVERSATION_FIELDS,
+}
+
+
+def _tmux_capable_pane(session_id: str) -> Any:
+    """The person's SSH terminal or agent pane, refused unless tmux applies."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        raise ModeTransitionError("Session not found", 404)
+    if not tmux_sessions_enabled():
+        raise ModeTransitionError("Tmux sessions are disabled", 409)
+    if session.mode != "ssh" or session.startup_mode not in {"terminal", "agent"}:
+        raise ModeTransitionError("Only SSH terminal and agent panes can change tmux mode")
+    if _is_explorer_session(session) or _is_browser_session(session):
+        raise ModeTransitionError("Switch this pane back to terminal mode first")
+    return session
+
+
+def list_pane_tmux_sessions(session_id: str) -> Dict[str, Any]:
+    """The detached tmux sessions this pane could attach to, from its host.
+
+    Read-only: one bounded exec round trip over the pane's own live client.
+    Left out are sessions a client is attached to, the pane's own, and any
+    another GridVibe pane holds or is ending -- attaching to those would be
+    refused anyway.
+    """
+    session = _tmux_capable_pane(session_id)
+    try:
+        connected, sessions = pane_host_tmux_sessions(session_id)
+    except TmuxError as exc:
+        raise ModeTransitionError(f"Could not list tmux sessions: {exc}", 502) from exc
+    if not connected:
+        raise ModeTransitionError("Connect this pane to its host first", 409)
+    if sessions is None:
+        return {"tmux_available": False, "sessions": []}
+    unavailable = tmux_names_held_elsewhere(session_id) | {str(session.tmux_session or "")}
+    return {
+        "tmux_available": True,
+        "sessions": [
+            {"name": entry["name"], "windows": entry["windows"]}
+            for entry in sessions
+            if not entry["attached"] and entry["name"] not in unavailable
+        ],
+    }
+
+
+def apply_pane_tmux_change(
+    session_id: str,
+    enabled: Any,
+    effects: ModeTransitionEffects,
+    attach: Any = None,
+) -> Dict[str, Any]:
+    """Restart a person's SSH pane as a plain shell, in tmux or out of it.
+
+    The reset menu's "Plain shell" row and the tmux button beside it: the pair
+    a pane switches between, so whichever is pressed the pane ends up a plain
+    shell, and an agent it ran ends exactly as that row's relaunch ends one.
+    ``attach`` names an existing session to attach to instead of a new one --
+    the tmux button's list -- and may move a pane from one session to another.
+    """
+    if not isinstance(enabled, bool):
+        raise ModeTransitionError("enabled must be true or false")
+    attach_name = ""
+    if attach is not None:
+        attach_name = normalize_session_name(attach)
+        if not enabled or not attach_name:
+            raise ModeTransitionError("session must name a tmux session to attach to")
+    session = _tmux_capable_pane(session_id)
+    current = str(session.tmux_session or "")
+    if (attach_name and attach_name == current) or (not attach_name and bool(current) == enabled):
+        raise ModeTransitionError("Pane is already in the requested tmux mode", 409)
+
+    expected_state = _tmux_restart_state(session)
+    plain_fields = dict(_AGENT_ENDS_AS_TERMINAL) if session.startup_mode == "agent" else {}
+    directory, _source = effective_directory(session_id, session)
+    group = session_manager.get_group(session.group_id)
+    if attach_name:
+        name = attach_name
+    else:
+        name = generate_session_name(getattr(group, "name", "")) if enabled else ""
+    try:
+        change_live_pane_tmux(
+            session_id,
+            session,
+            expected_state,
+            _tmux_restart_state,
+            name,
+            directory,
+            plain_fields,
+        )
+    except ValueError as exc:
+        raise ModeTransitionError(str(exc), 409) from exc
+    effects.close_connection(session_id, clear_buffer=True)
+    agent_handoffs.drop_bound(session_id, "pane relaunched")
+    forget_session(session_id)
+    session_manager.update_session_status(session_id, SessionStatus.PENDING)
+    effects.broadcast_status(session_id)
+    effects.start_connector(session_id)
+    return session_manager.get_session(session_id).to_dict()
 
 
 def _refresh_pane_cwd(session_id: str, session: Any, requested: bool) -> Dict[str, Any]:
@@ -202,19 +343,7 @@ def _relaunch_terminal_at(
         "current_directory": None,
     }
     if str(getattr(session, "startup_mode", "") or "") == "agent":
-        updates.update(
-            {
-                "startup_mode": "terminal",
-                "initial_command": "",
-                "initial_command_mode": "command",
-                "agent_selection": "",
-                "custom_agent": "",
-                "agent_auto_mode": False,
-                "agent_mcp": False,
-                "agent_mcp_override": False,
-                **EMPTY_CONVERSATION_FIELDS,
-            }
-        )
+        updates.update(_AGENT_ENDS_AS_TERMINAL)
     session_manager.update_session_metadata(session_id, **updates)
     logger.info(
         "Pane relaunched at a stated directory session_id=%s directory=%s",

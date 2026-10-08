@@ -677,6 +677,9 @@
                     appSettings?.workspace?.agent_sidebar_side === 'right' ? 'right' : 'left',
                 multi_workspace_enabled: Boolean(appSettings?.workspace?.multi_workspace_enabled)
             },
+            ssh: {
+                tmux_sessions: appSettings?.ssh?.tmux_sessions === true
+            },
             terminal: {
                 font_family: String(appSettings?.terminal?.font_family || DEFAULT_APP_SETTINGS.terminal.font_family),
                 font_size: Number(appSettings?.terminal?.font_size) || DEFAULT_APP_SETTINGS.terminal.font_size,

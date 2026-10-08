@@ -26,7 +26,7 @@ import shlex
 import socket
 import threading
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -82,9 +82,28 @@ def tmux_sessions_enabled(settings: Any = None) -> bool:
 # ==================== Names ====================
 
 
-def generate_session_name() -> str:
-    """A fresh GridVibe session name, ``gv-<12 hex chars>``."""
-    return f"gv-{secrets.token_hex(6)}"
+#: Random digits after a generated name's stem. A generated name that already
+#: exists on the host is attached to rather than created, so the digits are
+#: what keep two panes of one GridVibe session apart.
+TMUX_NAME_DIGITS = 6
+TMUX_NAME_FALLBACK_STEM = "gv"
+
+_UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def generate_session_name(stem: Any = "") -> str:
+    """A fresh name, ``<stem>_<6 digits>``, e.g. ``api-server_048213``.
+
+    ``stem`` is the GridVibe session (tab) the pane opens in, so a host's
+    ``tmux ls`` says where each session came from. Characters a name may not
+    hold become ``-`` and the stem is cut so the whole name fits; with nothing
+    left, it is ``gv``.
+    """
+    room = 64 - 1 - TMUX_NAME_DIGITS
+    cleaned = _UNSAFE_NAME_CHARS.sub("-", str(stem or "")).strip("-_")
+    cleaned = cleaned[:room].rstrip("-_") or TMUX_NAME_FALLBACK_STEM
+    digits = secrets.randbelow(10**TMUX_NAME_DIGITS)
+    return f"{cleaned}_{digits:0{TMUX_NAME_DIGITS}d}"
 
 
 def normalize_session_name(value: Any) -> str:
@@ -93,12 +112,15 @@ def normalize_session_name(value: Any) -> str:
     return name if TMUX_NAME_PATTERN.match(name) else ""
 
 
-def launch_session_name(config: Dict[str, Any], *, enabled: bool, restore: bool) -> str:
+def launch_session_name(
+    config: Dict[str, Any], *, enabled: bool, restore: bool, stem: str = ""
+) -> str:
     """The tmux session one requested pane launches into, or ``""``.
 
     A request asks for tmux with ``tmux: true`` (the launcher's "Run in tmux")
     or by naming a session in ``tmux_session`` (a typed name, a preset's, or a
-    restored snapshot's). An empty name with the option on is generated here.
+    restored snapshot's). An empty name with the option on is generated here,
+    from ``stem`` -- the GridVibe session the launch opens.
 
     Only SSH panes in terminal or agent mode carry one. With the setting off
     both fields are ignored, as for any field the API does not know. An
@@ -117,7 +139,7 @@ def launch_session_name(config: Dict[str, Any], *, enabled: bool, restore: bool)
         return ""
     stated = str(raw_name or "").strip() if isinstance(raw_name, str) else ""
     if not stated:
-        return generate_session_name()
+        return generate_session_name(stem)
     name = normalize_session_name(stated)
     if name:
         return name
@@ -402,6 +424,64 @@ def kill(client: Any, name: str) -> bool:
         logger.warning("tmux kill-session failed: %s", output or status)
         return False
     return True
+
+
+def list_sessions(client: Any) -> Optional[List[Dict[str, Any]]]:
+    """The sessions on the host's default tmux server, or None without tmux.
+
+    One bounded exec round trip. A host with tmux and no server running has
+    none. A session whose name GridVibe could not attach to by name (one
+    holding ``.``, ``:``, a space...) is left out, since nothing could reach it.
+    """
+    script = (
+        "command -v tmux >/dev/null 2>&1 || exit 3; "
+        "tmux list-sessions -F '#{session_attached} #{session_windows} #{session_name}' "
+        "2>/dev/null; exit 0"
+    )
+    status, output = _run(client, _sh(script))
+    if status == 3:
+        return None
+    if status != 0:
+        raise TmuxError(output or f"tmux list-sessions failed with exit status {status}")
+    sessions = []
+    for line in output.splitlines():
+        parts = line.strip().split(" ", 2)
+        if len(parts) != 3 or not parts[0].isdigit() or not parts[1].isdigit():
+            continue
+        name = normalize_session_name(parts[2])
+        if name:
+            sessions.append(
+                {"name": name, "attached": int(parts[0]), "windows": int(parts[1])}
+            )
+    return sessions
+
+
+def session_ended(client: Any, name: str) -> bool:
+    """Whether the session is gone from the host -- an answer, never a guess.
+
+    Asked when a pane's attach stream ends: a detach leaves the session
+    running, while ``exit`` in its last shell ends it. Only tmux saying "no
+    such session" counts as ended; a transport that is gone, a timeout or any
+    other failure answers False, so a dropped connection keeps its session.
+    """
+    try:
+        status, _output = _run(
+            client,
+            _sh(f"command -v tmux >/dev/null 2>&1 || exit 3; tmux has-session -t {_quoted_target(name)}"),
+            timeout=3.0,
+        )
+    except TmuxError as exc:
+        logger.debug("Unable to ask whether tmux session %s ended: %s", name, exc)
+        return False
+    return status == 1
+
+
+def ended_notice(name: str) -> str:
+    """Told to a pane whose tmux session ended under it, before it disconnects."""
+    return (
+        f"The tmux session {name} ended, so this pane is now a plain SSH "
+        "terminal. Retry opens a plain shell."
+    )
 
 
 def current_path(client: Any, name: str) -> str:

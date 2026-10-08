@@ -310,6 +310,8 @@ from web.session_modes import (  # noqa: F401 - re-exported for backwards compat
     _refresh_pane_cwd,
     apply_agent_pane_mode_change,
     apply_pane_mode_change,
+    apply_pane_tmux_change,
+    list_pane_tmux_sessions,
 )
 from web.session_presentation import (
     PresentationValidationError,
@@ -4163,7 +4165,7 @@ def split_session(session_id: str):
     # Only a person's split: a session outlives GridVibe on the host, so a
     # split an agent asked for opens a plain shell, as a tool launch does.
     tmux_session = (
-        generate_tmux_session_name()
+        generate_tmux_session_name(group.name)
         if source.mode == "ssh"
         and getattr(source, "tmux_session", "")
         and not creator_session_id
@@ -4309,6 +4311,37 @@ def change_session_shell(session_id: str):
     except ShellTransitionError as exc:
         return jsonify({"error": exc.message}), exc.status_code
     return jsonify(payload)
+
+
+@app.route('/api/sessions/<session_id>/tmux', methods=['POST'])
+def change_session_tmux(session_id: str):
+    """Restart a pane with or without tmux from the person's reset menu."""
+    body = request.get_json(silent=True) or {}
+    try:
+        payload = apply_pane_tmux_change(
+            session_id,
+            body.get("enabled"),
+            attach=body.get("session"),
+            effects=ModeTransitionEffects(
+                close_connection=_close_ssh_connection,
+                broadcast_status=_broadcast_session_status,
+                start_connector=lambda pane_session_id: socketio.start_background_task(
+                    _connect_session, pane_session_id
+                ),
+            ),
+        )
+    except ModeTransitionError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+    return jsonify(payload)
+
+
+@app.route('/api/sessions/<session_id>/tmux-sessions', methods=['GET'])
+def list_session_tmux_sessions(session_id: str):
+    """The detached tmux sessions on a pane's host, for the reset menu's list."""
+    try:
+        return jsonify(list_pane_tmux_sessions(session_id))
+    except ModeTransitionError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
 
 
 @app.route('/api/sessions/<session_id>/agent-relaunch', methods=['POST'])

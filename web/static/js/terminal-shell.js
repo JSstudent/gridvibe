@@ -64,6 +64,11 @@
        Dropped when the menu closes: an expansion is a pointer gesture inside
        one opening of the menu, not pane state. */
     const _expandedShellAgentRows = new Map();
+    /* The tmux button's list of detached sessions on a pane's host, per pane.
+       Fetched each time the list opens: sessions come and go on the host
+       without telling anybody. */
+    const _tmuxSessionLists = new WeakMap();
+    const TMUX_LIST_ROW_KEY = 'tmux';
 
     function localShellModesAvailable() {
         return typeof LOCAL_SHELL_MODES_AVAILABLE !== 'undefined' && Boolean(LOCAL_SHELL_MODES_AVAILABLE);
@@ -157,10 +162,19 @@
         return Boolean(paneIsRelaunchable(session) && paneAgentMenuOptions().length);
     }
 
+    function paneSupportsTmuxSwitch(session) {
+        return Boolean(
+            appSettings?.ssh?.tmux_sessions === true
+            && session?.mode === 'ssh'
+            && (session?.startup_mode === 'terminal' || session?.startup_mode === 'agent')
+            && paneIsRelaunchable(session)
+        );
+    }
+
     /* One predicate behind the button's affordance and its menu: a pane with
        neither dimension to offer keeps the plain one-click reset. */
     function paneHasResetMenu(session) {
-        return paneSupportsShellSwitch(session) || paneSupportsAgentSwitch(session);
+        return paneSupportsShellSwitch(session) || paneSupportsAgentSwitch(session) || paneSupportsTmuxSwitch(session);
     }
 
     function paneShellResetTitle(session) {
@@ -172,6 +186,9 @@
         }
         if (paneSupportsAgentSwitch(session)) {
             return 'Reset this terminal view, or relaunch it with an agent';
+        }
+        if (paneSupportsTmuxSwitch(session)) {
+            return 'Reset this terminal view, or relaunch its shell in or out of tmux';
         }
         return 'Reset this terminal view and replay recent output';
     }
@@ -306,15 +323,32 @@
        override false, which is what makes it the way back from override mode
        to plain tools rather than a silence the route reads as "keep the
        grant". Override mode asks its warning before it is granted. */
-    function paneShellAgentItemsHtml(shellKind, distribution, activeAgent, familyIsActive, activeMcp, activeOverride = false) {
+    function paneShellAgentItemsHtml(shellKind, distribution, activeAgent, familyIsActive, activeMcp, activeOverride = false, tmux = null) {
+        /* With the tmux option, "Plain shell" and the tmux button beside it are
+           one pair, like an agent and its MCP button: a plain shell outside
+           tmux, or one inside it, and exactly one of them wears the check. The
+           chevron after them lists the host's detached sessions to attach to. */
+        const offersTmux = tmux !== null;
+        const inTmux = offersTmux && Boolean(tmux.name);
+        const plainShell = familyIsActive && !activeAgent;
+        const plainShellRow = paneShellMenuItemHtml({
+            label: 'Plain shell',
+            active: plainShell && !inTmux,
+            icon: TERMINAL_PROMPT_ICON,
+            attrs: paneShellLaunchAttrs(shellKind, distribution, '', false)
+        });
         const rows = [
-            paneShellMenuItemHtml({
-                label: 'Plain shell',
-                active: familyIsActive && !activeAgent,
-                icon: TERMINAL_PROMPT_ICON,
-                attrs: paneShellLaunchAttrs(shellKind, distribution, '', false)
-            })
+            offersTmux
+                ? `<div class="pane-shell-menu-row">${plainShellRow}${paneShellTmuxButtonHtml(tmux.name, plainShell && inTmux)}${paneShellTmuxListToggleHtml(tmux.expanded)}</div>`
+                : plainShellRow
         ];
+        if (offersTmux && tmux.expanded) {
+            rows.push(`
+                <div class="pane-shell-menu-sub" role="group" aria-label="Detached tmux sessions">
+                    ${tmux.listHtml}
+                </div>
+            `);
+        }
         paneAgentMenuOptions().forEach(option => {
             const label = option.display_name || option.label || option.value;
             const isLive = familyIsActive && activeAgent === option.value;
@@ -365,6 +399,105 @@
             `);
         });
         return rows.join('');
+    }
+
+    /* "Plain shell" in tmux: the second half of that row's pair. Pressed
+       outside tmux it restarts the pane into a new tmux session; inside one it
+       is a relaunch like any checked row's, which opens a fresh tmux window. */
+    function paneShellTmuxButtonHtml(tmuxName, active) {
+        const title = tmuxName
+            ? `Plain shell in tmux session ${tmuxName}`
+            : 'Plain shell in tmux';
+        return `
+            <button
+                type="button"
+                role="menuitemradio"
+                class="pane-shell-menu-mcp pane-shell-menu-tmux${active ? ' is-active' : ''}"
+                aria-checked="${active ? 'true' : 'false'}"
+                title="${escHtml(title)}"
+                aria-label="${escHtml(title)}"
+                data-pane-shell-tmux="1"
+            >tmux</button>
+        `;
+    }
+
+    function paneShellTmuxListToggleHtml(expanded) {
+        const label = 'Attach to a detached tmux session';
+        return `
+            <button
+                type="button"
+                class="pane-shell-menu-expand${expanded ? ' is-expanded' : ''}"
+                data-pane-shell-expand="${TMUX_LIST_ROW_KEY}"
+                aria-expanded="${expanded ? 'true' : 'false'}"
+                title="${escHtml(label)}"
+                aria-label="${escHtml(label)}"
+            >${UI_CHEVRON_RIGHT_ICON}</button>
+        `;
+    }
+
+    /* Pressing a session attaches the pane to it as a plain shell in tmux, so
+       the pane then saves, closes and restores as that session's pane. */
+    function paneShellTmuxListHtml(pane) {
+        const list = _tmuxSessionLists.get(pane);
+        if (!list || list.state === 'loading') {
+            return '<div class="pane-shell-menu-note">Looking for detached tmux sessions…</div>';
+        }
+        if (list.state === 'error') {
+            return `
+                <div class="pane-shell-menu-note">${escHtml(list.error)}</div>
+                <button type="button" class="pane-shell-menu-item pane-shell-menu-retry" data-pane-shell-tmux-retry="1">
+                    <span class="pane-shell-menu-mark"></span>
+                    <span class="pane-shell-menu-label">Retry</span>
+                </button>
+            `;
+        }
+        if (!list.available) {
+            return '<div class="pane-shell-menu-note">tmux is not installed on this host</div>';
+        }
+        if (!list.sessions.length) {
+            return '<div class="pane-shell-menu-note">No detached tmux sessions on this host</div>';
+        }
+        return list.sessions.map(entry => paneShellMenuItemHtml({
+            label: entry.name,
+            hint: `${entry.windows} window${entry.windows === 1 ? '' : 's'}`,
+            attrs: `data-pane-shell-tmux-attach="${escHtml(entry.name)}"`
+        })).join('');
+    }
+
+    async function loadPaneTmuxSessions(index) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        if (!pane || !sessionId) {
+            return;
+        }
+        const list = { state: 'loading', available: true, sessions: [], error: '' };
+        _tmuxSessionLists.set(pane, list);
+        renderPaneShellMenu(index);
+        try {
+            const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/tmux-sessions`);
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || `tmux session lookup failed with status ${response.status}`);
+            }
+            Object.assign(list, {
+                state: 'ready',
+                available: data.tmux_available !== false,
+                sessions: (Array.isArray(data.sessions) ? data.sessions : [])
+                    .filter(entry => entry && typeof entry.name === 'string' && entry.name)
+                    .map(entry => ({ name: entry.name, windows: Number(entry.windows) || 0 }))
+            });
+        } catch (error) {
+            Object.assign(list, { state: 'error', error: error.message || 'tmux session lookup failed' });
+        }
+        /* A newer lookup, or another pane in this slot, owns what is shown. */
+        if (_tmuxSessionLists.get(pane) !== list) {
+            return;
+        }
+        const ownerIndex = terminals.indexOf(pane);
+        if (ownerIndex >= 0 && sessionIds[ownerIndex] === sessionId
+            && !paneShellMenuElement(ownerIndex)?.hidden) {
+            renderPaneShellMenu(ownerIndex);
+        }
     }
 
     /* A shell family row plus its right-hand chevron, and — while that chevron
@@ -472,15 +605,24 @@
                 ${shellRows}
                 ${paneShellMenuWslItemsHtml(index, activeKind, activeDistribution, activeAgent, activeMcp, activeOverride)}
             `;
-        } else if (paneSupportsAgentSwitch(session)) {
+        } else if (paneSupportsAgentSwitch(session) || paneSupportsTmuxSwitch(session)) {
             /* No shell family to hang the chevrons on, so the agent radio group
                is the whole section — and the pane it relaunches is the one it
                already runs, which is what an unstated shell means. An SSH pane
                lands here, and its agents keep their MCP buttons: a remote
-               pane's tools ride its own transport home. */
+               pane's tools ride its own transport home. Its running row also
+               carries the tmux toggle while the experimental option is on. */
+            const tmuxListOpen = _expandedShellAgentRows.get(index) === TMUX_LIST_ROW_KEY;
+            const tmux = paneSupportsTmuxSwitch(session)
+                ? {
+                    name: String(session.tmux_session || ''),
+                    expanded: tmuxListOpen,
+                    listHtml: tmuxListOpen ? paneShellTmuxListHtml(terminals[index]) : ''
+                }
+                : null;
             sections = `
-                <div class="pane-shell-menu-title">Agent</div>
-                ${paneShellAgentItemsHtml('', '', activeAgent, true, activeMcp, activeOverride)}
+                <div class="pane-shell-menu-title">${paneAgentMenuOptions().length ? 'Agent' : 'Shell'}</div>
+                ${paneShellAgentItemsHtml('', '', activeAgent, true, activeMcp, activeOverride, tmux)}
             `;
         }
 
@@ -580,8 +722,33 @@
                     _expandedShellAgentRows.delete(index);
                 } else {
                     _expandedShellAgentRows.set(index, rowKey);
+                    if (rowKey === TMUX_LIST_ROW_KEY) {
+                        loadPaneTmuxSessions(index);
+                        return;
+                    }
                 }
                 renderPaneShellMenu(index);
+                return;
+            }
+            const attach = event.target.closest('[data-pane-shell-tmux-attach]');
+            if (attach) {
+                restartSessionTmux(index, true, attach.dataset.paneShellTmuxAttach || '');
+                return;
+            }
+            if (event.target.closest('[data-pane-shell-tmux-retry]')) {
+                loadPaneTmuxSessions(index);
+                return;
+            }
+            /* The Plain shell / tmux pair moves the pane in or out of tmux; a
+               press that leaves it where it is relaunches like any row. */
+            const session = terminals[index]?._session;
+            const inTmux = paneSupportsTmuxSwitch(session) && Boolean(session.tmux_session);
+            if (event.target.closest('[data-pane-shell-tmux]')) {
+                if (inTmux) {
+                    relaunchSessionShell(index, { agent: '' });
+                } else {
+                    restartSessionTmux(index, true);
+                }
                 return;
             }
             /* Every relaunch target states its whole payload, so one lookup
@@ -589,6 +756,10 @@
                the button is a second target on the row, never a second class
                of row. */
             const launch = event.target.closest('[data-pane-shell-launch]');
+            if (launch && inTmux && !launch.dataset.paneShellAgent && !launch.dataset.paneShellKind) {
+                restartSessionTmux(index, false);
+                return;
+            }
             if (launch) {
                 relaunchSessionShell(index, {
                     shell: launch.dataset.paneShellKind || '',
@@ -641,6 +812,53 @@
         document.querySelectorAll('.pane-shell-menu:not([hidden])').forEach(menu => {
             renderPaneShellMenu(Number(menu.dataset.paneShellMenu));
         });
+    }
+
+    async function restartSessionTmux(index, enabled, attach = '') {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        if (!pane || !sessionId || !paneSupportsTmuxSwitch(pane._session)
+            || _pendingShellSwitchPanes.has(pane)) return;
+
+        _pendingShellSwitchPanes.add(pane);
+        renderPaneShellMenu(index);
+        globalThis.GridVibeTerminalReplies?.clearTerminalQueryResidue?.(pane);
+        pane.term?.reset?.();
+        showPlaceholderConnecting(index);
+        try {
+            const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/tmux`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(attach ? { enabled: true, session: attach } : { enabled })
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || `Tmux restart failed with status ${response.status}`);
+            }
+            const ownerIndex = terminals.indexOf(pane);
+            if (ownerIndex < 0 || sessionIds[ownerIndex] !== sessionId) return;
+            pane._session = data;
+            closeAllPaneShellMenus();
+            syncPaneIdentityChrome(ownerIndex, data);
+        } catch (error) {
+            console.error('[GridVibe Sessions] restartSessionTmux failed:', error);
+            showTerminalToast(error.message || 'Tmux restart failed', 'error');
+            const ownerIndex = terminals.indexOf(pane);
+            if (ownerIndex >= 0 && sessionIds[ownerIndex] === sessionId) {
+                syncPanePlaceholder(ownerIndex);
+                /* The view was cleared before the request so a fast reconnect
+                   could not race it; a refusal restarted nothing, so the old
+                   shell's output is still in its replay buffer. */
+                refreshTerminalDisplay(ownerIndex);
+            }
+        } finally {
+            _pendingShellSwitchPanes.delete(pane);
+            const ownerIndex = terminals.indexOf(pane);
+            if (ownerIndex >= 0 && sessionIds[ownerIndex] === sessionId
+                && !paneShellMenuElement(ownerIndex)?.hidden) {
+                renderPaneShellMenu(ownerIndex);
+            }
+        }
     }
 
     /* Relaunch one pane under the shell family, agent and tools a menu row

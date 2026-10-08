@@ -80,6 +80,7 @@ var AGENT_OPTIONS = [
     { value: 'other', label: 'other', display_name: 'other', mcp_supported: false }
 ];
 var LOCAL_SHELL_MODES_AVAILABLE = true;
+var appSettings = { ssh: { tmux_sessions: false } };
 var terminals = [];
 var sessionIds = [];
 
@@ -223,6 +224,12 @@ async function fetch(url, options) {
     if (String(url).includes('/api/wsl-distros')) {
         return { ok: true, json: async () => WSL_DISTROS };
     }
+    if (String(url).includes('/tmux-sessions')) {
+        if (TMUX_SESSIONS_REFUSED) {
+            return { ok: false, status: 409, json: async () => ({ error: 'Connect this pane to its host first' }) };
+        }
+        return { ok: true, json: async () => TMUX_SESSIONS };
+    }
     calls.order.push('request');
     /* Whatever happens to the grid between the press and the answer. */
     if (typeof ON_RESPONSE === 'function') { ON_RESPONSE(); }
@@ -232,6 +239,9 @@ async function fetch(url, options) {
     return { ok: true, json: async () => Object.assign({ host: 'relaunched' }, RELAUNCH_RESPONSE) };
 }
 var RELAUNCH_RESPONSE = {};
+/* What the pane's host answers for the tmux button's list. */
+var TMUX_SESSIONS = { tmux_available: true, sessions: [] };
+var TMUX_SESSIONS_REFUSED = false;
 /* The route's own refusal — an absent agent binary, say — which arrives after
    the pane has already been painted for the relaunch it is not getting. */
 var RELAUNCH_REFUSED = false;
@@ -268,7 +278,10 @@ function parseRows(html) {
                so it is told apart by the class the page styles it with. The
                override button shares the base class and adds its own. */
             tools: /class="[^"]*pane-shell-menu-mcp/.test(match[1])
-                && !/pane-shell-menu-mcp-override/.test(match[1]),
+                && !/pane-shell-menu-mcp-override/.test(match[1])
+                && !/pane-shell-menu-tmux/.test(match[1]),
+            /* The tmux toggle wears the same pill, but is its own control. */
+            tmux: /pane-shell-menu-tmux/.test(match[1]),
             override: /pane-shell-menu-mcp-override/.test(match[1]),
             /* The update button, likewise: an icon and an aria-label. */
             update: /class="[^"]*pane-shell-menu-update/.test(match[1])
@@ -285,11 +298,14 @@ async function press(index, row) {
     const target = {
         closest: selector => {
             if (selector === '[data-pane-shell-expand]') { return row.expander ? node : null; }
+            if (selector === '[data-pane-shell-tmux]') { return row.tmux ? node : null; }
+            if (selector === '[data-pane-shell-tmux-attach]') { return row.dataset.paneShellTmuxAttach ? node : null; }
+            if (selector === '[data-pane-shell-tmux-retry]') { return row.dataset.paneShellTmuxRetry ? node : null; }
             if (selector === '[data-pane-shell-launch]') { return row.launch ? node : null; }
             /* The MCP button is a sibling control, not a menu item, so it is
                reachable only through the launch lookup above. */
             if (selector === '.pane-shell-menu-item') {
-                return row.expander || row.tools || row.override || row.update ? null : node;
+                return row.expander || row.tools || row.override || row.update || row.tmux ? null : node;
             }
             return null;
         }
@@ -1479,6 +1495,197 @@ class PaneWithoutARelaunchTestCase(TerminalShellMenuTestCase):
         )
         self.assertEqual(result["reset"], [0])
         self.assertFalse(result["menuOpen"])
+
+
+class TmuxRestartMenuTestCase(TerminalShellMenuTestCase):
+    def test_tmux_button_is_gated_and_keeps_the_ssh_dropdown_without_agents(self):
+        result = self._run_node(
+            """
+            AGENT_OPTIONS = [];
+            const before = paneHasResetMenu(sshPane());
+            appSettings.ssh.tmux_sessions = true;
+            const rows = await openMenu(0, sshPane());
+            const tmux = rows.find(row => row.tmux);
+            report({ before, menu: paneHasResetMenu(sshPane()), label: tmux?.label,
+                     explorer: paneHasResetMenu(sshPane({ startup_mode: 'explorer' })) });
+            """
+        )
+        self.assertEqual(result, {
+            "before": False, "menu": True, "label": "Plain shell in tmux", "explorer": False,
+        })
+
+    def test_plain_shell_and_tmux_are_one_pair_beside_each_other(self):
+        """Like an agent and its MCP button: one row, and exactly one of the
+        two wears the check -- none while an agent runs."""
+        result = self._run_node(
+            """
+            appSettings.ssh.tmux_sessions = true;
+            function pairFor(index) {
+                const groups = paneMenu(index).innerHTML
+                    .split('<div class="pane-shell-menu-row">').slice(1)
+                    .map(chunk => chunk.split('</div>')[0])
+                    .filter(group => group.includes('data-pane-shell-tmux'));
+                return groups.map(group => group.includes('>Plain shell<'));
+            }
+            function marks(rows) {
+                return { plain: rows.find(row => row.label === 'Plain shell').checked,
+                         tmux: rows.find(row => row.tmux).checked,
+                         buttons: rows.filter(row => row.tmux).length };
+            }
+            const plain = marks(await openMenu(0, sshPane()));
+            const pair = pairFor(0);
+            closeAllPaneShellMenus();
+            const inTmux = marks(await openMenu(0, sshPane({ tmux_session: 'work' })));
+            closeAllPaneShellMenus();
+            const agentInTmux = marks(await openMenu(0, sshPane({
+                startup_mode: 'agent', agent_selection: 'claude', tmux_session: 'work'
+            })));
+            report({ plain, pair, inTmux, agentInTmux });
+            """
+        )
+        self.assertEqual(result["pair"], [True])
+        self.assertEqual(result["plain"], {"plain": True, "tmux": False, "buttons": 1})
+        self.assertEqual(result["inTmux"], {"plain": False, "tmux": True, "buttons": 1})
+        self.assertEqual(result["agentInTmux"], {"plain": False, "tmux": False, "buttons": 1})
+
+    def test_tmux_enters_tmux_and_plain_shell_leaves_it(self):
+        result = self._run_node(
+            """
+            appSettings.ssh.tmux_sessions = true;
+            RELAUNCH_RESPONSE = sshPane({ tmux_session: 'work' });
+            const rows = await openMenu(0, sshPane());
+            await press(0, rows.find(row => row.tmux));
+            const entered = { request: calls.requests[calls.requests.length - 1],
+                              order: calls.order.slice(0, 3),
+                              name: terminals[0]._session.tmux_session };
+            RELAUNCH_RESPONSE = sshPane({ tmux_session: '' });
+            handlePaneResetButton(0);
+            await press(0, rowsFor(0).find(row => row.label === 'Plain shell'));
+            report({ entered, left: calls.requests[calls.requests.length - 1] });
+            """
+        )
+        self.assertEqual(result["entered"]["request"], {
+            "url": "/api/sessions/sess-ssh/tmux", "body": {"enabled": True},
+        })
+        self.assertEqual(result["entered"]["order"], ["term-reset", "connecting", "request"])
+        self.assertEqual(result["entered"]["name"], "work")
+        self.assertEqual(result["left"], {
+            "url": "/api/sessions/sess-ssh/tmux", "body": {"enabled": False},
+        })
+
+    def test_a_press_that_keeps_the_pane_where_it_is_relaunches_like_any_row(self):
+        result = self._run_node(
+            """
+            appSettings.ssh.tmux_sessions = true;
+            let rows = await openMenu(0, sshPane());
+            await press(0, rows.find(row => row.label === 'Plain shell'));
+            const outside = calls.requests[calls.requests.length - 1];
+            closeAllPaneShellMenus();
+            RELAUNCH_RESPONSE = sshPane({ tmux_session: 'work' });
+            rows = await openMenu(0, sshPane({ tmux_session: 'work' }));
+            await press(0, rows.find(row => row.tmux));
+            const inside = calls.requests[calls.requests.length - 1];
+            report({ outside: outside.url, inside: inside.url, body: inside.body });
+            """
+        )
+        self.assertEqual(result["outside"], "/api/sessions/sess-ssh/shell")
+        # In tmux already: the server opens a fresh window in the same session.
+        self.assertEqual(result["inside"], "/api/sessions/sess-ssh/shell")
+        self.assertEqual(result["body"]["agent"], "")
+
+    def test_tmux_chevron_lists_detached_sessions_and_attaches_one(self):
+        result = self._run_node(
+            """
+            appSettings.ssh.tmux_sessions = true;
+            TMUX_SESSIONS = { tmux_available: true, sessions: [
+                { name: 'api_123456', windows: 2 }, { name: 'logs', windows: 1 }
+            ] };
+            let rows = await openMenu(0, sshPane());
+            const chevron = rows.find(row => row.dataset.paneShellExpand === 'tmux');
+            await press(0, chevron);
+            await new Promise(resolve => setImmediate(resolve));
+            rows = rowsFor(0);
+            const listed = rows.filter(row => row.dataset.paneShellTmuxAttach)
+                .map(row => [row.label, row.dataset.paneShellTmuxAttach]);
+            const lookup = calls.requests.find(r => r.url.includes('/tmux-sessions'));
+            const hint = /2 windows/.test(paneMenu(0).innerHTML);
+            RELAUNCH_RESPONSE = sshPane({ tmux_session: 'logs' });
+            await press(0, rows.find(row => row.dataset.paneShellTmuxAttach === 'logs'));
+            report({ listed, lookup: lookup && lookup.url, hint,
+                     attach: calls.requests[calls.requests.length - 1],
+                     name: terminals[0]._session.tmux_session });
+            """
+        )
+        self.assertEqual(result["lookup"], "/api/sessions/sess-ssh/tmux-sessions")
+        self.assertEqual(result["listed"], [["api_123456", "api_123456"], ["logs", "logs"]])
+        self.assertTrue(result["hint"])
+        self.assertEqual(result["attach"], {
+            "url": "/api/sessions/sess-ssh/tmux", "body": {"enabled": True, "session": "logs"},
+        })
+        self.assertEqual(result["name"], "logs")
+
+    def test_tmux_list_says_when_there_is_nothing_and_retries_a_failure(self):
+        result = self._run_node(
+            """
+            appSettings.ssh.tmux_sessions = true;
+            /* Wired once; reopened the way the header button reopens it. */
+            await openMenu(0, sshPane());
+            async function openList() {
+                closeAllPaneShellMenus();
+                handlePaneResetButton(0);
+                await press(0, rowsFor(0).find(row => row.dataset.paneShellExpand === 'tmux'));
+                await new Promise(resolve => setImmediate(resolve));
+                return paneMenu(0).innerHTML;
+            }
+            const empty = await openList();
+            TMUX_SESSIONS = { tmux_available: false, sessions: [] };
+            const missing = await openList();
+            TMUX_SESSIONS_REFUSED = true;
+            const failed = await openList();
+            TMUX_SESSIONS_REFUSED = false;
+            TMUX_SESSIONS = { tmux_available: true, sessions: [{ name: 'back', windows: 1 }] };
+            await press(0, rowsFor(0).find(row => row.dataset.paneShellTmuxRetry));
+            await new Promise(resolve => setImmediate(resolve));
+            report({
+                empty: /No detached tmux sessions/.test(empty),
+                missing: /tmux is not installed/.test(missing),
+                failed: /Connect this pane to its host first/.test(failed) && /Retry/.test(failed),
+                retried: rowsFor(0).some(row => row.dataset.paneShellTmuxAttach === 'back'),
+                toasts: calls.toasts.length
+            });
+            """
+        )
+        self.assertEqual(result, {
+            "empty": True, "missing": True, "failed": True, "retried": True, "toasts": 0,
+        })
+
+    def test_refusal_restores_placeholder_and_replaced_slot_is_untouched(self):
+        result = self._run_node(
+            """
+            appSettings.ssh.tmux_sessions = true;
+            RELAUNCH_REFUSED = true;
+            let rows = await openMenu(0, sshPane({ tmux_session: 'work' }));
+            await press(0, rows.find(row => row.label === 'Plain shell'));
+            const refused = { toasts: calls.toasts, synced: calls.synced,
+                              replayed: calls.reset.slice(),
+                              body: calls.requests[calls.requests.length - 1].body };
+            RELAUNCH_REFUSED = false;
+            closeAllPaneShellMenus();
+            terminals[0]._session = sshPane();
+            handlePaneResetButton(0);
+            rows = rowsFor(0);
+            const replacement = { _session: sshPane({ session_id: 'other' }), term: {} };
+            ON_RESPONSE = () => { terminals[0] = replacement; sessionIds[0] = 'other'; };
+            await press(0, rows.find(row => row.tmux));
+            report({ refused, replacement: replacement._session });
+            """
+        )
+        self.assertEqual(result["refused"]["body"], {"enabled": False})
+        self.assertEqual(result["refused"]["synced"], [0])
+        # Nothing restarted, so the cleared view is replayed from the old shell.
+        self.assertEqual(result["refused"]["replayed"], [0])
+        self.assertEqual(len(result["refused"]["toasts"]), 1)
+        self.assertEqual(result["replacement"]["session_id"], "other")
 
 
 if __name__ == "__main__":
