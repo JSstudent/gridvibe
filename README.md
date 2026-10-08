@@ -20,11 +20,13 @@
 
 ## Why GridVibe
 
-- **A grid, not a tab pile.** Pick 1, 2, 3, 4, 6, or 8 panes, pick a target per pane, hit launch. SSH, WSL, PowerShell, cmd, or a local repo — side by side, resizable, splittable.
-- **Agents are a dropdown, not a chore.** Eight agent CLIs are first-class pane types, most with an **Auto mode** toggle. GridVibe checks for the binary on the target machine, so you hear about a missing install *before* the pane opens.
-- **Talk to your agents.** Fully offline voice input dictates straight into any terminal — or into the file you have open in the explorer's editor. Push-to-talk included. Off by default.
-- **Never leave the grid.** A file explorer, a Git sidebar, and a live browser preview drop into any pane, so your files, your commits, and the running app are all one click away.
-- **Set it up once.** Save a tab as a preset, save the whole workspace, restart, get it all back — right down to which group you were working in.
+- **A grid, not a tab pile.** Pick 1, 2, 3, 4, 6, or 8 panes and a target for each — SSH, WSL, PowerShell, cmd, or a local repo — side by side, resizable, splittable.
+- **Agents are a dropdown, not a chore.** Eight agent CLIs are first-class pane types, and GridVibe tells you about a missing install *before* the pane opens.
+- **Agents that build the grid.** Give an agent GridVibe's own tools and it can split panes, launch workers, hand them tasks, and collect their results.
+- **SSH work that survives.** Run SSH panes inside tmux on the host, and a dropped connection or a restart no longer ends what they were running.
+- **Talk to your agents.** Fully offline voice input dictates into any terminal or open file. Off by default.
+- **Never leave the grid.** A file explorer, a Git sidebar, and a live browser preview drop into any pane.
+- **Set it up once.** Save a tab as a preset, save the whole workspace, restart, and get it all back.
 
 ## Screenshots
 
@@ -36,7 +38,7 @@ https://github.com/user-attachments/assets/90cc03b2-16d8-4b8b-b3a4-80630340e937
 
 ## Quick Start
 
-**Python 3.10+ is the only prerequisite.** The launcher scripts create and repair the virtual environment, install dependencies, and start the app.
+**Python 3.10+ is the only prerequisite.** The launcher scripts create the virtual environment, install dependencies, and start the app.
 
 ```powershell
 # Windows
@@ -57,16 +59,12 @@ python -m pip install --upgrade -r requirements.txt
 python main.py                   # → http://localhost:5050
 ```
 
-Both launchers ask for **Desktop** (native window) or **Browser** mode. Local cmd/PowerShell/WSL panes work in either; a native window also needs `requirements-desktop.txt`.
-
-After a successful first run, an unchanged environment starts without touching pip — including offline. Changed requirements, a different interpreter, or a failed import check trigger setup again. To force a full reinstall and verification, run the root launcher with `--repair` (`.\GridVibe.bat --repair` or `./GridVibe.sh --repair`).
-
-### Getting & updating it
+Both launchers ask for **Desktop** (native window, needs `requirements-desktop.txt`) or **Browser** mode. Later starts skip pip unless something changed; add `--repair` to the root launcher (`.\GridVibe.bat --repair` or `./GridVibe.sh --repair`) to force a full reinstall.
 
 | | Get it | Update it |
 | --- | --- | --- |
 | **Clone** (recommended) | `git clone https://github.com/JSstudent/gridvibe.git` | The launcher's **Check for updates** button fast-forwards in place |
-| **Release ZIP** (no Git) | **Source code (zip)** from [Releases](https://github.com/JSstudent/gridvibe/releases) | Download the next release — in-app update needs a clone, and says so |
+| **Release ZIP** (no Git) | **Source code (zip)** from [Releases](https://github.com/JSstudent/gridvibe/releases) | Download the next release |
 
 A Windows installer that bundles Python is planned for **2.0.0**.
 
@@ -80,12 +78,12 @@ python webview_launcher.py         # auto: native window, browser fallback
 python webview_launcher.py --mode browser|native
 ```
 
-- **Native desktop mode** — the launcher and each workspace are real OS windows. **Minimize all** (`Alt+X`, or the top-bar button) sends every GridVibe window to the taskbar at once, and App Settings can make minimizing any one of them do the same.
-- **Browser mode** — the launcher opens in a new browser window and each workspace as a tab beside it. Browsers only allow one tab per click, so restoring several workspaces at once opens the first and reports the rest. Allow pop-ups for GridVibe's address to get them all.
+- **Native desktop mode** — the launcher and each workspace are real OS windows; **Minimize all** (`Alt+X`) sends them all to the taskbar.
+- **Browser mode** — each workspace opens as a tab. Allow pop-ups for GridVibe's address so restoring several workspaces can open them all.
 
 ## Agent CLIs
 
-Pick an agent per pane from the launcher's **Startup Mode** list, where each agent shows the icon and brand colour its pane will wear. GridVibe checks whether the binary is on `PATH` **in the target environment** (the remote host for SSH, the chosen distro for WSL, Windows for PowerShell/cmd) and shows install guidance when it isn't.
+Pick an agent per pane from the launcher's **Startup Mode** list. GridVibe checks for the binary **on the target** — the remote host, the WSL distro, or Windows — and shows install guidance when it is missing.
 
 | Agent | Binary | Auto mode | GridVibe tools |
 | --- | --- | --- | --- |
@@ -98,190 +96,122 @@ Pick an agent per pane from the launcher's **Startup Mode** list, where each age
 | Grok Build (xAI) | `grok` | Yes | — |
 | Hermes Agent | `hermes` | Yes | — |
 
-**GridVibe tools** is the MCP checkbox — [the section below](#gridvibe-tools-mcp) is what it gives the agent. The four agents without it have no way to register a server for one session only; theirs would edit your own config permanently, so GridVibe does not offer it.
-
-GridVibe does not bundle the CLIs. If everything shows `Missing`, install it and put its folder on `PATH` — for npm-installed agents on Windows that is usually `%APPDATA%\npm` (check with `npm prefix -g`). Restart GridVibe after PATH changes.
+GridVibe does not bundle the CLIs. If an agent shows `Missing`, install it and put its folder on `PATH` (for npm installs on Windows, usually `%APPDATA%\npm`), then restart GridVibe.
 
 ## GridVibe Tools (MCP)
 
-Give an agent the **MCP** checkbox and it can see and build GridVibe workspaces from inside its own pane — so you stop describing your grid to it and start asking for the grid you want. Tick **MCP** beside the agent in the launcher, or press the **MCP** button on a row in a pane's 🔄 dropdown. Claude Code, Codex, Copilot and OpenCode support it.
-
-**Install it first.** The tools ship with GridVibe; the package they need does not, so a normal install leaves them out.
+Tick **MCP** beside an agent in the launcher, or press **MCP** on its row in a pane's 🔄 dropdown, and the agent can see and build GridVibe workspaces from inside its own pane. The tools need one optional package:
 
 ```bash
-make mcp-deps                                            # into GridVibe's own interpreter
-python -m pip install --upgrade -r requirements-mcp.txt  # the same thing, without make
-
-make mcp-status   # run this when an agent reports the server will not start
+make mcp-deps     # or: python -m pip install --upgrade -r requirements-mcp.txt
+make mcp-status   # names the broken link when an agent reports the server will not start
 ```
 
-Until it is installed the checkbox still appears and the agent simply finds no tools. `make mcp-status` walks the whole chain from the outside — the generated config, the interpreter, the entry point, the handshake — and names the link that is broken.
+- **It knows where it is** — every workspace, session tab, pane and agent, which agent CLIs are installed, the saved presets, and which pane it is itself in.
+- **It shapes the grid** — create workspaces, launch and split panes, resize dividers, relaunch a pane as another agent, Files or Browser, focus or move sessions, save a layout as a preset, and close finished work.
+- **It runs a crew** — start Claude Code, Codex, Copilot or OpenCode workers with a task, send them follow-ups, and wait for their reports.
+- **It asks first** — an agent only replaces, clears or closes panes it created. For anything else it puts GridVibe's own question to you, and chains of agents launching agents stop five deep.
+- **Override mode** — tick **Override** beside **MCP** and, after a warning, the agent stops asking. Its MCP frame turns red.
+- **Works over SSH** — an SSH pane gets the tools with nothing installed on the host, and its new panes open on that same host.
+- **Stays out of your way** — an agent's splits and new tabs never steal your focus, and saved presets reach it without any credentials.
 
-### The twenty-seven tools
-
-| Tier | Tools | What the agent can do |
-| --- | --- | --- |
-| **Read** | `gridvibe_status` `list_workspaces` `list_panes` `list_agents` `list_agent_types` `list_saved_layouts` `whoami` `read_handoff` | See every workspace and the session tabs in it, every pane and where it sits in the grid, every agent and whether it is working, which agent CLIs it can start, every saved preset, which pane it is itself in, and the task another agent handed it |
-| **Hand back** | `report_result` `wait_for_task` `send_task` `wait_for_results` | Report the outcome of a handed-over task to the agent that asked for it, stand by for its next task, send the next task to an agent already working for it, and wait for the reports of the agents it handed tasks to |
-| **Create** | `create_workspace` `launch_panes` `open_window` `split_pane` | Make a workspace, launch a group of panes into it, give it a window, split any pane side-by-side or stacked, and hand a new agent its task |
-| **Replace** | `set_pane_agent` `set_pane_mode` | Relaunch a pane under a different agent (optionally with a task) or back to a plain shell, or turn it into a file explorer or a browser preview |
-| **Clear** | `clear_pane` | Clear one terminal pane and its replay buffer, exactly as the 🧹 button does |
-| **Navigate** | `focus_session` `focus_pane` `move_session` `resize_divider` | Bring a session tab or a single pane to the foreground, move a session to another workspace, and resize a divider in any session tab |
-| **Save** | `save_group_layout` | Save an open session's pane types and layout as a named preset for later launches |
-| **Close** | `close_pane` `close_group` `close_workspace` | End a worker pane, a session tab, or a live workspace; saved workspace snapshots remain available |
-
-- **Agents can close finished work.** An agent can close panes it created, or whole session tabs and workspaces after every affected pane passes the checks. Closing one pane preserves the tab's existing arrangement and divider proportions exactly as its **×** button does; an agent still cannot close its own pane or a container holding it.
-- **Sessions by the name on their tab.** Ask for *"bring the gridvibe_main session forward"* or *"move test_session to the gridvibe_2 workspace and show it"*. Two tabs with the same name are never guessed between, and the agent only reports a tab as shown once the window confirms it.
-- **New panes start where you say.** A stated folder is checked on the pane's own machine and wins over where the pane is standing, including a folder above the one a Files pane is showing.
-- **Agents can shape the grid.** Ask an agent to split a pane, then set a divider to a fraction of the session's width or height. GridVibe checks each pane's minimum size before applying it.
-- **Agents can save a session layout.** Ask an agent to save the current session as a named preset, optionally rooted at a stated folder. The session's window must be open so GridVibe can capture its latest layout.
-- **Every installed agent, not just the MCP ones.** An agent can list which agent CLIs are available and launch any of them. A missing agent is refused rather than quietly opened as a plain terminal.
-- **An agent only touches panes it made.** Replace, clear and close tools refuse the agent's own pane, and refuse panes it did not create — including panes from before a restart — unless you authorize that specific action in the conversation. Moving a session it did not make needs your word the same way.
-- **Agents hand each other tasks.** An agent that splits off or launches a Claude Code, Codex, Copilot or OpenCode pane can give it a task, and the new agent starts on it rather than waiting — ask for *"hand the findings to a new Codex agent below this one."* The task never goes to another machine, and nothing is typed into an agent that is already running.
-- **Agents report back.** An agent handed a task reports its outcome to the agent that handed it over, which can wait for several at once — ask for *"hand this to three Codex agents beside this one and wait for their results."* A pane closed before it reported is reported as ended, so nothing waits forever.
-- **Agents keep the conversation going.** An agent can send the next task to an agent it already handed one to, without restarting it, so the worker keeps everything it knows — ask for *"have a Claude agent below guess my number, and keep answering until it gets it right."* The worker stands by for the next task only when its task asks it to.
-- **It asks before it replaces.** Refused a pane it did not make, an agent gets GridVibe's own question to put to you — which pane, and what it would end — and acts only on your yes.
-- **Override mode, when you want it to stop asking.** Tick **Override** beside **MCP** in the launcher, or pick **Override** on the pane's 🔄 dropdown, and after a warning that agent closes, moves, relaunches, re-modes and clears panes it did not create without asking. It still never touches its own pane or sends a task to another machine, and its MCP frame, on the pane header and on its sidebar row, turns red.
-- **Agents launching agents is bounded.** A pane an agent creates counts one generation deeper than the pane that asked for it, and the chain stops after five.
-- **New panes open where the asking agent is.** A tool called from an SSH pane opens its panes on that same host over the same connection, and refuses rather than quietly falling back to this machine. They land in the workspace that agent's tab is in *now*, so moving a session between workspaces takes its agent with it.
-- **SSH panes get the tools too**, with nothing installed on the remote host. The pane reaches GridVibe back down its own connection, on a port that exists only while the pane does, is reachable only from that host, and answers only that pane's own requests.
-- **No credential ever reaches an agent.** Saved presets come back as shapes — layout, pane count, what each pane is — never as a connection.
-- **Agents work in the background.** In the native window, an agent's splits, resizes and new tabs never switch your tab or bring a window forward, and a window it opens starts minimized; only asking an agent to focus or show something moves your view.
-- **Splitting and resizing need a window open.** An agent can split a pane or move a divider in any session tab of an open, unminimized workspace window without switching you to it, and asks you to restore the window rather than bringing it forward itself; a split in browser mode is refused as *no window available* rather than guessed at. Opening a workspace works in either mode.
-
-### In use
-
-Ask, in the pane you are already sitting in:
+Ask, in the pane you are already in:
 
 > *Split this pane stacked, run the dev server below me, and put a browser preview beside it on `http://localhost:3000`.*
 
-> *Make me a workspace called Migration with four Codex panes — one per service, each in that service's folder — and open it.*
+> *Hand this to three Codex agents beside this one and wait for their results.*
 
-The agent reads where it is and what it is running on, makes the panes, and tells you what it made. Ask for something outside its fence and it names the reason rather than doing something near enough: *that pane was not created by me.*
+Every tool, its gates and its limits: [`gridvibe_mcp/README.md`](gridvibe_mcp/README.md).
 
-The full reference — every tool's arguments, the gates, the SSH tunnel, and the stated weaknesses — is [`gridvibe_mcp/README.md`](gridvibe_mcp/README.md).
+## SSH Sessions in tmux
+
+*Experimental, off by default.* Turn on **App Settings ▸ Terminal ▸ Run SSH terminals in tmux** and an SSH terminal or agent pane can live in a tmux session on the remote host, so a dropped connection, a closed pane or a GridVibe restart no longer ends what it was running.
+
+- **Launch into tmux** — tick **Run in tmux** on an SSH terminal or agent row. Type a session name to attach to it, or leave it blank for a new session named after the session tab.
+- **Switch a live pane in or out** — the **tmux** button beside **Plain shell** in a pane's 🔄 dropdown moves it into a new tmux session or back to a plain shell. Its chevron lists the host's detached sessions to attach to.
+- **Comes back on its own** — reconnect, workspace restore and a saved preset reattach the same session. Only the session is restored; what runs inside it is whatever tmux kept running.
+- **Relaunch in a new window** — changing the pane's agent opens a new tmux window, and the session's other windows keep running.
+- **Close means detach** — the session keeps running. Tick **Also end the tmux session** in the close dialog to end it.
+- **Splits you make get their own session** — a split an agent asks for opens a plain shell, so nothing outlives GridVibe without your say.
+- **Nothing typed into a session it found** — attaching never types a command; a startup command or agent only starts in a session or window GridVibe just created.
+- **Your tmux, your config** — scrollback, mouse and key bindings follow your own `~/.tmux.conf`. A host without tmux gets a plain shell and a notice.
 
 ## Voice Input
 
-Optional, fully offline, **off by default**. Turn it on in **App Settings** (the gear on either page), pick a backend (`Vosk` or `faster-whisper`), a language, and optionally a capture profile, microphone, and push-to-talk keybind.
+Optional, fully offline, **off by default**. Turn it on in **App Settings**, pick a backend (`Vosk` or `faster-whisper`) and a language, and optionally a microphone and push-to-talk key.
 
-- **In a terminal** — hit the 🎙️ button in any pane header and talk.
-- **In a file** — the explorer's in-place editor gets its own 🎙️ beside **Save**. Dictation lands at the caret and undoes with `Ctrl+Z` in one step.
-- **One mic at a time**, terminals and editors alike. Leaving edit mode stops recording.
-- **Missing packages?** App Settings offers **Install voice dependencies** and loads them without a restart, or run `python -m pip install --upgrade -r requirements-voice.txt`.
+- **In a terminal** — the 🎙️ button in any pane header.
+- **In a file** — the explorer's editor has its own 🎙️; dictation lands at the caret and undoes in one `Ctrl+Z`.
+- **Missing packages?** App Settings offers **Install voice dependencies**, or run `python -m pip install --upgrade -r requirements-voice.txt`.
 
-Browser mode is the most reliable for microphone permissions. Settings apply live to open workspace tabs. Details: [`docs/voice_guideline.md`](docs/voice_guideline.md).
+Browser mode is the most reliable for microphone permissions. Details: [`docs/voice_guideline.md`](docs/voice_guideline.md).
 
 ## Sessions & Workspaces
 
-- **Session tabs** — keep related panes together in draggable tabs. `Alt+1`–`Alt+9` switches, middle-click closes, and broadcast typing sends your keystrokes to every pane in the active tab.
-- **Same for all** — tick it in the launcher's Terminal Setup and every terminal launches with Terminal 1's settings, from one card. Each pane keeps its own title and tmux session, and override mode is never copied.
-- **Saved sessions** — save a setup as a reusable preset and import it later; re-saving one records where each pane is working now, not where the preset was created. Stored SSH passwords are encrypted, and are never written to a workspace snapshot.
-- **Save & restore** — GridVibe autosaves, and **Save Workspace** saves on demand. A restart brings back tabs, layouts, commands, the active group, and explorer presentation, with each pane reopening in the directory it was *working in*.
-- **Resume agent conversations** *(experimental, off by default)* — turn on **App Settings ▸ Agents ▸ Resume agent conversations on restore** and a restored Claude Code or Codex pane reopens the conversation it was in, once that conversation has had a prompt, rather than a new one. Saved presets and a relaunch from the pane's 🔄 dropdown always start fresh.
-- **SSH terminals in tmux** *(experimental, off by default)* — turn on **App Settings ▸ Terminal ▸ Run SSH terminals in tmux** and tick **Run in tmux** on an SSH terminal or agent row. The pane runs in a tmux session on the host that keeps running after the pane closes or GridVibe exits, and reattaches on reconnect, restore or a preset launch; only the session comes back, not the agent or mode.
-- **Ending a tmux session** — closing a tmux pane detaches by default; tick **Also end the tmux session** in its close dialog to end it. Scrollback and mouse follow your own `~/.tmux.conf`.
-- **Close & restart** — voluntary close, manual restart, and update restart share one in-page choice: continue without saving, save every workspace, or save every preset and then every workspace. A pane-list mismatch offers **Synchronize panes & retry save**; a failed save leaves the app open.
-- **Multiple workspaces** — optionally keep separate projects in separate windows, move tabs between them without restarting terminals, and switch with `Alt+W` / `Alt+Shift+W`.
-- **The launcher follows you** — opening it from a workspace (`Alt+Q`) brings its window up on that workspace's screen, with the next launch already aimed at that workspace. The caret beside **Launch** picks any other destination, and a launcher already on that screen stays where you put it.
-- **Updates** — **Check for updates** fast-forwards a Git clone, then offers the same save choices.
-
-If a local pane's folder has been deleted since it was saved, the pane opens with a notice naming it and does not run its startup command or agent somewhere else. The saved path is kept, so the pane comes back correctly once the folder does.
-
-Closing a workspace asks first and offers **Cancel**, **Save and close**, or **Close workspace**; a failed save cancels the close. It ends the workspace's terminals but keeps it available to restore. **Close and forget** drops both the workspace and its snapshot; closing only the window leaves its terminals running.
+- **Session tabs** — group related panes in draggable tabs. `Alt+1`–`Alt+9` switches, and broadcast typing sends your keystrokes to every pane in the tab.
+- **Same for all** — tick it in the launcher's Terminal Setup and every terminal launches with Terminal 1's settings.
+- **Saved presets** — save a setup and launch it again later. Stored SSH passwords are encrypted.
+- **Save & restore** — GridVibe autosaves, and a restart brings back tabs, layouts, explorers and the active group, with each pane in the directory it was working in.
+- **Resume agent conversations** *(experimental, off by default)* — with **App Settings ▸ Agents ▸ Resume agent conversations on restore** on, a restored Claude Code or Codex pane reopens the conversation it was in.
+- **Multiple workspaces** — optionally keep projects in separate windows, move tabs between them without restarting terminals, and switch with `Alt+W`.
+- **Close, restart & update** — one in-page choice: continue without saving, save every workspace, or save presets too. A failed save leaves the app open.
 
 ## Agent Dashboard
 
-See **every session in every workspace**, agents first, in a sidebar you can keep beside your panes (the handle at the start of the session tab line), or open the same list and follow selected crews in the dashboard dialog (`Alt+A` or the dashboard button).
+Every session in every workspace, agents first, in a sidebar docked beside your panes or a dialog you can park on a second screen (`Alt+A`).
 
-- **Keep the overview beside your work** — the docked sidebar stays open as you work or switch windows. Each workspace remembers whether it is open.
-- **See which agent you are typing into** — the sidebar row of the agent pane holding your keyboard focus wears the same accent ring as the pane, and follows you as you click between panes.
-- **Widen it when you need more room** — drag the sidebar's inner edge from its default width up to twice that width. The chosen scale is saved with the workspace and adapts to the window size.
-- **Put it on the side you want** — **App Settings ▸ Agents ▸ Agent Dashboard Side** docks the sidebar left or right — pick the card that shows it on that edge — and every open window moves as soon as you save. The handle, its marks and the rows are the same either way.
-- **Three levels** — a workspace is a titled band, a session tab is a card inside it drawn in that tab's own colour, and each agent is one row inside the card.
-- **Each list row on one line** — a leading status dot, the agent's mark and its chat title. A blue frame round the mark means the agent has GridVibe tools, red in override mode, and a small framed **A** on its corner means it was launched with auto-approval; point at the mark for the words.
-- **The state is the leading mark** — a spinning green ring while working, amber z's while idle, a red dot when unreachable. Point at it for the words: how long it has been idle, or what went wrong.
-- **The rest is one hover away** — pointing at a row gives the full chat title, where the pane is, and what it runs on (`SSH`, `WSL`, `PowerShell`, `cmd`).
-- **A badge that means something** — the button counts the agents **working right now**, not how many you have open. No badge means every agent is sitting at a prompt or waiting on another agent.
-- **See who handed work to whom** — the sidebar draws a separate lane for each crew, branches coloured by each task's state, and a count of reported workers on the orchestrator's row. Finished reports stay as solid lines with a slow pulse.
-- **Follow the crews you choose** — in the dialog, right-click a crew member to show or hide its diagram, use **ContextMenu** or **Shift+F10** on its row, or hide an open diagram with its **×** while its agents keep running. The dialog fits the open diagrams within three quarters of the window, stacks them below the list on narrow screens, and removes crews that end.
-- **Highlight a whole crew** — hover a crew member in either list, or click empty space inside its diagram to highlight the crew and its sidebar lines. Click the frame again to clear it; opening another diagram or hiding the highlighted one also clears the graph highlight.
-- **See each worker's task** — crew tiles show the agent icon and terminal title in its agent's colour, with the current task label or chat line underneath. Session, status, round and time share one compact row.
-- **Crew links survive a restart** — restoring a workspace brings its crews back on the board and sidebar as finished history, never as work in flight. A worker that was still working shows `ended`, and a reported one notes that its report was not kept.
-- **Waiting is not working** — an agent waiting on its crew, or standing by for its next task, wears a dotted mark instead of the working spinner.
-- **Click anything to go there** — a row in either list, its session, or its workspace, or a node on a crew board, opens or focuses that window at that tab.
-- **Keep the dialog up while you work elsewhere** — it stays open when you move to another window, so you can leave it on a second screen. It closes when you click beside it, reach a pane in its own workspace, or open it somewhere else.
-- **Close from either list** — a session card's **×** and a band's **Close workspace** both offer **Cancel**, **Save and close**, or the plain close; a failed save cancels the close. **Close window** in native mode keeps the sessions running; these actions leave the overview open.
-- **Sessions without agents are listed too**, sorted after the ones that have them, because the sidebar is also the fastest way to reach any tab in any window.
-- **Nothing is typed into a running agent** — the chat title and the working/idle reading both come from the pane's own output, and the check for what a pane is running reads this machine's process list rather than the pane.
+- **State at a glance** — a spinning ring while an agent works, z's while it idles, a red dot when it is unreachable. The badge counts agents working right now.
+- **One line per agent** — status, the agent's mark and its chat title, with where it runs one hover away. The agent you are typing into is ringed.
+- **See the crews** — lanes show which agent handed work to whom and how each task is going, and a crew's diagram shows each worker's task.
+- **Click to go there** — any row, session or crew node opens or focuses that window at that tab.
+- **Fits your layout** — dock it left or right, widen it to twice its width, and each workspace remembers whether it is open.
+- **Survives a restart** — restored crews come back as finished history, never as work in flight.
 
-A pane running an agent also renames itself after it: `Terminal 1` becomes `Claude Code`, with that agent's icon beside it. A title you typed yourself always wins.
-
-Start an agent yourself and the pane catches up within a few seconds — typed out, recalled from history or tab-completed, it is the running agent that counts, not how the command was written. That check covers local panes; in a WSL or SSH pane, relaunch through the pane's 🔄 dropdown to have it picked up.
-
-For the most reliable agent and chat-title syncing across terminal panes and the dashboard — especially after resuming a Codex chat — start or restart the agent from the pane's 🔄 dropdown. Manually started agents are still detected, but conversation changes inside them may not always expose enough information for every displayed title to refresh.
+Panes running an agent rename themselves after it (`Terminal 1` → `Claude Code`), unless you typed a title. An agent you start by hand in a local pane is picked up within seconds; for WSL and SSH panes, launch it from the pane's 🔄 dropdown.
 
 ## File Explorer
 
-Swap any pane between a terminal and a file explorer with one button — same directory, no re-navigation. Works on a local repo folder or a remote host over SFTP.
+Swap any pane between a terminal and a file explorer with one button, at the directory the terminal is in. Works on a local folder or a remote host over SFTP.
 
-- **Files follows your shell** — opening the explorer roots on the Git repository your terminal is standing in, whatever root the pane had before. `cd` somewhere else and open Files again to re-root there.
-- **Browse & preview** — breadcrumbs, a lazy Files tree, draggable file tabs, syntax-coloured source, rendered Markdown and Mermaid, and inline images.
-- **Preview HTML pages** — an `.html` file's Preview shows the page itself, scripts and web fonts included, sealed off from GridVibe and your network. The zoom buttons zoom the page, separately from the editor font size.
-- **Edit in place** — open any UTF-8 text file, edit it, and save with `Ctrl+S`. Saves are atomic, and a conflict prompt protects files that changed on disk.
-- **Search the repo** (`Ctrl+Shift+F`) — case, whole-word, regex, file-pattern, scope, and `.gitignore` controls, with results marked when a limit is hit.
-- **Find a file** — the Files tree's filter box finds files and folders by name anywhere under the root, with the matched part highlighted in place.
-- **Fold a level** — `Alt`-click a fold arrow to fold or unfold every folder beside it, so one click collapses the whole tree.
-- **Manage files** — create, copy, move, rename, and delete from the context menu. Every write stays inside the explorer root, nothing is ever overwritten, and deletion asks first.
-- **Discovers external changes.** Files added, removed or renamed by another program appear in the directory Preview and expanded Files tree, including ignored folders and non-Git roots. Folders exceeding the background check's size or time bounds still list completely and can be refreshed manually.
-- **Upload files** — through the usual picker, from any folder row or the explorer bar. Local or SFTP, multi-select, 100 MB per file. A name already in use is numbered (`report (1).pdf`), never replaced.
-- **Download files & folders** — save files directly, or right-click any folder in Files or Preview to save it as one ZIP. Local and SFTP downloads are capped at 100 MB; multi-selected files still download individually.
-- **Select several** — `Ctrl`-click to add or remove rows, `Shift`-click for a range. Copy, Cut, Delete, Download, and Copy path act on the whole selection with one confirmation.
-- **Big files stay usable** — very large files open in a plain fast view with a notice saying what is turned off, and large diffs keep side-by-side layout, line numbers, and undo.
-- **Restores with your workspace** — root, ordered tabs, view mode, scroll, wrapping, folds, font size and page zoom, sidebar width, theme, and Markdown appearance.
+- **Browse & preview** — a Files tree with filter, file tabs, syntax-coloured source, rendered Markdown and Mermaid, images, and sandboxed HTML pages.
+- **Edit in place** — any UTF-8 text file, saved atomically with `Ctrl+S` and protected against changes made on disk meanwhile.
+- **Search the repo** — `Ctrl+Shift+F` with case, word, regex, file-pattern and `.gitignore` controls.
+- **Manage files** — create, copy, move, rename, delete, upload and download (folders as ZIP), across a multi-selection. Nothing is ever overwritten, and every write stays inside the explorer root.
+- **Stays current** — files changed by other programs show up on their own, and big files and diffs stay usable.
+- **Restores with your workspace** — root, tabs, view, scroll, folds and zoom.
 
 ### Git sidebar
 
-- **Status & history** — repository, branch, staged and unstaged changes, and the commit graph. Diff the working tree or any commit, with per-line and per-block undo.
-- **Actions** — stage, unstage, commit, publish/push, and discard. **Stage All** and **Unstage All** only move entries in and out of the index; **Discard All** asks first.
-- **Scope** — **pin** the sidebar to a path, or let the **chain** button follow whatever you browse. Both go down to a single file, are marked in the Files tree, and survive a restart. Every action obeys the scope and names it in its tooltip.
-- **Graph** — the newest 60 commits, plus 60 more per **Show more**, up to 300. The magnifier finds a commit by subject or id with `Enter`/`Shift+Enter` stepping, and `Alt`-click collapses every commit.
-- **Commit card** — right-click a commit for the full message, the author, the date in the author's own time zone, the object id, and any branch or tag, each with a copy button.
-- **Stays current** — changes made outside GridVibe update the sidebar, file badges and listings in the background, and switching to a tab catches its explorer up straight away.
+- **Status & history** — branch, staged and unstaged changes, and a searchable commit graph. Diff the working tree or any commit, with per-line undo.
+- **Actions** — stage, unstage, commit, push and discard, each scoped to the whole repo, a pinned path, or whatever you are browsing.
+- **Commit card** — right-click a commit for its full message, author, date, id and refs.
 
-In very large repositories, `git config core.untrackedCache true` (and `core.fsmonitor true` where your Git supports it) makes those background checks much faster.
-
-Cross-root transfers and Git checkout, pull, or merge are intentionally left to the terminal.
+Checkout, pull, merge and cross-root transfers are left to the terminal.
 
 ## Switching a Pane's Shell or Agent
 
-Launched a pane in cmd and wanted PowerShell — or Codex in WSL? Click the pane's 🔄 button.
+Click a terminal pane's 🔄 button to relaunch it in place — same slot, same title, same directory.
 
-- **Pick a shell** — a Local Repo terminal on Windows lists **Command Prompt**, **PowerShell**, **WSL**, and every detected distro. The pane restarts in place, same slot, same title, in the directory the old shell was sitting in.
-- **Pick an agent** — each shell row's chevron opens **Plain shell** plus every agent, each under its own icon and brand colour, so "this pane, but Codex in WSL" is one click. SSH panes and non-Windows hosts get that list flat.
-- **Give it GridVibe tools** — agents that support MCP carry an **MCP** button beside their row: the row starts the agent plainly, the button starts it with GridVibe's own tools. Works on SSH panes as well as local ones.
-- **Or tools in override mode** — the **Override** button beside **MCP** relaunches the agent with its tools in [override mode](#gridvibe-tools-mcp), after the same warning the launcher shows. **MCP** takes the grant off again and keeps the tools.
-- **Update an agent in one press** — the arrow icon beside each agent row runs that agent's own update command (`claude update`, `codex update`, `opencode upgrade`, …) in the pane, then starts the agent.
-- **The pane says which it is** — a pane running with GridVibe tools draws a frame around the agent's icon in its header, red in override mode, and keeps it across a save and restore. Relaunching it plainly takes the frame off.
-- **Plain shell** drops a running agent and comes back to an ordinary prompt. Picking whatever is already checked relaunches it too.
-- **A missing agent never touches your pane** — GridVibe runs the same install check against that row's own target, and answers with a message (*OpenAI Codex CLI is missing in WSL Ubuntu.*) instead of relaunching.
-- **Auto mode and GridVibe tools follow the agent**, not the pane: relaunch the same agent under another shell and they stay on; move to a different agent and they start from its plain launch.
+- **Pick a shell** — on Windows, Command Prompt, PowerShell, WSL or any detected distro.
+- **Pick an agent** — each shell's chevron lists **Plain shell** and every agent, so "this pane, but Codex in WSL" is one click.
+- **Add GridVibe tools** — the **MCP** and **Override** buttons beside an agent's row relaunch it with its tools.
+- **In or out of tmux** — on an SSH pane, the **tmux** button beside **Plain shell** moves it into tmux or back out (see [SSH Sessions in tmux](#ssh-sessions-in-tmux)).
+- **Update an agent** — the arrow beside its row runs the agent's own update command, then starts it.
+- **A missing agent never touches your pane** — GridVibe checks the row's own target first and tells you instead of relaunching.
 
 ## Browser Preview
 
-Flip a Local Repo pane to a browser preview (the 🌐 button) and watch the app you're building next to the terminal running it.
+Flip a Local Repo pane to a browser preview (🌐) and watch the app you are building next to the terminal running it.
 
-- **Tabbed** — up to 8 tabs, per-tab close, drag to reorder, **+** opens a blank tab at `http://127.0.0.1:3000`. Each tab keeps its own live frame, so switching never reloads your app.
-- **URL bar** navigates the active tab (http/https only); **Open** kicks it out to a real OS browser tab.
-- **Same-origin popups get captured** into new pane tabs instead of escaping. Named window targets reuse their tab rather than stacking up.
-- **Nested preview is capped one level deep**, so a GridVibe page inside a pane doesn't re-embed itself forever.
-- The whole tab strip saves and restores with the workspace and with session presets.
+- **Tabbed** — up to 8 tabs that keep their own live frames, so switching never reloads your app.
+- **Popups stay inside** — same-origin popups open as new tabs instead of escaping.
+- **Saved with the workspace** — and with session presets.
 
-GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that block embedding need **Open**.
+Sites that block embedding need the **Open** button, which hands them to your own browser.
 
 ## Keyboard Shortcuts
 
-**The whole list is in the app.** The keyboard button — in the workspace top bar, and in the launcher's bottom action bar — opens a read-only panel with every chord, grouped the way you would look for it. Rows that only apply in one mode say so rather than disappearing.
+The keyboard button in the workspace top bar and the launcher opens the full list in the app.
 
 | Shortcut | Action |
 | --- | --- |
@@ -309,50 +239,38 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 | **Window** | |
 | `Alt+X` | Minimize every GridVibe window (native window only) |
 
-**Mouse:** `Alt`+click folds a whole sibling level in the Files tree, or collapses every commit in the Git graph. `Ctrl`+click and `Shift`+click extend the explorer selection. Drag the dividers between panes to resize them; a divider stops where it would make a pane narrower or shorter than 1/16 of the grid, and a pane at that limit can still be made larger.
-
-The one configurable chord in GridVibe is voice push-to-talk, set in App Settings.
+**Mouse:** `Alt`+click folds a whole level in the Files tree or collapses the Git graph; `Ctrl`/`Shift`+click extends the explorer selection; drag the dividers between panes to resize them. Voice push-to-talk is the one configurable chord.
 
 ## Icons
 
-**Pane header:**
-
-| | Does |
+| Pane header | Does |
 | :---: | --- |
-| 🔄 | Reset the view and replay recent output. On a terminal it opens a dropdown that also relaunches the pane in another shell and/or under another agent |
-| 📁 ⇄ 💻 | Swap between terminal and file explorer at the current directory |
+| 🔄 | Reset the view; on a terminal, a dropdown to relaunch in another shell, agent, or tmux |
+| 📁 ⇄ 💻 | Swap between terminal and file explorer |
 | 🌐 ⇄ 💻 | Swap a Local Repo pane between terminal and browser preview |
-| 🪟 | Split side-by-side or stacked into two equal halves, however the grid has been resized. A terminal clones its connection where it *is*; an agent, explorer or browser pane splits off a plain terminal where it is working |
-| 🧹 | Clear the display and purge the replay buffer |
+| 🪟 | Split side-by-side or stacked |
+| 🧹 | Clear the display and its replay buffer |
 | 🎙️ | Start/stop voice input (when enabled) |
 | 🌙 ⇄ ☀️ | Toggle an explorer pane between dark and light |
-| ⋯ | Overflow menu, shown when the pane is too narrow for the full row |
-| ✖️ | Close the pane (confirms first — it's a live session) |
-| 🟢 | Connection status, at the far right; hover it for the word |
+| ⋯ | Overflow menu on narrow panes |
+| ✖️ | Close the pane |
+| 🟢 | Connection status |
 
-On a narrow pane, an agent pane hides its name and keeps just the agent's icon. Hover the icon for the name.
-
-**Explorer bar:**
-
-| | Does |
+| Explorer bar | Does |
 | :---: | --- |
-| 🔄 | Refresh the explorer (`F5`) |
-| ⬆️ | Go to the parent directory (or mouse Back) |
-| 🗂️ | Files tree sidebar |
-| ⎇ | Git changes and history sidebar |
-| 🔍 | Repository search sidebar (`Ctrl+Shift+F`) |
-| 📤 | Upload files into the folder this pane is showing |
-| 🖥️ | Reveal the current location in the system file manager (local panes only) |
+| 🔄 | Refresh (`F5`) |
+| ⬆️ | Parent directory |
+| 🗂️ | Files tree |
+| ⎇ | Git sidebar |
+| 🔍 | Repository search |
+| 📤 | Upload files |
+| 🖥️ | Reveal in the system file manager (local panes) |
 
-**Top bar:** theme · max surface · broadcast typing · fullscreen · minimize all windows (native desktop mode only) · keyboard shortcuts · App Settings · chevron to hide the bar. Hide it and it slides back on hover from the handle at the top edge.
-
-**Session tab line:** the agent sidebar handle comes first, followed by the back-to-launcher button, the dashboard dialog button, and the GridVibe menu ahead of the first tab. All stay reachable with the top bar hidden. The menu holds two rows — **Sessions** (import, save, save as, save all) and **Workspace** (save, rename, new, open, move session, close) — and pointing at either opens its items beside it.
+The session tab line holds the dashboard sidebar handle, the way back to the launcher, the dashboard dialog, and the GridVibe menu for saving and managing sessions and workspaces.
 
 ## Configuration
 
-Everything lives in **App Settings** — the same dialog from the gear on the launcher *or* a session window. It covers theme, surface mode, the **Agents** section (which side the agent dashboard sidebar docks to, and the experimental agent conversation restore), terminal font and size, max sessions, shell integration, the experimental SSH tmux sessions, autosave interval, SSH host-key policy, all voice options, and, in the native window, whether minimizing one GridVibe window minimizes them all. The one exception is **Multiple workspaces**, whose switch sits in the launcher's Workspaces card because it changes what every launch does.
-
-On disk, settings load from `config.json` (git-ignored) falling back to `default_config.json`:
+Everything lives in **App Settings**, from the gear on the launcher or any workspace: theme, terminal font, the Agents options, shell integration, SSH host-key policy, the experimental tmux and conversation-restore switches, autosave, and voice. On disk, settings load from `config.json` (git-ignored), falling back to `default_config.json`:
 
 ```json
 {
@@ -365,31 +283,23 @@ On disk, settings load from `config.json` (git-ignored) falling back to `default
 }
 ```
 
-Settings updates merge with the latest file under a cross-process lock, so two GridVibe processes cannot clobber each other. A damaged file is quarantined and recovered from its backup, and a failed save is reported rather than silently dropped. GridVibe generates a Flask session signing key at startup unless `GRIDVIBE_SECRET_KEY`, `SECRET_KEY`, or `security.secret_key` is set.
-
-### Shell integration
-
-`terminal.shell_integration` (on by default) is what lets GridVibe follow the directory a terminal is *in*, rather than the one it was launched in — which is the directory the file explorer opens on when you switch a pane over.
-
-It adds an invisible escape sequence to the shell's prompt and reads the path back out of the terminal's own output, so it never types at your prompt and stays right while a build, a pager, a TUI, or an agent is running. A local shell is handed the hook at startup with nothing shown in the pane; a remote shell cannot be handed anything, so SSH panes are sent one short line that the shell echoes.
-
-What it costs: that one echoed line on SSH panes, and **cmd's `PROMPT` is replaced** with the default `$P$G` plus the sequence. An existing bash/zsh hook is appended to, and PowerShell's `prompt` function is wrapped rather than replaced. Turn the setting off to leave every prompt untouched.
+`terminal.shell_integration` (on by default) lets GridVibe follow the directory a terminal is *in*, so the explorer opens there. It adds an invisible marker to the shell prompt — and replaces cmd's `PROMPT` with `$P$G` plus that marker — so turn it off to leave every prompt untouched.
 
 ## Security
 
 GridVibe is a local tool, not a public web service: it binds to `127.0.0.1` by default, has no built-in authentication, and should not be exposed to the internet.
 
-- Socket.IO CORS defaults to same-origin, following the address the server actually resolved plus the host each request was addressed to; state-changing cross-origin requests are rejected on the same rule. Set `security.cors_origins` only if you serve GridVibe from another origin.
-- SSH host keys persist to `.known_hosts`; `ssh.host_key_policy` can be `auto-add` (default), `known-hosts`, or `strict`. All modes reject changed keys, and an unreadable trust file refuses the connection rather than being overwritten.
-- Saved SSH passwords are Fernet-encrypted; the key lives in `.encryption_key`.
-- An SSH pane given GridVibe tools opens a port on the remote host's own loopback, for as long as that pane stays connected. It carries a per-pane token, accepts nothing but that pane's own tool calls, and is withdrawn when the pane closes. The small config file holding that token is left on the host only if it can be made readable by your account alone — otherwise it is removed and the pane starts without tools. A pane without the checkbox opens nothing.
+- Cross-origin writes are rejected; set `security.cors_origins` only if you serve GridVibe from another origin.
+- SSH host keys persist to `.known_hosts`, and `ssh.host_key_policy` can be `auto-add` (default), `known-hosts`, or `strict`. A changed key is always refused.
+- Saved SSH passwords are encrypted with the key in `.encryption_key`.
+- An SSH pane given GridVibe tools opens a token-protected port on the host's own loopback, only while that pane is connected.
 
 See [`SECURITY.md`](SECURITY.md) for reporting and scope.
 
 ## Development
 
 ```bash
-make check                      # test + lint, run this before handing work back
+make check                      # test + lint
 make test lint fix              # individually
 
 # Windows without make:
@@ -397,9 +307,7 @@ python tests/run_tests.py
 python -m ruff check .
 ```
 
-Backend lives in the modular `web/` package, session state in `sessions/manager.py`, the voice service in `services/`, and the two pages in `templates/` with assets in `web/static/`. Root-level `api.py`, `session_manager.py`, `cleanup.py`, and `webview_launcher.py` are compatibility shims — edit the canonical modules.
-
-More: [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`CHANGELOG.md`](CHANGELOG.md) · [`gridvibe_mcp/README.md`](gridvibe_mcp/README.md) · [`docs/logging_guide.md`](docs/logging_guide.md) · [`docs/voice_guideline.md`](docs/voice_guideline.md) · [`docs/session_state_guideline.md`](docs/session_state_guideline.md)
+More: [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`CHANGELOG.md`](CHANGELOG.md) · [Engineering contracts](docs/engineering_contracts.md) · [`gridvibe_mcp/README.md`](gridvibe_mcp/README.md) · [`docs/session_state_guideline.md`](docs/session_state_guideline.md) · [`docs/voice_guideline.md`](docs/voice_guideline.md) · [`docs/logging_guide.md`](docs/logging_guide.md)
 
 ## Local Files
 
@@ -409,14 +317,14 @@ Created at runtime, never committed:
 | --- | --- |
 | `config.json` | Local runtime configuration override |
 | `saved_sessions.json` | Saved launcher presets (encrypted passwords) |
-| `runtime_state.json` | Workspace-shape snapshot for restore-after-restart |
+| `runtime_state.json` | Workspace snapshot for restore-after-restart |
 | `.known_hosts` | Persisted SSH host keys |
-| `.encryption_key` | Fernet key for password encryption |
+| `.encryption_key` | Key for password encryption |
 | `.gridvibe_mcp.json` | Generated MCP config, rewritten on every start |
-| `.gridvibe_claude_settings.json` | Generated Claude Code session hook for the experimental conversation restore, rewritten on every start |
+| `.gridvibe_claude_settings.json` | Generated Claude Code hook for conversation restore, rewritten on every start |
 | `logs/gridvibe.log` | Main rotating log file |
 
-All three JSON state files are written the same careful way: one change at a time under an OS-level lock, committed through an atomic replace, with the previous version kept as `<file>.bak`. A file GridVibe cannot read is moved aside as `<file>.corrupt-<timestamp>` and the backup is loaded in its place. The developer-facing contract is [`docs/session_state_guideline.md`](docs/session_state_guideline.md).
+State files are written atomically with a `.bak` backup, and a damaged one is set aside and recovered from that backup.
 
 ## License
 
