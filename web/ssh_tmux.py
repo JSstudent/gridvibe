@@ -38,11 +38,21 @@ TMUX_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 TMUX_EXEC_TIMEOUT = 10.0
 TMUX_MAX_OUTPUT_BYTES = 8192
 
-#: Outcomes of :func:`prepare`.
+#: Outcomes of :func:`prepare`. ``TMUX_EXISTS`` is only ever answered to a
+#: ``fresh`` name, and the connect path turns it into a new name.
 TMUX_MISSING = "missing"
 TMUX_ATTACHED = "attached"
 TMUX_CREATED = "created"
 TMUX_CREATED_HOME = "created_home"
+TMUX_EXISTS = "exists"
+
+#: The exit status a fresh name's script answers when the host already holds
+#: a session under it. Distinct from every other status :func:`prepare` reads.
+_FRESH_EXISTS_STATUS = 12
+
+#: Names a fresh pane tries before its connection fails: each collision with
+#: a session the host already holds moves the pane to one more name.
+TMUX_FRESH_NAME_ATTEMPTS = 5
 
 #: The terminal type the attach channel asks for. tmux renders for its
 #: *client's* terminal, and plain ``xterm`` would hold every pane inside the
@@ -54,6 +64,7 @@ _PREPARE_EXIT_STATES = {
     3: TMUX_MISSING,
     10: TMUX_CREATED,
     11: TMUX_CREATED_HOME,
+    _FRESH_EXISTS_STATUS: TMUX_EXISTS,
 }
 
 
@@ -82,28 +93,42 @@ def tmux_sessions_enabled(settings: Any = None) -> bool:
 # ==================== Names ====================
 
 
-#: Random digits after a generated name's stem. A generated name that already
-#: exists on the host is attached to rather than created, so the digits are
-#: what keep two panes of one GridVibe session apart.
+#: Random digits after a generated name's stem. The digits make a collision
+#: with another session unlikely; creation-only is what guarantees it. A
+#: generated name the host already holds is never attached to (see
+#: :func:`prepare`), so the pane moves to another name instead.
 TMUX_NAME_DIGITS = 6
 TMUX_NAME_FALLBACK_STEM = "gv"
 
 _UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
 
-
 def generate_session_name(stem: Any = "") -> str:
-    """A fresh name, ``<stem>_<6 digits>``, e.g. ``api-server_048213``.
+    """A new name, ``<stem>_<6 digits>``, e.g. ``api-server_048213``.
 
     ``stem`` is the GridVibe session (tab) the pane opens in, so a host's
     ``tmux ls`` says where each session came from. Characters a name may not
     hold become ``-`` and the stem is cut so the whole name fits; with nothing
-    left, it is ``gv``.
+    left, it is ``gv``. Whether a pane must create the session is the pane's
+    own ``tmux_fresh``, set by whoever gives it the name, never a property of
+    the name: the same spelling can be another pane's, or another host's.
     """
     room = 64 - 1 - TMUX_NAME_DIGITS
     cleaned = _UNSAFE_NAME_CHARS.sub("-", str(stem or "")).strip("-_")
     cleaned = cleaned[:room].rstrip("-_") or TMUX_NAME_FALLBACK_STEM
     digits = secrets.randbelow(10**TMUX_NAME_DIGITS)
     return f"{cleaned}_{digits:0{TMUX_NAME_DIGITS}d}"
+
+
+def name_stem(name: str) -> str:
+    """The stem a generated name was made from: ``api-server_048213`` -> ``api-server``.
+
+    A name that does not end in generated digits is its own stem.
+    """
+    text = str(name or "")
+    stem, separator, digits = text.rpartition("_")
+    if separator and stem and len(digits) == TMUX_NAME_DIGITS and digits.isdigit():
+        return stem
+    return text
 
 
 def normalize_session_name(value: Any) -> str:
@@ -117,35 +142,50 @@ def launch_session_name(
 ) -> str:
     """The tmux session one requested pane launches into, or ``""``.
 
+    The name half of :func:`launch_tmux_fields`, which see.
+    """
+    return launch_tmux_fields(config, enabled=enabled, restore=restore, stem=stem)[
+        "tmux_session"
+    ]
+
+
+def launch_tmux_fields(
+    config: Dict[str, Any], *, enabled: bool, restore: bool, stem: str = ""
+) -> Dict[str, Any]:
+    """``tmux_session`` and ``tmux_fresh`` for one requested pane.
+
     A request asks for tmux with ``tmux: true`` (the launcher's "Run in tmux")
     or by naming a session in ``tmux_session`` (a typed name, a preset's, or a
     restored snapshot's). An empty name with the option on is generated here,
-    from ``stem`` -- the GridVibe session the launch opens.
+    from ``stem`` -- the GridVibe session the launch opens -- and is fresh: its
+    connection creates the session rather than attaching to one. A stated name
+    never is, and a request's own ``tmux_fresh`` is never read.
 
     Only SSH panes in terminal or agent mode carry one. With the setting off
     both fields are ignored, as for any field the API does not know. An
     invalid name refuses a launch (``ValueError``) and is dropped on restore,
     which then brings the pane back as a plain SSH terminal.
     """
+    plain = {"tmux_session": "", "tmux_fresh": False}
     if not enabled:
-        return ""
+        return plain
     if str(config.get("mode") or "") != "ssh":
-        return ""
+        return plain
     if str(config.get("startup_mode") or "terminal") not in {"terminal", "agent"}:
-        return ""
+        return plain
     raw_name = config.get("tmux_session")
     requested = config.get("tmux") is True or bool(str(raw_name or "").strip())
     if not requested:
-        return ""
+        return plain
     stated = str(raw_name or "").strip() if isinstance(raw_name, str) else ""
     if not stated:
-        return generate_session_name(stem)
+        return {"tmux_session": generate_session_name(stem), "tmux_fresh": True}
     name = normalize_session_name(stated)
     if name:
-        return name
+        return {"tmux_session": name, "tmux_fresh": False}
     if restore:
         logger.warning("Dropping an invalid tmux session name from a restored pane")
-        return ""
+        return plain
     raise ValueError(
         "A tmux session name may only use letters, digits, '-' and '_' "
         "(at most 64 characters)."
@@ -293,20 +333,27 @@ def _run(client: Any, command: str, timeout: float = TMUX_EXEC_TIMEOUT) -> Tuple
             _close_quietly(channel)
 
 
-def prepare(client: Any, name: str, directory: str) -> str:
+def prepare(client: Any, name: str, directory: str, *, fresh: bool = False) -> str:
     """Decide attach vs create in one round trip, creating when needed.
 
+    ``fresh`` is for a name GridVibe generated: the session must be created by
+    this call, so a session the host already holds under the name is answered
+    as ``TMUX_EXISTS`` and nothing is attached to. Otherwise an existing session
+    is attached to (``TMUX_ATTACHED``).
+
     Returns one of ``TMUX_MISSING`` (tmux is not on the non-interactive
-    ``PATH``), ``TMUX_ATTACHED`` (the session exists), ``TMUX_CREATED`` (made
-    in ``directory``) or ``TMUX_CREATED_HOME`` (made in the home directory
-    because ``directory`` is empty or missing on the host). Anything else
-    raises :class:`TmuxError` carrying tmux's message.
+    ``PATH``), ``TMUX_ATTACHED`` (the session exists), ``TMUX_EXISTS`` (fresh
+    names only), ``TMUX_CREATED`` (made in ``directory``) or
+    ``TMUX_CREATED_HOME`` (made in the home directory because ``directory`` is
+    empty or missing on the host). Anything else raises :class:`TmuxError`
+    carrying tmux's message.
     """
     session = _quoted_target(name)
     plain = shlex.quote(name)
+    exists_status = _FRESH_EXISTS_STATUS if fresh else 0
     script = (
         "command -v tmux >/dev/null 2>&1 || exit 3; "
-        f"tmux has-session -t {session} 2>/dev/null && exit 0; "
+        f"tmux has-session -t {session} 2>/dev/null && exit {exists_status}; "
         f"d={_shell_directory(directory)}; "
         'if [ -n "$d" ] && [ -d "$d" ]; then '
         f'tmux new-session -d -s {plain} -c "$d" && exit 10; '

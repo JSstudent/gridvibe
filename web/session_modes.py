@@ -25,7 +25,11 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
 from sessions.manager import SessionStatus
-from web.agent_conversations import EMPTY_CONVERSATION_FIELDS
+from web.agent_conversations import (
+    AGENT_ENDS_AS_TERMINAL,
+    EMPTY_CONVERSATION_FIELDS,
+    plain_shell_fields,
+)
 from web.agent_handoffs import handoffs as agent_handoffs
 from web.app import session_manager
 from web.explorer import (
@@ -138,20 +142,6 @@ def _tmux_restart_state(session: Any) -> tuple:
     return tuple(getattr(session, field, None) for field in _TMUX_RESTART_STATE_FIELDS)
 
 
-#: An agent pane relaunched as a plain shell: the agent is what ends.
-_AGENT_ENDS_AS_TERMINAL: Dict[str, Any] = {
-    "startup_mode": "terminal",
-    "initial_command": "",
-    "initial_command_mode": "command",
-    "agent_selection": "",
-    "custom_agent": "",
-    "agent_auto_mode": False,
-    "agent_mcp": False,
-    "agent_mcp_override": False,
-    **EMPTY_CONVERSATION_FIELDS,
-}
-
-
 def _tmux_capable_pane(session_id: str) -> Any:
     """The person's SSH terminal or agent pane, refused unless tmux applies."""
     session = session_manager.get_session(session_id)
@@ -205,6 +195,8 @@ def apply_pane_tmux_change(
     The reset menu's "Plain shell" row and the tmux button beside it: the pair
     a pane switches between, so whichever is pressed the pane ends up a plain
     shell, and an agent it ran ends exactly as that row's relaunch ends one.
+    Its startup command goes with it, an agent's launch line or a terminal's
+    own command, so the new shell does not run that again.
     ``attach`` names an existing session to attach to instead of a new one --
     the tmux button's list -- and may move a pane from one session to another.
     """
@@ -221,7 +213,7 @@ def apply_pane_tmux_change(
         raise ModeTransitionError("Pane is already in the requested tmux mode", 409)
 
     expected_state = _tmux_restart_state(session)
-    plain_fields = dict(_AGENT_ENDS_AS_TERMINAL) if session.startup_mode == "agent" else {}
+    plain_fields = plain_shell_fields(session)
     directory, _source = effective_directory(session_id, session)
     group = session_manager.get_group(session.group_id)
     if attach_name:
@@ -237,6 +229,9 @@ def apply_pane_tmux_change(
             name,
             directory,
             plain_fields,
+            # A session the person picked from the host's list is attached to,
+            # never created; only a name generated here is the pane's to create.
+            fresh=bool(name) and not attach_name,
         )
     except ValueError as exc:
         raise ModeTransitionError(str(exc), 409) from exc
@@ -343,7 +338,7 @@ def _relaunch_terminal_at(
         "current_directory": None,
     }
     if str(getattr(session, "startup_mode", "") or "") == "agent":
-        updates.update(_AGENT_ENDS_AS_TERMINAL)
+        updates.update(AGENT_ENDS_AS_TERMINAL)
     session_manager.update_session_metadata(session_id, **updates)
     logger.info(
         "Pane relaunched at a stated directory session_id=%s directory=%s",

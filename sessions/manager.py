@@ -10,7 +10,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from web.session_presentation import (
     DEFAULT_EXPLORER_MD_FONT,
@@ -188,6 +188,11 @@ class TerminalSession:
     # Validated and gated where a launch is prepared; the connector reads the
     # gate again, so a name kept while the setting is off opens a plain shell.
     tmux_session: str = ""
+    # Whether this pane's next connection must create `tmux_session` rather
+    # than attach to it: true only for a name GridVibe generated for this pane,
+    # until a connection has prepared it. Per pane, never per name, and never
+    # saved -- a restored name always attaches.
+    tmux_fresh: bool = False
     status: SessionStatus = SessionStatus.PENDING
     created_at: float = field(default_factory=time.time)
     connected_at: Optional[float] = None
@@ -1108,6 +1113,11 @@ class SessionManager:
                 if isinstance(config.get("tmux_session"), str)
                 else ""
             ),
+            # Set by the launch's own tmux settling, which overwrites whatever
+            # a request carried; only a name generated there is fresh.
+            "tmux_fresh": config.get("tmux_fresh") is True
+            and isinstance(config.get("tmux_session"), str)
+            and bool(config.get("tmux_session")),
         }
         fields.update(deep_copy_presentation(presentation))
         return fields
@@ -1330,6 +1340,34 @@ class SessionManager:
             session = self.sessions.get(session_id)
             if session is not None:
                 session.tmux_session = ""
+                session.tmux_fresh = False
+
+    def end_tmux_session(
+        self,
+        session_id: str,
+        tmux_name: str,
+        plain_fields_for: Callable[[Any], Dict[str, Any]],
+    ) -> Optional[str]:
+        """Make a pane a plain SSH shell once its tmux session has ended.
+
+        The name and the startup intent that would relaunch into it go in one
+        locked step, and only while the pane still holds ``tmux_name``: a pane
+        that was renamed, or closed, is left alone. ``plain_fields_for`` names
+        the fields to write, asked of the pane as it stands under the lock.
+        Returns the startup mode the pane had before, or ``None`` if nothing
+        changed.
+        """
+        with self.lock:
+            session = self.sessions.get(session_id)
+            if session is None or str(session.tmux_session or "") != tmux_name:
+                return None
+            previous_mode = session.startup_mode
+            session.tmux_session = ""
+            session.tmux_fresh = False
+            for field_name, value in plain_fields_for(session).items():
+                setattr(session, field_name, value)
+            _settle_agent_mcp_override(session)
+            return previous_mode
 
     def merge_browser_tabs(
         self,

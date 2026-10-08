@@ -54,6 +54,7 @@ from web.agent_conversations import (
     local_probe_target,
     normalize_conversation_id,
     observed_conversation_identity,
+    plain_shell_fields,
     probe_conversation_id_by_title,
     probe_conversation_name,
     remote_probe_target,
@@ -118,7 +119,13 @@ from web.terminal_cwd import (
     shell_integration_environment,
 )
 from web.terminal_replies import ReplyLedger
-from web.workspaces import DEFAULT_WORKSPACE_ID, normalize_workspace_id, workspace_room
+from web.workspaces import (
+    DEFAULT_WORKSPACE_ID,
+    normalize_workspace_id,
+    rename_live_pane_tmux,
+    settle_fresh_tmux_name,
+    workspace_room,
+)
 
 try:
     import pty
@@ -3193,12 +3200,13 @@ def pane_host_tmux_sessions(session_id: str) -> Tuple[bool, Optional[List[Dict[s
 
 
 def _forget_ended_tmux_session(session_id: str, connection: Dict[str, Any]) -> None:
-    """Drop the name of a tmux session that ended under its attached pane.
+    """Make a pane whose tmux session ended under it the plain SSH shell it says it is.
 
     ``exit`` in the session's last shell ends the session, and with it this
-    stream. Kept, the name would make Retry create the session again; dropped,
-    the pane is the plain SSH terminal the person left. A detach, or a
-    transport that dropped, keeps it: the session is still there to attach to.
+    stream. The name goes, and so does whatever would relaunch into it: an
+    agent pane loses its agent, and a terminal pane its startup command, so
+    Retry opens the plain shell the notice promises. A detach, or a transport
+    that dropped, keeps all of it: the session is still there to attach to.
     Asked outside the locks, then applied only by the connection that still
     owns the pane, and only to the name it was attached under.
     """
@@ -3210,11 +3218,15 @@ def _forget_ended_tmux_session(session_id: str, connection: Dict[str, Any]) -> N
     with connection_lock:
         if not _connection_is_current(session_id, connection):
             return
-        session = session_manager.get_session(session_id)
-        if session is None or getattr(session, "tmux_session", "") != tmux_name:
-            return
-        session_manager.clear_tmux_session(session_id)
+        previous_mode = session_manager.end_tmux_session(
+            session_id, tmux_name, plain_shell_fields
+        )
+    if previous_mode is None:
+        return
+    if previous_mode == "agent":
+        _retire_agent_runtime(session_id, connection, "tmux session ended")
     logger.info("[%s] tmux session %s ended; the pane is a plain SSH terminal now", session_id, tmux_name)
+    _broadcast_session_status(session_id)
     _publish_ssh_terminal_output(
         session_id, ssh_tmux.notice(ssh_tmux.ended_notice(tmux_name)), connection
     )
@@ -3692,35 +3704,50 @@ def _mark_runtime_agent_exited(session_id: str, reason: str) -> bool:
     updated = session_manager.update_session_metadata(session_id, **retirement)
     if not updated:
         return False
-    _cancel_conversation_resolver(session_id)
     with connection_lock:
         connection = ssh_connections.get(session_id)
-    if connection is not None:
-        _disarm_agent_runtime(connection)
-        connection["agent_title_floor"] = time.time()
-        connection["agent_title_floor_exclusive"] = False
-        # The shell is on its way back to a prompt, and a relaunch typed before
-        # those bytes are read is promoted against a mark that cannot include
-        # them. Let the watch under it absorb one prompt rather than retire an
-        # agent that has just started -- see `_absorb_retired_agents_prompt`.
-        connection["agent_prompt_absorb_until"] = (
-            time.monotonic() + AGENT_RETIRED_PROMPT_ABSORB_SECONDS
-        )
-        # A line held against a prompt that has now arrived and retired the
-        # pane instead is a line the reader typed into the agent they ended.
-        connection.pop("agent_relaunch_pending", None)
-        # The floor already stops the retired agent's title from being read as
-        # a fact about the shell that inherited the pane, and a resolved
-        # conversation name is dropped with it because it is matched against
-        # that title. Dropping it here as well is the explicit half of the
-        # same rule: nothing about a conversation survives its agent.
-        _forget_agent_conversation(connection)
-        # Nor does its task: an agent started here next, by hand, must not
-        # read it, report on it or be handed its follow-ups.
-        _retire_agent_handoff(connection, "agent exited")
+    _retire_agent_runtime(session_id, connection, "agent exited")
     logger.info("Detected runtime agent exit for session %s: %s", session_id, reason)
     _broadcast_session_status(session_id)
     return True
+
+
+def _retire_agent_runtime(
+    session_id: str,
+    connection: Optional[Dict[str, Any]],
+    handoff_reason: str,
+) -> None:
+    """The connection-side half of an agent's exit: its watch, name, title and task.
+
+    Called with no lock held. ``connection`` is the pane's current connection,
+    or ``None`` when it has none, in which case only the conversation lookup
+    is cancelled.
+    """
+    _cancel_conversation_resolver(session_id)
+    if connection is None:
+        return
+    _disarm_agent_runtime(connection)
+    connection["agent_title_floor"] = time.time()
+    connection["agent_title_floor_exclusive"] = False
+    # The shell is on its way back to a prompt, and a relaunch typed before
+    # those bytes are read is promoted against a mark that cannot include
+    # them. Let the watch under it absorb one prompt rather than retire an
+    # agent that has just started -- see `_absorb_retired_agents_prompt`.
+    connection["agent_prompt_absorb_until"] = (
+        time.monotonic() + AGENT_RETIRED_PROMPT_ABSORB_SECONDS
+    )
+    # A line held against a prompt that has now arrived and retired the
+    # pane instead is a line the reader typed into the agent they ended.
+    connection.pop("agent_relaunch_pending", None)
+    # The floor already stops the retired agent's title from being read as
+    # a fact about the shell that inherited the pane, and a resolved
+    # conversation name is dropped with it because it is matched against
+    # that title. Dropping it here as well is the explicit half of the
+    # same rule: nothing about a conversation survives its agent.
+    _forget_agent_conversation(connection)
+    # Nor does its task: an agent started here next, by hand, must not
+    # read it, report on it or be handed its follow-ups.
+    _retire_agent_handoff(connection, handoff_reason)
 
 
 def _resolve_wsl_distribution(session: Any) -> str:
@@ -3850,6 +3877,64 @@ def _establish_mcp_tunnel(
     )
 
 
+def _prepare_tmux_session(
+    session_id: str, connection: Dict[str, Any], client: Any, session: Any,
+    name: str, directory: str,
+) -> Tuple[Optional[str], str]:
+    """Attach to or create the pane's tmux session; return ``(state, name)``.
+
+    A name generated for this pane (its ``tmux_fresh``) is created, never
+    attached to. When the host already holds a session under it, that session
+    belongs to someone else, so the pane moves to a new name with the same
+    stem, claimed under the claim lock, and the create is tried there. Bounded by ``TMUX_FRESH_NAME_ATTEMPTS``, after
+    which the connection fails rather than attach.
+
+    ``state`` is None when the pane or its connection went away while the host
+    was being asked, so the caller stops without another remote command. Each
+    attempt re-checks the connection first, since creating is a remote mutation.
+    """
+    attempts = ssh_tmux.TMUX_FRESH_NAME_ATTEMPTS
+    for attempt in range(attempts):
+        # A pane closed during login must not leave a session behind.
+        if not _ssh_connection_is_live(session_id, connection):
+            return None, name
+        fresh = bool(getattr(session, "tmux_fresh", False))
+        state = ssh_tmux.prepare(client, name, directory, fresh=fresh)
+        if state != ssh_tmux.TMUX_EXISTS:
+            if fresh:
+                settle_fresh_tmux_name(session_id, session, name)
+            return state, name
+        if attempt == attempts - 1:
+            break
+        # A connection retired while the host was asked must not move the claim.
+        if not _ssh_connection_is_live(session_id, connection):
+            return None, name
+        # A draw repeating the name the host just answered for is drawn again
+        # before any claim moves: renaming to it would change nothing.
+        replacement = name
+        while replacement == name:
+            replacement = ssh_tmux.generate_session_name(ssh_tmux.name_stem(name))
+        try:
+            moved = rename_live_pane_tmux(session_id, session, name, replacement)
+        except ValueError:
+            # The pane was changed while the host was asked, and that change
+            # now owns the pane's name; this connection is no longer its own.
+            return None, name
+        if not moved:
+            # Another pane holds the replacement: try again with a new one.
+            continue
+        logger.info(
+            "[%s] tmux session %s is already on the host; this pane uses %s",
+            session_id, name, replacement,
+        )
+        name = replacement
+        _broadcast_session_status(session_id)
+    raise ssh_tmux.TmuxError(
+        f"The host already has tmux sessions under {attempts} names GridVibe "
+        "tried for this pane, so none was attached. Retry tries again."
+    )
+
+
 def _connect_ssh_session(session_id: str, session: Any):
     """Establish an SSH connection for a single terminal session."""
     connection = _begin_connection(session_id)
@@ -3918,20 +4003,20 @@ def _connect_ssh_session(session_id: str, session: Any):
         # be drawn at the right width.
         pty_cols, pty_rows = _terminal_size_for(session_id)
         tmux_state = ""
-        if tmux_name and not _ssh_connection_is_live(session_id, connection):
-            # Checked before the attach-or-create, which is a remote mutation:
-            # a pane closed during login must not leave a session behind.
-            logger.info("[%s] Session was removed before its tmux session was prepared", session_id)
-            _shutdown_connection({"client": client})
-            _close_ssh_connection(session_id, expected=connection)
-            return
         if tmux_name:
             launch_directory = str(
                 getattr(session, "launch_directory", "")
                 or getattr(session, "directory", "")
                 or ""
             )
-            tmux_state = ssh_tmux.prepare(client, tmux_name, launch_directory)
+            tmux_state, tmux_name = _prepare_tmux_session(
+                session_id, connection, client, session, tmux_name, launch_directory
+            )
+            if tmux_state is None:
+                logger.info("[%s] Session was removed before its tmux session was prepared", session_id)
+                _shutdown_connection({"client": client})
+                _close_ssh_connection(session_id, expected=connection)
+                return
         tmux_attached = bool(tmux_state) and tmux_state != ssh_tmux.TMUX_MISSING
         if tmux_attached:
             channel = ssh_tmux.open_attach_channel(client, tmux_name, pty_cols, pty_rows)

@@ -1688,5 +1688,105 @@ class TmuxRestartMenuTestCase(TerminalShellMenuTestCase):
         self.assertEqual(result["replacement"]["session_id"], "other")
 
 
+class TmuxRestartMouseReportingTestCase(TerminalShellMenuTestCase):
+    """The mouse-mode teardown a tmux restart owes, by what the pane becomes.
+
+    Only a plain shell inherits a pane a dying program may still be re-arming,
+    so only that successor is torn down. A tmux session redraws its own modes
+    on attach, and like a new agent must not have them cleared once its
+    connector has started. A refused request changed nothing, so it writes
+    nothing.
+    """
+
+    def test_a_plain_shell_restart_tears_down_the_pane_it_was_asked_for(self):
+        result = self._run_node(
+            """
+            appSettings.ssh.tmux_sessions = true;
+            const rows = await openMenu(0, sshPane({ tmux_session: 'work' }), {
+                pending: '\\u001b[?1003h\\u001b[?1006hredraw'
+            });
+            const replacement = { _session: sshPane({ session_id: 'sess-other' }),
+                                  _attached: true, _pendingOutput: '',
+                                  term: { reset() {}, write() { throw new Error('wrong pane'); } } };
+            RELAUNCH_RESPONSE = sshPane({ tmux_session: '' });
+            ON_RESPONSE = () => { terminals[0] = replacement; sessionIds[0] = 'sess-other'; };
+            await press(0, rows.find(row => row.label === 'Plain shell'));
+            report({
+                order: calls.order,
+                writes: calls.writes,
+                teardown: window.GridVibeTerminalModes.MOUSE_REPORTING_RESET
+            });
+            """
+        )
+        # The queued bytes land first, then the teardown, both after the answer.
+        self.assertEqual(
+            result["order"],
+            ["term-reset", "connecting", "request", "pane-write", "mouse-teardown"],
+        )
+        self.assertEqual(
+            result["writes"],
+            ["\x1b[?1003h\x1b[?1006hredraw", result["teardown"]],
+        )
+
+    def test_entering_tmux_writes_no_teardown(self):
+        result = self._run_node(
+            """
+            appSettings.ssh.tmux_sessions = true;
+            RELAUNCH_RESPONSE = sshPane({ tmux_session: 'work' });
+            const rows = await openMenu(0, sshPane());
+            await press(0, rows.find(row => row.tmux));
+            report({
+                order: calls.order,
+                writes: calls.writes,
+                body: calls.requests[calls.requests.length - 1].body
+            });
+            """
+        )
+        self.assertEqual(result["body"], {"enabled": True})
+        self.assertIn("request", result["order"])
+        self.assertEqual(result["writes"], [])
+        self.assertNotIn("mouse-teardown", result["order"])
+
+    def test_attaching_a_detached_session_writes_no_teardown(self):
+        result = self._run_node(
+            """
+            appSettings.ssh.tmux_sessions = true;
+            TMUX_SESSIONS = { tmux_available: true, sessions: [{ name: 'logs', windows: 1 }] };
+            RELAUNCH_RESPONSE = sshPane({ tmux_session: 'logs' });
+            let rows = await openMenu(0, sshPane());
+            await press(0, rows.find(row => row.dataset.paneShellExpand === 'tmux'));
+            await new Promise(resolve => setImmediate(resolve));
+            rows = rowsFor(0);
+            await press(0, rows.find(row => row.dataset.paneShellTmuxAttach === 'logs'));
+            report({
+                order: calls.order,
+                writes: calls.writes,
+                body: calls.requests[calls.requests.length - 1].body
+            });
+            """
+        )
+        self.assertEqual(result["body"], {"enabled": True, "session": "logs"})
+        self.assertIn("request", result["order"])
+        self.assertEqual(result["writes"], [])
+        self.assertNotIn("mouse-teardown", result["order"])
+
+    def test_a_refused_plain_shell_restart_writes_no_teardown(self):
+        result = self._run_node(
+            """
+            appSettings.ssh.tmux_sessions = true;
+            RELAUNCH_REFUSED = true;
+            const rows = await openMenu(0, sshPane({ tmux_session: 'work' }), {
+                pending: '\\u001b[?1003h'
+            });
+            await press(0, rows.find(row => row.label === 'Plain shell'));
+            report({ order: calls.order, writes: calls.writes, toasts: calls.toasts.length });
+            """
+        )
+        self.assertIn("request", result["order"])
+        self.assertEqual(result["toasts"], 1)
+        self.assertEqual(result["writes"], [])
+        self.assertNotIn("mouse-teardown", result["order"])
+
+
 if __name__ == "__main__":
     unittest.main()

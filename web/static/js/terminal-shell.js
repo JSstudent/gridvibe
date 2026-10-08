@@ -835,6 +835,12 @@
             if (!response.ok) {
                 throw new Error(data.error || `Tmux restart failed with status ${response.status}`);
             }
+            /* Only a plain shell is torn down here. A tmux session redraws its
+               own modes on attach, so like a new agent it must not have them
+               cleared after its connector has started. */
+            if (enabled === false) {
+                resetSuccessorMouseReporting(pane, sessionId);
+            }
             const ownerIndex = terminals.indexOf(pane);
             if (ownerIndex < 0 || sessionIds[ownerIndex] !== sessionId) return;
             pane._session = data;
@@ -859,6 +865,36 @@
                 renderPaneShellMenu(ownerIndex);
             }
         }
+    }
+
+    /* Written once a relaunch has answered and the old program is gone. The
+       pre-fetch reset disarmed mouse reporting, but the program that was dying
+       while the request was in flight kept emitting: a full-screen TUI
+       re-asserts `\x1b[?1003h` on every redraw, so bytes that re-arm the mode
+       reach the pane after the reset that cleared it. The plain shell that has
+       inherited the prompt would then get every pointer movement typed at it,
+       which is the pane GridVibeTerminalModes exists to rescue. GridVibe caused
+       the state, so the teardown is written here rather than left to the user.
+
+       A teardown draws nothing, so unlike a second `term.reset()` it cannot wipe
+       what the new shell has already drawn — the race the pre-fetch reset is
+       placed where it is to avoid. Owed to the pane, never to the slot: the
+       capture flushes that pane's own queue first and follows it even if the
+       grid has since handed its slot to somebody else. Callers pass only a plain
+       shell; a new agent owns its mouse mode and must not have it torn down after
+       its connector has already started. */
+    function resetSuccessorMouseReporting(pane, sessionId) {
+        const resetTarget = GridVibeTerminalModes.captureResetTarget({
+            pane,
+            sessionId,
+            flush: target => flushCapturedPendingOutput(target),
+            write: (target, payload) => {
+                if (target?.term) {
+                    target.term.write(payload);
+                }
+            }
+        });
+        GridVibeTerminalModes.resetMouseReporting(payload => resetTarget.write(payload));
     }
 
     /* Relaunch one pane under the shell family, agent and tools a menu row
@@ -960,38 +996,8 @@
 
             pane._session = data;
 
-            /* When the successor is a plain shell, the reset above disarmed
-               mouse reporting and then the agent
-               that was dying while this request was in flight went on emitting
-               — a full-screen TUI re-asserts `\x1b[?1003h` on every redraw —
-               so bytes that re-arm the mode are written to the pane *after*
-               the reset that cleared it. The plain shell that has now
-               inherited the prompt would get every pointer movement typed at
-               it, which is the pane GridVibeTerminalModes exists to rescue;
-               the difference here is that GridVibe caused it, so nobody should
-               have to notice and press Reset view.
-
-               Written once more now that the request is answered and the old
-               shell is gone. A teardown draws nothing, so unlike a second
-               `term.reset()` it cannot wipe what the new shell has already
-               drawn — which is the race the pre-fetch reset above is placed
-               where it is to avoid. Owed to the pane, never to the slot: the
-               capture flushes that pane's own queue first and follows it even
-               if the grid has since handed its slot to somebody else. A new
-               agent owns its mouse mode and must not have it torn down after
-               its connector has already started. */
             if (!agent) {
-                const resetTarget = GridVibeTerminalModes.captureResetTarget({
-                    pane,
-                    sessionId,
-                    flush: target => flushCapturedPendingOutput(target),
-                    write: (target, payload) => {
-                        if (target?.term) {
-                            target.term.write(payload);
-                        }
-                    }
-                });
-                GridVibeTerminalModes.resetMouseReporting(payload => resetTarget.write(payload));
+                resetSuccessorMouseReporting(pane, sessionId);
             }
 
             const ownerIndex = terminals.indexOf(pane);

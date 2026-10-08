@@ -4195,10 +4195,13 @@ def split_session(session_id: str):
         "explorer_root_configured": bool(root_directory),
         "created_by_session_id": creator_session_id,
         "tmux_session": tmux_session,
+        # Generated for this pane, so its connection creates the session.
+        "tmux_fresh": bool(tmux_session),
     }
     fields.update(overrides)
     if fields.get("startup_mode") not in ("terminal", "agent"):
         fields["tmux_session"] = ""
+        fields["tmux_fresh"] = False
     # One level deeper than the pane that *asked*, which is not necessarily the
     # pane being halved: an agent can split a pane beside its own. A split
     # nobody claimed is a split a person made with the button, and an

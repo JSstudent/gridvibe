@@ -1851,13 +1851,29 @@ pane; whatever runs inside it keeps running because tmux keeps it running.
 - **One field, validated where a launch is prepared.** `TerminalSession.tmux_session`
   holds the name; `""` means not a tmux pane. `launch_session_name()` applies
   the gate and admits only SSH panes in terminal or agent mode: `tmux: true`
-  with no name generates `gv-<12 hex>`, and a name must match
-  `[A-Za-z0-9_-]{1,64}` — refused at launch, dropped on restore. A tool launch
-  (`origin_session_id` or `tool_launch`) never gets one: a session outlives
-  GridVibe on the host, so it is the person's launcher option. A person's
-  split of a tmux pane into a terminal or agent gets a newly generated name,
-  never the source's; a split an agent asked for (`created_by_session_id`)
-  gets none and opens a plain shell, like any tool launch.
+  with no name generates `<stem>_<6 digits>`. The stem is the GridVibe session
+  (tab) the pane opens in, each run of characters outside `[A-Za-z0-9_-]`
+  becomes one `-`, leading and trailing `-`/`_` are trimmed, and the stem is cut
+  to 57 characters so the whole name fits 64; an empty stem is `gv`. A typed,
+  preset or restored name must match `[A-Za-z0-9_-]{1,64}` — refused at launch,
+  dropped on restore. A tool launch (`origin_session_id` or `tool_launch`) never
+  gets one: a session outlives GridVibe on the host, so it is the person's
+  launcher option. A person's split of a tmux pane into a terminal or agent gets
+  a newly generated name, never the source's; a split an agent asked for
+  (`created_by_session_id`) gets none and opens a plain shell, like any tool
+  launch.
+- **A generated name only ever creates a session.** If the generated name is
+  already on the host, the connection moves the pane's claim to another name
+  with the same stem and creates that instead of attaching; a replacement
+  repeating the rejected name is drawn again before the claim moves. After five
+  names (`TMUX_FRESH_NAME_ATTEMPTS`) the connection fails and Retry tries again.
+  Create-only is the pane's `tmux_fresh`, never a property of the name: set
+  only where GridVibe generates the name for that pane (launch, split, the tmux
+  switch), never read from a request or a save, and cleared by
+  `settle_fresh_tmux_name()` once that pane's connection gets a definite answer
+  while it still holds the name. Another pane stating the same spelling, or a
+  pane on another host drawing it, leaves it alone. A typed, preset, restored or
+  listed name attaches as before.
 - **One live pane per (host, port, user, name).** `_refuse_shared_tmux_sessions()`
   runs with `install_session_group()` under `_tmux_claim_lock`, so two
   concurrent launches cannot both claim a session. The key uses the install's
@@ -1888,6 +1904,11 @@ pane; whatever runs inside it keeps running because tmux keeps it running.
   still the open pane's. A session it created for a pane that went during the
   round trip is left running, like any detached session: a missing pane id is
   no proof the name is unowned, since a restored group's new panes carry it.
+- **A tmux session that ends under its pane leaves a plain SSH shell.** When
+  tmux confirms the session is gone (`exit` in its last shell, asked by
+  `session_ended()`), the name is dropped and the pane's agent and startup
+  command go with it, so Retry opens a plain shell as its notice says. A detach
+  or a dropped transport keeps the name and the agent.
 - **Nothing is typed into an existing session.** A tmux connection gets no
   prompt hook, no `cd` and no echo scrub. A startup or agent launch line is
   sent with `tmux send-keys` only into a session this connection created in the
@@ -1912,6 +1933,23 @@ pane; whatever runs inside it keeps running because tmux keeps it running.
   windows are never ended for a relaunch. A failed `new-window` puts the pane
   in ERROR even without a startup command, and the still-current connection
   returns the request for Retry to open a window at the same directory.
+- **The reset menu's tmux switch is a relaunch that always ends in a plain
+  shell.** The "Plain shell" row and the tmux button beside it move a live SSH
+  terminal or agent pane in or out of tmux (`apply_pane_tmux_change()`, `POST
+  /api/sessions/<id>/tmux`). The chevron beside the tmux button lists the
+  host's detached sessions (`list_pane_tmux_sessions()`) and attaches the pane
+  to one; the list leaves out sessions a client is attached to, the pane's own,
+  and any that another pane holds or is ending. Entering tmux creates a session
+  named from the GridVibe session. Every direction is a relaunch: the connection
+  is replaced, an agent ends, and a terminal pane's startup command is cleared
+  (`plain_shell_fields()`). It is refused for a pane that is not an
+  SSH terminal or agent, one in Files or Browser mode, one already in the
+  requested mode, a session another pane holds or is ending, and a list asked
+  for while the pane is disconnected.
+- **Mouse reporting follows the direction of the switch.** Leaving tmux for a
+  plain shell clears the mouse reporting the old process left armed, as a
+  plain-shell relaunch does (see [Pane transitions](#pane-transitions)); entering
+  tmux leaves terminal modes to tmux.
 - **Close detaches unless the person asks.** The pane close dialog offers
   "Also end the tmux session"; only that sends `DELETE
   /api/sessions/<id>?end_tmux=1`, which retires the live connection from its

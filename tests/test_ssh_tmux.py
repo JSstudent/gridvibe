@@ -110,6 +110,41 @@ def fake_client(answer=None):
     return client, transport
 
 
+def simulated_host(held):
+    """An exec answerer for a host whose tmux holds the ``held`` session names.
+
+    An existing session is attached to (status 0), or, for a fresh name, is
+    answered as already existing (status 12). A missing one is created and
+    joins ``held``. ``log`` records what the host did, in order, so a test
+    can tell a create from an attach.
+    """
+    log = []
+
+    def answer(command):
+        script = command.replace("'\"'\"'", "'")
+        if "has-session" not in script or "new-session" not in script:
+            return 0, ""
+        name = script.split("has-session -t '=", 1)[1].split("'", 1)[0]
+        if name in held:
+            if "exit 12" in script:
+                log.append(("exists", name))
+                return 12, ""
+            log.append(("attached", name))
+            return 0, ""
+        held.add(name)
+        log.append(("created", name))
+        return 10, ""
+
+    return answer, log
+
+
+class EveryNameHeld(set):
+    """A host that holds every name it is asked about."""
+
+    def __contains__(self, _name):
+        return True
+
+
 class GateAndNamesTestCase(unittest.TestCase):
     def test_gate_reads_the_captured_setting_and_defaults_off(self):
         self.assertFalse(ssh_tmux.tmux_sessions_enabled(SimpleNamespace()))
@@ -236,6 +271,39 @@ class GateAndNamesTestCase(unittest.TestCase):
             "gv-0123456789ab",
         )
 
+    def test_only_a_name_generated_for_the_launch_is_fresh(self):
+        pane = {"mode": "ssh", "startup_mode": "terminal", "tmux": True}
+        generated = ssh_tmux.launch_tmux_fields(pane, enabled=True, restore=False)
+        self.assertRegex(generated["tmux_session"], r"^gv_\d{6}$")
+        self.assertIs(generated["tmux_fresh"], True)
+
+        # A generated name a launch later states (a restore, a preset, a typed
+        # name) attaches like any stated name, even though it was generated,
+        # and a request cannot declare its own name fresh.
+        for restore in (True, False):
+            stated = {
+                **pane,
+                "tmux_session": generated["tmux_session"],
+                "tmux_fresh": True,
+            }
+            with self.subTest(restore=restore):
+                self.assertEqual(
+                    ssh_tmux.launch_tmux_fields(stated, enabled=True, restore=restore),
+                    {"tmux_session": generated["tmux_session"], "tmux_fresh": False},
+                )
+        self.assertEqual(
+            ssh_tmux.launch_tmux_fields(pane, enabled=False, restore=False),
+            {"tmux_session": "", "tmux_fresh": False},
+        )
+
+    def test_name_stem_removes_only_the_generated_digits(self):
+        self.assertEqual(ssh_tmux.name_stem("api-server_048213"), "api-server")
+        self.assertEqual(ssh_tmux.name_stem("gv_1_048213"), "gv_1")
+        self.assertEqual(ssh_tmux.name_stem("work"), "work")
+        self.assertEqual(ssh_tmux.name_stem("logs_12345"), "logs_12345")
+        long_name = ssh_tmux.generate_session_name("x" * 90)
+        self.assertEqual(ssh_tmux.name_stem(long_name), "x" * 57)
+
 
 class RemoteCommandsTestCase(unittest.TestCase):
     def test_prepare_maps_exit_statuses_and_quotes_every_argument(self):
@@ -256,6 +324,16 @@ class RemoteCommandsTestCase(unittest.TestCase):
         client, _ = fake_client(lambda _command: (1, "server exited unexpectedly"))
         with self.assertRaisesRegex(ssh_tmux.TmuxError, "server exited"):
             ssh_tmux.prepare(client, "work", "")
+
+    def test_a_fresh_name_reports_an_existing_session_and_attaches_to_nothing(self):
+        answer, log = simulated_host({"work"})
+        client, transport = fake_client(answer)
+        self.assertEqual(ssh_tmux.prepare(client, "work", "/srv", fresh=True), ssh_tmux.TMUX_EXISTS)
+        self.assertEqual(ssh_tmux.prepare(client, "work", "/srv"), ssh_tmux.TMUX_ATTACHED)
+        self.assertEqual(ssh_tmux.prepare(client, "new", "/srv", fresh=True), ssh_tmux.TMUX_CREATED)
+        self.assertEqual(log, [("exists", "work"), ("attached", "work"), ("created", "new")])
+        # Only the prepare round trips ran: no attach channel was ever opened.
+        self.assertFalse(any(channel.pty for channel in transport.channels))
 
     def test_every_target_is_an_exact_quoted_match(self):
         client, transport = fake_client(
@@ -395,7 +473,7 @@ class ConnectTestCase(unittest.TestCase):
             directory="/srv/app", launch_directory="/srv/app", current_directory=None,
             initial_command="", initial_command_mode="command", distribution="",
             mode="ssh", startup_mode="terminal", status=SessionStatus.CONNECTED,
-            tmux_session="work", agent_selection="", custom_agent="",
+            tmux_session="work", tmux_fresh=False, agent_selection="", custom_agent="",
         )
         self.session_manager.get_session.return_value = self.session
         self.addCleanup(ssh_tmux.forget_session, "pane")
@@ -425,44 +503,6 @@ class ConnectTestCase(unittest.TestCase):
                 context.stop()
         return client, transport
 
-    def test_exit_ending_the_session_drops_the_name_so_retry_opens_a_plain_shell(self):
-        for ended in (True, False):
-            with self.subTest(ended=ended):
-                self.session_manager.reset_mock()
-                self.emitted.clear()
-                connection = {"kind": "ssh", "tmux_session": "work", "client": object()}
-                self.registry["pane"] = connection
-                with patch.object(ssh_tmux, "session_ended", return_value=ended) as asked:
-                    terminal._forget_ended_tmux_session("pane", connection)
-                asked.assert_called_once_with(connection["client"], "work")
-                notices = [data["data"] for data in self.emitted if "tmux session work ended" in str(data)]
-                if ended:
-                    self.session_manager.clear_tmux_session.assert_called_once_with("pane")
-                    self.assertEqual(len(notices), 1)
-                else:
-                    # A detach: the session is still there, and Retry reattaches.
-                    self.session_manager.clear_tmux_session.assert_not_called()
-                    self.assertEqual(notices, [])
-
-    def test_only_the_owning_tmux_connection_asks_whether_its_session_ended(self):
-        retired = {"kind": "ssh", "tmux_session": "work", "client": object()}
-        self.registry["pane"] = {"kind": "ssh", "tmux_session": "work", "client": object()}
-        plain = {"kind": "ssh", "client": object()}
-        with patch.object(ssh_tmux, "session_ended", return_value=True) as asked:
-            # Replaced by a relaunch or a close: the pane is no longer its.
-            terminal._forget_ended_tmux_session("pane", retired)
-            self.registry["pane"] = plain
-            terminal._forget_ended_tmux_session("pane", plain)
-        asked.assert_not_called()
-
-        # The pane changed its name while the host was being asked.
-        owner = {"kind": "ssh", "tmux_session": "work", "client": object()}
-        self.registry["pane"] = owner
-        self.session.tmux_session = "other"
-        with patch.object(ssh_tmux, "session_ended", return_value=True):
-            terminal._forget_ended_tmux_session("pane", owner)
-        self.session_manager.clear_tmux_session.assert_not_called()
-
     def test_setting_off_opens_a_plain_shell_even_for_a_named_pane(self):
         client, transport = self._connect(enabled=False)
         client.invoke_shell.assert_called_once()
@@ -482,6 +522,156 @@ class ConnectTestCase(unittest.TestCase):
         # The create step got the launch directory, quoted.
         self.assertIn("/srv/app", transport.commands[0])
 
+    def _manage_pane(self):
+        """The live manager the claim check reads, holding only this pane."""
+        manager = SimpleNamespace(lock=threading.Lock(), sessions={"pane": self.session})
+        context = patch.object(web_workspaces, "_manager", return_value=manager)
+        context.start()
+        self.addCleanup(context.stop)
+
+    def test_a_generated_name_the_host_holds_moves_to_a_new_name_and_is_created(self):
+        name = ssh_tmux.generate_session_name("api")
+        self.session.tmux_session = name
+        self.session.tmux_fresh = True
+        self._manage_pane()
+        answer, log = simulated_host({name})
+        _client, transport = self._connect(answer=answer)
+
+        new_name = self.session.tmux_session
+        self.assertNotEqual(new_name, name)
+        self.assertEqual(ssh_tmux.name_stem(new_name), ssh_tmux.name_stem(name))
+        # The host's own session under the first name was left alone, and the
+        # pane's session is the one it created under the replacement.
+        self.assertEqual(log, [("exists", name), ("created", new_name)])
+        connection = self.registry["pane"]
+        self.assertEqual(connection["tmux_session"], new_name)
+        self.assertEqual(connection["tmux_state"], ssh_tmux.TMUX_CREATED)
+        self.assertEqual(transport.channels[-1].command, f"tmux attach-session -t '={new_name}'")
+        self.assertFalse(self.session.tmux_fresh)
+        self._broadcast_session_status.assert_any_call("pane")
+        self.session_manager.clear_tmux_session.assert_not_called()
+
+    def test_a_fresh_name_the_host_lacks_is_created_under_its_own_name(self):
+        name = ssh_tmux.generate_session_name("api")
+        self.session.tmux_session = name
+        self.session.tmux_fresh = True
+        self._manage_pane()
+        answer, log = simulated_host(set())
+        self._connect(answer=answer)
+        self.assertEqual(log, [("created", name)])
+        self.assertEqual(self.session.tmux_session, name)
+        self.assertEqual(self.registry["pane"]["tmux_state"], ssh_tmux.TMUX_CREATED)
+        # Created now, so a reconnect attaches to it.
+        self.assertFalse(self.session.tmux_fresh)
+
+    def test_a_replacement_that_repeats_the_rejected_name_is_drawn_again(self):
+        name = "api_111111"
+        self.session.tmux_session = name
+        self.session.tmux_fresh = True
+        self._manage_pane()
+        answer, log = simulated_host({name})
+        with patch.object(
+            ssh_tmux, "generate_session_name", side_effect=[name, "api_222222"]
+        ):
+            _client, transport = self._connect(answer=answer)
+        # The repeat was never claimed, so the pane stayed fresh and created
+        # its own session rather than attaching to the host's.
+        self.assertEqual(log, [("exists", name), ("created", "api_222222")])
+        self.assertEqual(self.session.tmux_session, "api_222222")
+        self.assertEqual(self.registry["pane"]["tmux_state"], ssh_tmux.TMUX_CREATED)
+        self.assertEqual(
+            transport.channels[-1].command, "tmux attach-session -t '=api_222222'"
+        )
+
+    def test_a_restored_name_the_host_holds_attaches_and_is_never_renamed(self):
+        # The setUp pane names "work", which was not generated: a restore.
+        answer, log = simulated_host({"work"})
+        _client, transport = self._connect(answer=answer)
+        self.assertEqual(log, [("attached", "work")])
+        self.assertEqual(self.session.tmux_session, "work")
+        self.assertEqual(self.registry["pane"]["tmux_state"], ssh_tmux.TMUX_ATTACHED)
+        self.assertEqual(transport.channels[-1].command, "tmux attach-session -t '=work'")
+
+    def test_a_fresh_name_that_keeps_colliding_fails_after_a_bounded_number_of_names(self):
+        name = ssh_tmux.generate_session_name("api")
+        self.session.tmux_session = name
+        self.session.tmux_fresh = True
+        self._manage_pane()
+        answer, log = simulated_host(EveryNameHeld({name}))
+        client, transport = self._connect(answer=answer)
+
+        # Every name tried was taken, and each attempt moved to a new one.
+        attempts = ssh_tmux.TMUX_FRESH_NAME_ATTEMPTS
+        self.assertEqual([kind for kind, _name in log], ["exists"] * attempts)
+        self.assertEqual(len({tried for _kind, tried in log}), attempts)
+        self.assertFalse(any("attach-session" in command for command in transport.commands))
+        self.assertNotIn("pane", self.registry)
+        client.close.assert_called()
+        statuses = [call.args[1] for call in self.session_manager.update_session_status.call_args_list]
+        self.assertIn(SessionStatus.ERROR, statuses)
+        self.assertNotIn(SessionStatus.CONNECTED, statuses)
+        errors = [
+            call.kwargs["error_message"]
+            for call in self.session_manager.update_session_status.call_args_list
+            if call.args[1] == SessionStatus.ERROR
+        ]
+        self.assertIn("Retry", errors[-1])
+
+    def test_a_pane_changed_while_the_host_was_asked_keeps_the_change(self):
+        name = ssh_tmux.generate_session_name("api")
+        self.session.tmux_session = name
+        self.session.tmux_fresh = True
+        self._manage_pane()
+        base_answer, log = simulated_host({name})
+
+        def answer(command):
+            status, output = base_answer(command)
+            if status == 12:
+                # The person moved the pane to another session from the menu.
+                self.session.tmux_session = "menu-pick"
+            return status, output
+
+        client, _transport = self._connect(answer=answer)
+        self.assertEqual(self.session.tmux_session, "menu-pick")
+        self.assertEqual(log, [("exists", name)])
+        self.assertNotIn("pane", self.registry)
+        client.close.assert_called()
+
+    def test_a_connection_retired_while_the_host_was_asked_leaves_the_claim_alone(self):
+        name = ssh_tmux.generate_session_name("api")
+        self.session.tmux_session = name
+        self.session.tmux_fresh = True
+        self._manage_pane()
+        base_answer, log = simulated_host({name})
+
+        def answer(command):
+            status, output = base_answer(command)
+            if status == 12:
+                # A relaunch retires this connection while the host answers.
+                self.registry.pop("pane", None)
+            return status, output
+
+        client, _transport = self._connect(answer=answer)
+        self.assertEqual(self.session.tmux_session, name)
+        self.assertEqual(log, [("exists", name)])
+        self.assertNotIn("pane", self.registry)
+        client.close.assert_called()
+
+    def test_a_failed_prepare_keeps_its_name_fresh_for_the_retry(self):
+        name = ssh_tmux.generate_session_name("api")
+        self.session.tmux_session = name
+        self.session.tmux_fresh = True
+        self._manage_pane()
+        self._connect(answer=lambda _command: (1, "lost server"))
+        self.assertTrue(self.session.tmux_fresh)
+        self.assertNotIn("pane", self.registry)
+
+        # The retry finds the host holding that name: it must not attach to it.
+        answer, log = simulated_host({name})
+        self._connect(answer=answer)
+        self.assertEqual(log[0], ("exists", name))
+        self.assertNotEqual(self.session.tmux_session, name)
+
     def test_tmux_missing_falls_back_to_a_plain_shell_and_says_so(self):
         client, transport = self._connect(answer=scripted(prepare_status=3))
         client.invoke_shell.assert_called_once()
@@ -489,6 +679,24 @@ class ConnectTestCase(unittest.TestCase):
         self.assertTrue(any("tmux was not found" in item.get("data", "") for item in self.emitted))
         # The pane is a plain shell now, so it stops naming a session.
         self.session_manager.clear_tmux_session.assert_called_once_with("pane")
+
+    def test_a_host_without_tmux_keeps_the_agent_it_starts_in_the_plain_shell(self):
+        # The one path that keeps the agent: its launch line is typed into the
+        # plain shell that replaces the attach, so the pane stays an agent pane.
+        self.session.startup_mode = "agent"
+        self.session.initial_command = "claude"
+        self.session.initial_command_mode = "agent"
+        self.session.agent_selection = "claude"
+        self.session_manager.clear_tmux_session.side_effect = (
+            lambda _session_id: setattr(self.session, "tmux_session", "")
+        )
+        client, _transport = self._connect(answer=scripted(prepare_status=3))
+        client.invoke_shell.assert_called_once()
+        self.session_manager.clear_tmux_session.assert_called_once_with("pane")
+        self.session_manager.end_tmux_session.assert_not_called()
+        self.assertEqual(self.session.startup_mode, "agent")
+        self.assertEqual(self.session.initial_command, "claude")
+        self.assertEqual(self.session.agent_selection, "claude")
 
     def _close_pane(self, *_args, **_kwargs):
         # What the close route leaves behind: the pane gone from the manager
@@ -734,6 +942,157 @@ class ConnectTestCase(unittest.TestCase):
         self.assertFalse(terminal._end_tmux_session("pane"))
 
 
+class EndedTmuxSessionTestCase(unittest.TestCase):
+    """A tmux session that ends under its pane, judged on a real manager."""
+
+    def setUp(self):
+        self.manager = SessionManager()
+        self.registry = {}
+        self.emitted = []
+        for name, value in [
+            ("session_manager", self.manager),
+            ("ssh_connections", self.registry),
+            ("session_output_buffers", {}),
+            ("session_terminal_sizes", {}),
+        ]:
+            context = patch.object(terminal, name, value)
+            context.start()
+            self.addCleanup(context.stop)
+        context = patch.object(terminal, "_broadcast_session_status")
+        self.broadcast = context.start()
+        self.addCleanup(context.stop)
+        context = patch.object(
+            terminal.socketio, "emit",
+            side_effect=lambda event, data, **kw: self.emitted.append(data),
+        )
+        context.start()
+        self.addCleanup(context.stop)
+        self.addCleanup(ssh_tmux.forget_session, "pane")
+
+    def _pane(self, **fields):
+        fields.setdefault("tmux_session", "work")
+        pane = TerminalSession(
+            session_id="pane", group_id="g1", host="box", port=22, username="dev",
+            directory="/srv/app", mode="ssh", **fields,
+        )
+        self.manager.sessions["pane"] = pane
+        return pane
+
+    def _connection(self):
+        connection = {
+            "kind": "ssh", "tmux_session": "work", "client": object(),
+            "agent_runtime_armed": True,
+        }
+        self.registry["pane"] = connection
+        return connection
+
+    def _end(self, connection, ended=True):
+        with patch.object(ssh_tmux, "session_ended", return_value=ended) as asked:
+            terminal._forget_ended_tmux_session("pane", connection)
+        return asked
+
+    def _notices(self):
+        return [data["data"] for data in self.emitted if "tmux session work ended" in str(data)]
+
+    def test_an_agent_pane_whose_tmux_session_ended_is_a_plain_shell(self):
+        pane = self._pane(
+            startup_mode="agent", initial_command="claude", initial_command_mode="agent",
+            agent_selection="claude", agent_mcp=True, agent_mcp_override=True,
+            agent_auto_mode=True, agent_conversation_provider="codex",
+            agent_conversation_id="thread-1", agent_conversation_resume=True,
+        )
+        connection = self._connection()
+        asked = self._end(connection)
+
+        asked.assert_called_once_with(connection["client"], "work")
+        self.assertEqual(pane.tmux_session, "")
+        self.assertEqual(pane.startup_mode, "terminal")
+        self.assertEqual(pane.initial_command, "")
+        self.assertEqual(pane.initial_command_mode, "command")
+        self.assertEqual(pane.agent_selection, "")
+        self.assertFalse(pane.agent_mcp)
+        self.assertFalse(pane.agent_mcp_override)
+        self.assertFalse(pane.agent_auto_mode)
+        self.assertEqual(pane.agent_conversation_id, "")
+        self.assertFalse(pane.agent_conversation_resume)
+        self.assertEqual(pane.directory, "/srv/app")
+        # The agent's watch on the connection is retired with it, the page is
+        # told, and the notice promises what Retry now does.
+        self.assertFalse(connection["agent_runtime_armed"])
+        self.broadcast.assert_called_once_with("pane")
+        self.assertEqual(len(self._notices()), 1)
+        self.assertIn("Retry opens a plain shell", str(self._notices()))
+
+    def test_a_terminal_pane_loses_the_startup_command_retry_would_replay(self):
+        pane = self._pane(
+            startup_mode="terminal", initial_command="make watch", initial_command_mode="command",
+        )
+        connection = self._connection()
+        self._end(connection)
+
+        self.assertEqual(pane.tmux_session, "")
+        self.assertEqual(pane.startup_mode, "terminal")
+        self.assertEqual(pane.initial_command, "")
+        self.assertEqual(pane.initial_command_mode, "command")
+        self.assertEqual(pane.directory, "/srv/app")
+        # Nothing agent-shaped was running, so the watch is not touched.
+        self.assertTrue(connection["agent_runtime_armed"])
+        self.broadcast.assert_called_once_with("pane")
+        self.assertEqual(len(self._notices()), 1)
+
+    def test_a_detach_or_a_dropped_transport_keeps_the_agent_and_the_name(self):
+        pane = self._pane(
+            startup_mode="agent", initial_command="claude", initial_command_mode="agent",
+            agent_selection="claude",
+        )
+        connection = self._connection()
+        asked = self._end(connection, ended=False)
+
+        asked.assert_called_once_with(connection["client"], "work")
+        self.assertEqual(pane.tmux_session, "work")
+        self.assertEqual(pane.startup_mode, "agent")
+        self.assertEqual(pane.initial_command, "claude")
+        self.assertEqual(pane.agent_selection, "claude")
+        self.assertTrue(connection["agent_runtime_armed"])
+        self.broadcast.assert_not_called()
+        self.assertEqual(self._notices(), [])
+
+    def test_a_replaced_connection_or_one_with_no_name_changes_nothing(self):
+        pane = self._pane(
+            startup_mode="agent", initial_command="claude", initial_command_mode="agent",
+            agent_selection="claude",
+        )
+        # Replaced by a relaunch: the pane now belongs to another connection.
+        retired = self._connection()
+        self.registry["pane"] = {"kind": "ssh", "tmux_session": "work", "client": object()}
+        self._end(retired).assert_not_called()
+        # A plain connection never attached to a tmux session.
+        plain = {"kind": "ssh", "client": object()}
+        self.registry["pane"] = plain
+        self._end(plain).assert_not_called()
+
+        self.assertEqual(pane.tmux_session, "work")
+        self.assertEqual(pane.startup_mode, "agent")
+        self.assertEqual(pane.initial_command, "claude")
+        self.broadcast.assert_not_called()
+        self.assertEqual(self._notices(), [])
+
+    def test_a_pane_renamed_while_the_host_was_asked_is_left_alone(self):
+        pane = self._pane(
+            startup_mode="agent", initial_command="claude", initial_command_mode="agent",
+            agent_selection="claude", tmux_session="other",
+        )
+        connection = self._connection()
+        self._end(connection)
+
+        self.assertEqual(pane.tmux_session, "other")
+        self.assertEqual(pane.startup_mode, "agent")
+        self.assertEqual(pane.initial_command, "claude")
+        self.assertTrue(connection["agent_runtime_armed"])
+        self.broadcast.assert_not_called()
+        self.assertEqual(self._notices(), [])
+
+
 class SnapshotTestCase(unittest.TestCase):
     def _agent_pane(self):
         return TerminalSession(
@@ -942,6 +1301,114 @@ class HttpTestCase(unittest.TestCase):
             self.assertEqual(start.call_count, 2)
         self.assertIsNone(ssh_tmux.take_new_window(pane_id))
 
+    def test_a_terminal_restarted_as_a_plain_shell_drops_its_startup_command(self):
+        self._enable()
+        pane_id = self._launch({}).get_json()["sessions"][0]["session_id"]
+        pane = api.session_manager.get_session(pane_id)
+        route = f"/api/sessions/{pane_id}/tmux"
+
+        def run_command(command="npm run dev"):
+            api.session_manager.update_session_metadata(
+                pane_id, initial_command=command, initial_command_mode="command"
+            )
+
+        with patch.object(api, "_close_ssh_connection"), patch.object(
+            api.socketio, "start_background_task"
+        ), patch.object(web_session_modes, "effective_directory", return_value=("/srv/live", "process")):
+            # Into a new tmux session: the fresh session would type the command again.
+            run_command()
+            entered = self.client.post(route, json={"enabled": True})
+            self.assertEqual(entered.status_code, 200)
+            self.assertEqual(
+                (entered.get_json()["startup_mode"], entered.get_json()["initial_command"],
+                 entered.get_json()["initial_command_mode"]),
+                ("terminal", "", "command"),
+            )
+            # Out of tmux, whichever button was pressed.
+            run_command()
+            left = self.client.post(route, json={"enabled": False})
+            self.assertEqual(left.status_code, 200)
+            self.assertEqual(
+                (left.get_json()["initial_command"], left.get_json()["initial_command_mode"]),
+                ("", "command"),
+            )
+            # Attached to a listed session.
+            run_command()
+            attached = self.client.post(route, json={"enabled": True, "session": "logs"})
+            self.assertEqual(attached.status_code, 200)
+            self.assertEqual(attached.get_json()["tmux_session"], "logs")
+            self.assertEqual(
+                (attached.get_json()["initial_command"], attached.get_json()["initial_command_mode"]),
+                ("", "command"),
+            )
+        self.assertEqual((pane.initial_command, pane.initial_command_mode), ("", "command"))
+
+    def test_an_agent_restarted_into_tmux_still_drops_its_launch_line(self):
+        self._enable()
+        launched = self._launch({"startup_mode": "agent", "agent_selection": "claude"})
+        pane_id = launched.get_json()["sessions"][0]["session_id"]
+        pane = api.session_manager.get_session(pane_id)
+        # The launch line an agent pane carries once its agent has been promoted.
+        api.session_manager.update_session_metadata(
+            pane_id, initial_command="claude", initial_command_mode="agent"
+        )
+        with patch.object(api, "_close_ssh_connection"), patch.object(
+            api.socketio, "start_background_task"
+        ), patch.object(web_session_modes, "effective_directory", return_value=("/srv/live", "process")):
+            response = self.client.post(f"/api/sessions/{pane_id}/tmux", json={"enabled": True})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            (pane.startup_mode, pane.agent_selection, pane.initial_command, pane.initial_command_mode),
+            ("terminal", "", "", "command"),
+        )
+
+    def test_a_refused_tmux_change_keeps_the_terminal_startup_command(self):
+        self._enable()
+        pane_id = self._launch({}).get_json()["sessions"][0]["session_id"]
+        pane = api.session_manager.get_session(pane_id)
+        route = f"/api/sessions/{pane_id}/tmux"
+        api.session_manager.update_session_metadata(
+            pane_id, initial_command="npm run dev", initial_command_mode="command"
+        )
+        with patch.object(api, "_close_ssh_connection") as close, patch.object(
+            api.socketio, "start_background_task"
+        ) as start, patch.object(
+            web_session_modes, "effective_directory", return_value=("/srv/live", "process")
+        ):
+            # Already out of tmux: refused before anything is planned.
+            self.assertEqual(self.client.post(route, json={"enabled": False}).status_code, 409)
+            self.assertEqual(pane.initial_command, "npm run dev")
+
+            # A session name still being ended is refused before the pane is touched.
+            key = ssh_tmux.session_key(pane.host, pane.port, pane.username, "logs")
+            with web_workspaces._tmux_claim_lock:
+                web_workspaces._closing_tmux_sessions[key] = 1
+            try:
+                response = self.client.post(route, json={"enabled": True, "session": "logs"})
+            finally:
+                with web_workspaces._tmux_claim_lock:
+                    del web_workspaces._closing_tmux_sessions[key]
+            self.assertEqual(response.status_code, 409)
+            self.assertIn("still being ended", response.get_json()["error"])
+            self.assertEqual(pane.initial_command, "npm run dev")
+            close.assert_not_called()
+            start.assert_not_called()
+
+        # Another window rewrites the command while the directory is read: the
+        # recheck refuses, and the command that window left is the one kept.
+        def rewrite_command(_id, _pane):
+            api.session_manager.update_session_metadata(pane_id, initial_command="npm run watch")
+            return "/new", "process"
+
+        with patch.object(web_session_modes, "effective_directory", side_effect=rewrite_command), patch.object(
+            api, "_close_ssh_connection"
+        ) as close, patch.object(api.socketio, "start_background_task") as start:
+            response = self.client.post(route, json={"enabled": True})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual((pane.initial_command, pane.tmux_session), ("npm run watch", ""))
+        close.assert_not_called()
+        start.assert_not_called()
+
     def test_restart_refuses_an_existing_claim_before_mutation(self):
         self._enable()
         launched = self._launch({"tmux_session": "work"}, {})
@@ -1087,6 +1554,57 @@ class HttpTestCase(unittest.TestCase):
         # Attached by name, the pane saves as that session's pane.
         snapshot = web_runtime_state._snapshot_session(api.session_manager.get_session(pane_id))
         self.assertEqual(snapshot["tmux_session"], "other")
+
+    def test_attaching_to_a_listed_session_is_never_fresh(self):
+        self._enable()
+        # A name generated for another pane, which the host now lists.
+        listed = ssh_tmux.generate_session_name("logs")
+        pane_id = self._launch({}).get_json()["sessions"][0]["session_id"]
+        route = f"/api/sessions/{pane_id}/tmux"
+        with patch.object(api, "_close_ssh_connection"), patch.object(
+            api.socketio, "start_background_task"
+        ), patch.object(
+            web_session_modes, "effective_directory", return_value=("/srv/live", "process")
+        ):
+            switched_on = self.client.post(route, json={"enabled": True})
+            self.assertEqual(switched_on.status_code, 200)
+            # Switched on, the pane got a name of its own to create.
+            self.assertTrue(api.session_manager.get_session(pane_id).tmux_fresh)
+            response = self.client.post(route, json={"enabled": True, "session": listed})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["tmux_session"], listed)
+        self.assertFalse(api.session_manager.get_session(pane_id).tmux_fresh)
+        self.assertNotIn("tmux_fresh", response.get_json())
+
+    def test_freshness_belongs_to_the_pane_not_to_its_name(self):
+        self._enable()
+        name = "gv_123456"
+        with patch.object(ssh_tmux, "generate_session_name", return_value=name):
+            first = self._launch({"tmux": True}).get_json()["sessions"][0]
+            # The same draw on another host: a different session, and a
+            # different pane's freshness.
+            other = self._launch({"host": "other", "tmux": True}).get_json()["sessions"][0]
+        self.assertEqual((first["tmux_session"], other["tmux_session"]), (name, name))
+        pane = api.session_manager.get_session(first["session_id"])
+        other_pane = api.session_manager.get_session(other["session_id"])
+        self.assertTrue(pane.tmux_fresh)
+        self.assertTrue(other_pane.tmux_fresh)
+
+        # A launch stating that name is refused as a duplicate, and a launch
+        # on a third host attaches by it; neither touches either pane.
+        refused = self._launch({"tmux_session": name})
+        self.assertEqual(refused.status_code, 400)
+        stated = self._launch({"host": "third", "tmux_session": name})
+        self.assertEqual(stated.status_code, 201)
+        stated_id = stated.get_json()["sessions"][0]["session_id"]
+        self.assertFalse(api.session_manager.get_session(stated_id).tmux_fresh)
+        self.assertTrue(pane.tmux_fresh)
+        self.assertTrue(other_pane.tmux_fresh)
+
+        # One pane's connection preparing the name leaves the other fresh.
+        web_workspaces.settle_fresh_tmux_name(other["session_id"], other_pane, name)
+        self.assertFalse(other_pane.tmux_fresh)
+        self.assertTrue(pane.tmux_fresh)
 
     def test_shell_route_cannot_set_tmux_from_a_tool_style_payload(self):
         self._enable()
@@ -1301,8 +1819,9 @@ process.stdout.write(JSON.stringify({
         with patch.object(api.socketio, "start_background_task"):
             response = self.client.post(f"/api/sessions/{source['session_id']}/split", json={})
         self.assertEqual(response.status_code, 201)
-        name = response.get_json()["session"]["tmux_session"]
-        self.assertRegex(name, r"^Session-[A-Za-z0-9-]+_\d{6}$")
+        created = response.get_json()["session"]
+        self.assertRegex(created["tmux_session"], r"^Session-[A-Za-z0-9-]+_\d{6}$")
+        self.assertTrue(api.session_manager.get_session(created["session_id"]).tmux_fresh)
 
     def test_a_split_an_agent_asked_for_never_gets_a_tmux_session(self):
         self._enable()

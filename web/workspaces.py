@@ -49,7 +49,7 @@ from web.agent_handoffs import (
 )
 from web.agent_handoffs import handoffs as agent_handoffs
 from web.mcp_launch import LOCAL_PANE_MODE
-from web.ssh_tmux import launch_session_name, session_key, tmux_sessions_enabled
+from web.ssh_tmux import launch_tmux_fields, session_key, tmux_sessions_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -1021,12 +1021,13 @@ def _settle_tmux_session_names(
     are ignored like any field the API does not know. A generated name starts
     with ``stem``, the session name the launch asked for; the tab's final name
     is settled later, but its uniqueness suffix is no help to a name that
-    already ends in random digits.
+    already ends in random digits. Only a generated name is ``tmux_fresh``;
+    a request's own ``tmux_fresh`` is overwritten.
     """
     enabled = tmux_sessions_enabled()
     for prepared in prepared_sessions:
-        prepared["tmux_session"] = launch_session_name(
-            prepared, enabled=enabled, restore=restore, stem=stem
+        prepared.update(
+            launch_tmux_fields(prepared, enabled=enabled, restore=restore, stem=stem)
         )
         prepared.pop("tmux", None)
 
@@ -1075,13 +1076,16 @@ def change_live_pane_tmux(
     name: str,
     directory: str,
     metadata_fields: Dict[str, Any],
+    *,
+    fresh: bool = False,
 ) -> None:
     """Change one existing pane's tmux claim and launch directory atomically.
 
     The caller resolves the directory before entering this lock. Launch admission
     uses the same claim lock, so it cannot take a name between our check and the
     pane metadata write. The manager lock also rechecks the pane after that I/O,
-    through the caller's ``state_of``, against what it planned with.
+    through the caller's ``state_of``, against what it planned with. ``fresh``
+    marks a name generated for this pane: its connection creates the session.
     """
     with _tmux_claim_lock:
         manager = _manager()
@@ -1102,6 +1106,7 @@ def change_live_pane_tmux(
                 if key in _live_tmux_claims(manager, exclude=session):
                     raise ValueError(f"Another pane is already attached to tmux session {name}")
             session.tmux_session = name
+            session.tmux_fresh = bool(name) and fresh
             session.directory = directory
             session.current_directory = None
             if name:
@@ -1111,6 +1116,49 @@ def change_live_pane_tmux(
                 session.launch_directory = directory
             for field, value in metadata_fields.items():
                 setattr(session, field, value)
+
+
+def rename_live_pane_tmux(
+    session_id: str, expected_session: Any, old_name: str, new_name: str
+) -> bool:
+    """Move a live pane's tmux claim from ``old_name`` to ``new_name``.
+
+    The connect path uses this when the host already holds a generated name: the
+    pane takes a replacement, and the claim moves under the claim lock that
+    launch admission and the tmux menu also use, so no other pane can take
+    ``new_name`` between the check and the install. Returns False, changing
+    nothing, when ``new_name`` is held by another live pane or is being ended,
+    or is ``old_name`` itself. The pane stays fresh: the host holds no session
+    of its own under ``new_name`` yet. Raises ``ValueError`` when the pane
+    changed, since that change owns its name.
+    """
+    if new_name == old_name:
+        return False
+    with _tmux_claim_lock:
+        manager = _manager()
+        with manager.lock:
+            session = manager.sessions.get(session_id)
+            if session is not expected_session or str(session.tmux_session or "") != old_name:
+                raise ValueError("Pane changed while its tmux session was being prepared")
+            key = session_key(session.host, session.port, session.username, new_name)
+            if key in _closing_tmux_sessions or key in _live_tmux_claims(manager, exclude=session):
+                return False
+            session.tmux_session = new_name
+            return True
+
+
+def settle_fresh_tmux_name(session_id: str, expected_session: Any, name: str) -> None:
+    """Stop ``name`` being fresh for this pane: its connection prepared it.
+
+    Only while the pane still holds ``name``: a pane renamed or moved since
+    keeps the freshness its new name was given.
+    """
+    with _tmux_claim_lock:
+        manager = _manager()
+        with manager.lock:
+            session = manager.sessions.get(session_id)
+            if session is expected_session and str(session.tmux_session or "") == name:
+                session.tmux_fresh = False
 
 
 @contextmanager
@@ -1209,6 +1257,7 @@ def _refuse_shared_tmux_sessions(
                 "Restored pane dropped tmux session %s: another pane holds it", name
             )
             pane["tmux_session"] = ""
+            pane["tmux_fresh"] = False
             continue
         if key in _closing_tmux_sessions:
             raise ValueError(
