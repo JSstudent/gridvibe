@@ -1787,6 +1787,64 @@ class TmuxRestartMouseReportingTestCase(TerminalShellMenuTestCase):
         self.assertEqual(result["writes"], [])
         self.assertNotIn("mouse-teardown", result["order"])
 
+    def test_a_plain_shell_that_stays_in_tmux_writes_no_teardown(self):
+        """Reselecting tmux, or retiring a tmux agent to a shell, is a plain
+        relaunch whose successor is a new window in the same session. tmux's
+        replacement attach may already have redrawn its modes, so a teardown
+        here would leave tmux's mouse and scroll input disarmed."""
+        panes = {
+            "reselect": "sshPane({ tmux_session: 'work' })",
+            "retire_agent": (
+                "sshPane({ startup_mode: 'agent', agent_selection: 'claude',"
+                " tmux_session: 'work' })"
+            ),
+        }
+        for name, before in panes.items():
+            with self.subTest(name):
+                result = self._run_node(
+                    """
+                    appSettings.ssh.tmux_sessions = true;
+                    RELAUNCH_RESPONSE = sshPane({ tmux_session: 'work' });
+                    const rows = await openMenu(0, %s);
+                    await press(0, rows.find(row => row.tmux));
+                    const request = calls.requests[calls.requests.length - 1];
+                    report({
+                        url: request.url,
+                        agent: request.body.agent,
+                        order: calls.order,
+                        writes: calls.writes,
+                        tmux: terminals[0]._session.tmux_session
+                    });
+                    """ % before
+                )
+                self.assertEqual(result["url"], "/api/sessions/sess-ssh/shell")
+                self.assertEqual(result["agent"], "")
+                self.assertIn("request", result["order"])
+                self.assertEqual(result["tmux"], "work")
+                self.assertEqual(result["writes"], [])
+                self.assertNotIn("mouse-teardown", result["order"])
+
+    def test_a_name_the_gate_switched_off_still_gets_the_plain_teardown(self):
+        """With the option off a stored name connects as a plain shell, so a
+        relaunch off an agent owes the teardown like any other."""
+        result = self._run_node(
+            """
+            appSettings.ssh.tmux_sessions = false;
+            RELAUNCH_RESPONSE = sshPane({ tmux_session: 'work' });
+            const rows = await openMenu(0, sshPane({
+                startup_mode: 'agent', agent_selection: 'claude', tmux_session: 'work'
+            }));
+            await press(0, rows.find(row => row.label === 'Plain shell'));
+            report({
+                url: calls.requests[calls.requests.length - 1].url,
+                writes: calls.writes,
+                teardown: window.GridVibeTerminalModes.MOUSE_REPORTING_RESET
+            });
+            """
+        )
+        self.assertEqual(result["url"], "/api/sessions/sess-ssh/shell")
+        self.assertEqual(result["writes"], [result["teardown"]])
+
 
 if __name__ == "__main__":
     unittest.main()

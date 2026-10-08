@@ -7360,6 +7360,10 @@
            developer attached on purpose, so it is only ended when asked. */
         let endTmuxSession = false;
         const closingSession = terminals[index]?._session;
+        /* The session the dialog names, captured before it opens: ending one
+           is consent about that session, not about whatever this pane holds
+           by the time the answer comes back. */
+        const confirmedTmuxSession = String(closingSession?.tmux_session || '');
         let askedAboutTmux = false;
         if (
             closingSession?.mode === 'ssh'
@@ -7368,7 +7372,7 @@
         ) {
             const proceed = await openGenericConfirmModal({
                 title: 'Close this tmux pane?',
-                copy: `The pane detaches from tmux session ${closingSession.tmux_session}, which keeps running on ${closingSession.host || 'the host'}.`,
+                copy: `The pane detaches from tmux session ${confirmedTmuxSession}, which keeps running on ${closingSession.host || 'the host'}.`,
                 checkboxLabel: 'Also end the tmux session',
                 confirmLabel: 'Close pane'
             });
@@ -7384,6 +7388,14 @@
            is not closed -- and never has its session ended. */
         if (askedAboutTmux && plan && plan.sessionId !== closingSession.session_id) {
             showTerminalToast('The panes changed while the dialog was open. Nothing was closed.', 'error');
+            return;
+        }
+        /* The same pane can be moved to another tmux session from another
+           window without its id changing. The server refuses that too, for a
+           switch landing after this check; this one only spares the request. */
+        if (endTmuxSession
+            && String(terminals[index]?._session?.tmux_session || '') !== confirmedTmuxSession) {
+            showTerminalToast('The pane moved to another tmux session while the dialog was open. Nothing was closed.', 'error');
             return;
         }
         if (!plan) {
@@ -7404,7 +7416,9 @@
         closeSnapshotsBySessionId.set(plan.sessionId, plan.snapshot);
 
         try {
-            const closeQuery = endTmuxSession ? '?end_tmux=1' : '';
+            const closeQuery = endTmuxSession
+                ? `?end_tmux=1&tmux_session=${encodeURIComponent(confirmedTmuxSession)}`
+                : '';
             const response = await fetch(`/api/sessions/${encodeURIComponent(plan.sessionId)}${closeQuery}`, {
                 method: 'DELETE',
             });

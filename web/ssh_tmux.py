@@ -586,6 +586,12 @@ def request_new_window(session_id: str, directory: str = "") -> None:
         _pending_windows[str(session_id)] = str(directory or "")
 
 
+def keep_new_window(session_id: str, directory: str = "") -> None:
+    """Request a new window unless one is already owed; that one's directory wins."""
+    with _pending_lock:
+        _pending_windows.setdefault(str(session_id), str(directory or ""))
+
+
 def take_new_window(session_id: str) -> Optional[str]:
     """The directory a pending relaunch asked for (``""`` = current), or None."""
     with _pending_lock:

@@ -775,6 +775,99 @@ class ConnectTestCase(unittest.TestCase):
         self.assertIn(SessionStatus.CONNECTED, statuses)
         self.assertNotIn(SessionStatus.ERROR, statuses)
 
+    def _agent_pane(self):
+        self.session.tmux_fresh = True
+        self.session.initial_command = "claude"
+        self.session.initial_command_mode = "agent"
+        self.session.startup_mode = "agent"
+        self.session.agent_selection = "claude"
+
+    def test_retry_after_a_failed_attach_starts_the_agent_in_a_new_window(self):
+        """The first connection created the session and then failed to attach,
+        so nothing was typed. The name is settled, so Retry attaches -- and
+        an attach types nothing -- unless it is owed a window to type into."""
+        self._manage_pane()
+        self._agent_pane()
+        with patch.object(
+            ssh_tmux, "open_attach_channel",
+            side_effect=ssh_tmux.TmuxError("attach acknowledgement timed out"),
+        ):
+            self._connect(answer=scripted(prepare_status=10))
+        self.assertFalse(self.session.tmux_fresh)
+        self.assertNotIn("pane", self.registry)
+
+        with patch.object(terminal, "_compose_agent_startup_command", return_value="claude"):
+            _client, retry = self._connect(
+                answer=scripted(prepare_status=0, **{"new_window": (0, "%9\n")}),
+                run_startup=True,
+            )
+        windows = [command for command in retry.commands if "new-window" in command]
+        self.assertEqual(len(windows), 1)
+        self.assertIn("/srv/app", windows[0])
+        typed = [command for command in retry.commands if "send-keys" in command]
+        self.assertEqual(len(typed), 1)
+        # Into the window Retry opened, never the session's existing window.
+        self.assertIn("send-keys -t %9", typed[0])
+        self.assertIn("claude", typed[0])
+        notices = [item.get("data", "") for item in self.emitted]
+        self.assertFalse(any("was not typed" in text for text in notices), notices)
+        # Taken once: a later reconnect attaches without another window.
+        self.assertIsNone(ssh_tmux.take_new_window("pane"))
+
+    def test_a_failed_attach_owes_nothing_it_has_no_launch_for(self):
+        """A plain terminal has no line to deliver, and a session the pane
+        attached to, rather than created, was never typed into anyway."""
+        self._manage_pane()
+        failing = patch.object(
+            ssh_tmux, "open_attach_channel",
+            side_effect=ssh_tmux.TmuxError("attach acknowledgement timed out"),
+        )
+        self.session.tmux_fresh = True
+        with failing:
+            self._connect(answer=scripted(prepare_status=10))
+        self.assertIsNone(ssh_tmux.take_new_window("pane"))
+
+        self._agent_pane()
+        self.session.tmux_fresh = False
+        with failing:
+            self._connect(answer=scripted(prepare_status=0))
+        self.assertIsNone(ssh_tmux.take_new_window("pane"))
+
+    def test_a_failed_attach_keeps_a_relaunch_window_already_owed(self):
+        self._manage_pane()
+        self._agent_pane()
+        ssh_tmux.request_new_window("pane", "/srv/other")
+        with patch.object(
+            ssh_tmux, "open_attach_channel",
+            side_effect=ssh_tmux.TmuxError("attach acknowledgement timed out"),
+        ):
+            self._connect(answer=scripted(prepare_status=10))
+        self.assertEqual(ssh_tmux.take_new_window("pane"), "/srv/other")
+
+    def test_a_pane_switched_away_during_a_failed_attach_is_owed_no_window(self):
+        """A switch or close since the create owns what comes next, so the
+        failed connection leaves no intent for the replacement to inherit."""
+        self._manage_pane()
+        self._agent_pane()
+
+        def switch(*_args, **_kwargs):
+            self.session.tmux_session = "elsewhere"
+            raise ssh_tmux.TmuxError("attach acknowledgement timed out")
+
+        with patch.object(ssh_tmux, "open_attach_channel", side_effect=switch):
+            self._connect(answer=scripted(prepare_status=10))
+        self.assertIsNone(ssh_tmux.take_new_window("pane"))
+
+        def close(*_args, **_kwargs):
+            self._close_pane()
+            raise ssh_tmux.TmuxError("attach acknowledgement timed out")
+
+        self.session.tmux_session = "work"
+        self.session.tmux_fresh = True
+        with patch.object(ssh_tmux, "open_attach_channel", side_effect=close):
+            self._connect(answer=scripted(prepare_status=10))
+        self.assertIsNone(ssh_tmux.take_new_window("pane"))
+
     def test_a_retired_connection_leaves_the_relaunch_window_to_its_replacement(self):
         def answer(command):
             if "new-session" in command:
@@ -814,7 +907,7 @@ class ConnectTestCase(unittest.TestCase):
             return (255, "") if client.close.called else (0, "")
 
         transport.answer = answer
-        self.assertTrue(terminal._end_tmux_session("pane"))
+        self.assertTrue(terminal._end_tmux_session("pane", "work"))
         self.assertNotIn("pane", self.registry)
         client.close.assert_called_once()
 
@@ -936,10 +1029,20 @@ class ConnectTestCase(unittest.TestCase):
     def test_end_tmux_session_kills_only_an_attached_session(self):
         client, transport = fake_client()
         self.registry["pane"] = {"kind": "ssh", "client": client, "tmux_session": "work"}
-        self.assertTrue(terminal._end_tmux_session("pane"))
+        self.assertTrue(terminal._end_tmux_session("pane", "work"))
         self.assertEqual(transport.commands, ["tmux kill-session -t '=work'"])
         self.registry["pane"] = {"kind": "ssh", "client": client}
-        self.assertFalse(terminal._end_tmux_session("pane"))
+        self.assertFalse(terminal._end_tmux_session("pane", "work"))
+
+    def test_end_tmux_session_never_ends_a_session_it_was_not_asked_about(self):
+        client, transport = fake_client()
+        connection = {"kind": "ssh", "client": client, "tmux_session": "replacement"}
+        self.registry["pane"] = connection
+        self.assertFalse(terminal._end_tmux_session("pane", "work"))
+        self.assertEqual(transport.commands, [])
+        # Untouched: the connection still belongs to the pane it serves.
+        self.assertIs(self.registry["pane"], connection)
+        client.close.assert_not_called()
 
 
 class EndedTmuxSessionTestCase(unittest.TestCase):
@@ -1684,11 +1787,70 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(transports[first][1].commands, [])
         self.assertNotIn("tmux_ended", response.get_json())
 
-        response = self.client.delete(f"/api/sessions/{second}?end_tmux=1")
+        response = self.client.delete(f"/api/sessions/{second}?end_tmux=1&tmux_session=two")
         self.assertTrue(response.get_json()["tmux_ended"])
         self.assertEqual(transports[second][1].commands, ["tmux kill-session -t '=two'"])
         # Killed before the transport was closed.
         transports[second][0].close.assert_called()
+
+    def test_ending_a_session_the_pane_no_longer_holds_closes_nothing(self):
+        """The person confirmed ending one session; the pane was switched to
+        another from a second window without its id changing. The close is
+        refused whole, so the replacement session is neither ended nor
+        reserved, and the pane stays open."""
+        self._enable()
+        pane = self._launch({"tmux_session": "confirmed"}).get_json()["sessions"][0]
+        session_id = pane["session_id"]
+        client, transport = fake_client()
+        api.ssh_connections[session_id] = {
+            "kind": "ssh", "client": client, "tmux_session": "replacement",
+        }
+        api.session_manager.get_session(session_id).tmux_session = "replacement"
+
+        response = self.client.delete(
+            f"/api/sessions/{session_id}?end_tmux=1&tmux_session=confirmed"
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertTrue(response.get_json()["tmux_changed"])
+        self.assertIn("Nothing was closed", response.get_json()["error"])
+        self.assertIsNotNone(api.session_manager.get_session(session_id))
+        self.assertIn(session_id, api.ssh_connections)
+        self.assertEqual(transport.commands, [])
+        client.close.assert_not_called()
+        self.assertEqual(web_workspaces._closing_tmux_sessions, {})
+
+    def test_ending_a_session_needs_its_name(self):
+        self._enable()
+        pane = self._launch({"tmux_session": "work"}).get_json()["sessions"][0]
+        client, transport = fake_client()
+        api.ssh_connections[pane["session_id"]] = {
+            "kind": "ssh", "client": client, "tmux_session": "work",
+        }
+        for query in ("?end_tmux=1", "?end_tmux=1&tmux_session=", "?end_tmux=1&tmux_session=bad%20name"):
+            with self.subTest(query=query):
+                response = self.client.delete(f"/api/sessions/{pane['session_id']}{query}")
+                self.assertEqual(response.status_code, 400)
+        self.assertIsNotNone(api.session_manager.get_session(pane["session_id"]))
+        self.assertEqual(transport.commands, [])
+
+    def test_a_switch_after_the_close_check_never_ends_the_replacement(self):
+        """The pane record still named the confirmed session at close, but the
+        live connection had already moved on: only the confirmed session may
+        be ended, so nothing is killed and the reply says so."""
+        self._enable()
+        pane = self._launch({"tmux_session": "confirmed"}).get_json()["sessions"][0]
+        client, transport = fake_client()
+        api.ssh_connections[pane["session_id"]] = {
+            "kind": "ssh", "client": client, "tmux_session": "replacement",
+        }
+        response = self.client.delete(
+            f"/api/sessions/{pane['session_id']}?end_tmux=1&tmux_session=confirmed"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.get_json()["tmux_ended"])
+        self.assertEqual(transport.commands, [])
+        self.assertNotIn(pane["session_id"], api.ssh_connections)
+        client.close.assert_called()
 
     def test_an_omitted_user_names_the_same_session_as_root(self):
         self._enable()
@@ -1755,7 +1917,7 @@ process.stdout.write(JSON.stringify({
         api.ssh_connections[pane["session_id"]] = {
             "kind": "ssh", "client": client, "tmux_session": "one",
         }
-        response = self.client.delete(f"/api/sessions/{pane['session_id']}?end_tmux=1")
+        response = self.client.delete(f"/api/sessions/{pane['session_id']}?end_tmux=1&tmux_session=one")
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.get_json()["tmux_ended"])
         self.assertNotIn(pane["session_id"], api.ssh_connections)
@@ -1789,7 +1951,7 @@ process.stdout.write(JSON.stringify({
                     try:
                         with api.app.test_client() as closing_client:
                             responses.append(closing_client.delete(
-                                f"/api/sessions/{pane['session_id']}?end_tmux=1"
+                                f"/api/sessions/{pane['session_id']}?end_tmux=1&tmux_session={name}"
                             ))
                     except Exception as exc:
                         failures.append(exc)
@@ -1857,7 +2019,8 @@ class CloseDialogTestCase(unittest.TestCase):
         function openGenericConfirmModal() {
             return new Promise(resolve => { resolveDialog = resolve; });
         }
-        function genericConfirmCheckboxChecked() { return true; }
+        let endChecked = true;
+        function genericConfirmCheckboxChecked() { return endChecked; }
         function previewTerminalClose(index) {
             return { sessionId: sessionIds[index], groupId: 'g', snapshot: {}, closeLastPane: false };
         }
@@ -1875,17 +2038,24 @@ class CloseDialogTestCase(unittest.TestCase):
         function updateAllSplitButtonStates() {}
     """
 
-    def _run(self, swap: bool):
+    def _run(self, swap: bool = False, switch: str = "", end: bool = True):
         source = (ROOT / "web/static/js/terminals.js").read_text(encoding="utf-8")
         begin = source.index("    async function closeTerminalPane(")
         body = source[begin:source.index("    /* What a split is about to extend", begin)]
         driver = f"""
             (async () => {{
+                endChecked = {json.dumps(end)};
                 const closing = closeTerminalPane(0);
                 await new Promise(resolve => setTimeout(resolve, 0));
                 if ({'true' if swap else 'false'}) {{
                     sessionIds = ['pane-B'];
                     terminals = [{{ _session: {{ session_id: 'pane-B', mode: 'ssh' }} }}];
+                }}
+                const switchTo = {json.dumps(switch)};
+                if (switchTo) {{
+                    /* Another window moved this same pane to another session:
+                       the pane id is unchanged, only its tmux name moved. */
+                    terminals[0]._session = {{ ...terminals[0]._session, tmux_session: switchTo }};
                 }}
                 resolveDialog(true);
                 await closing;
@@ -1904,7 +2074,23 @@ class CloseDialogTestCase(unittest.TestCase):
         return json.loads(completed.stdout)
 
     def test_the_answer_ends_the_session_of_the_pane_it_was_asked_about(self):
-        self.assertEqual(self._run(swap=False)["fetched"], ["/api/sessions/pane-A?end_tmux=1"])
+        # The request names the session the person confirmed, so the server
+        # can refuse a switch that lands after this page last looked.
+        self.assertEqual(
+            self._run()["fetched"], ["/api/sessions/pane-A?end_tmux=1&tmux_session=work"]
+        )
+
+    def test_a_tmux_switch_under_the_dialog_ends_nothing(self):
+        outcome = self._run(switch="other-session")
+        self.assertEqual(outcome["fetched"], [])
+        self.assertTrue(any("Nothing was closed" in toast for toast in outcome["toasts"]))
+
+    def test_a_tmux_switch_under_the_dialog_still_detaches_when_not_ending(self):
+        # Closing without ending detaches whatever the pane holds; no session
+        # is ended, so the switch does not need to stop it.
+        outcome = self._run(switch="other-session", end=False)
+        self.assertEqual(outcome["fetched"], ["/api/sessions/pane-A"])
+        self.assertEqual(outcome["toasts"], [])
 
     def test_a_pane_swapped_in_under_the_dialog_is_not_closed(self):
         outcome = self._run(swap=True)

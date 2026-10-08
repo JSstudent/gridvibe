@@ -326,6 +326,7 @@ from web.session_shell import (  # noqa: F401 - re-exported for backwards compat
     apply_pane_shell_change,
 )
 from web.ssh_tmux import generate_session_name as generate_tmux_session_name
+from web.ssh_tmux import normalize_session_name as normalize_tmux_session_name
 from web.ssh_tmux import tmux_sessions_enabled
 from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatibility
     _MAX_TRACKED_SOCKET_CLIENTS,
@@ -4490,9 +4491,32 @@ def close_session(session_id: str):
     that keeps the snapshot restorable.
     """
     end_tmux = _truthy_query_flag(request.args.get("end_tmux"))
-    with reserve_tmux_close(session_id, end_tmux=end_tmux):
+    # Ending a session is consent about one named session, so the request
+    # names it. A pane that no longer holds that name -- switched to another
+    # session from another window while the dialog was open -- is not closed
+    # at all, and its replacement session is never ended.
+    end_tmux_name = ""
+    if end_tmux:
+        end_tmux_name = normalize_tmux_session_name(request.args.get("tmux_session"))
+        if not end_tmux_name:
+            return jsonify({
+                "error": "Ending a tmux session needs the name of the session to end. Nothing was closed."
+            }), 400
+    with reserve_tmux_close(session_id, tmux_name=end_tmux_name):
         with session_manager.lock:
             existing_session = session_manager.sessions.get(session_id)
+            if (
+                end_tmux_name
+                and existing_session is not None
+                and str(getattr(existing_session, "tmux_session", "") or "") != end_tmux_name
+            ):
+                return jsonify({
+                    "error": (
+                        f"This pane is no longer in tmux session {end_tmux_name}. "
+                        "Nothing was closed."
+                    ),
+                    "tmux_changed": True,
+                }), 409
             group = (
                 session_manager.groups.get(existing_session.group_id)
                 if existing_session is not None
@@ -4526,9 +4550,9 @@ def close_session(session_id: str):
         # the host. Only the close dialog's "Also end the tmux session" ends it,
         # before the transport closes, and never on any other close.
         tmux_ended = False
-        if end_tmux:
+        if end_tmux_name:
             try:
-                tmux_ended = _end_tmux_session(session_id)
+                tmux_ended = _end_tmux_session(session_id, end_tmux_name)
             except Exception:
                 # The pane is already gone from the manager, so its transport is
                 # closed below whatever happened here; the reply says it failed.

@@ -171,6 +171,14 @@
         );
     }
 
+    /* Whether this record's pane runs inside tmux, read the way the menu
+       reads it: a name the gate has switched off connects as a plain shell.
+       The name is read first, so a record without one never consults the
+       gate at all. */
+    function paneRunsInTmux(session) {
+        return Boolean(session?.tmux_session) && paneSupportsTmuxSwitch(session);
+    }
+
     /* One predicate behind the button's affordance and its menu: a pane with
        neither dimension to offer keeps the plain one-click reset. */
     function paneHasResetMenu(session) {
@@ -741,8 +749,7 @@
             }
             /* The Plain shell / tmux pair moves the pane in or out of tmux; a
                press that leaves it where it is relaunches like any row. */
-            const session = terminals[index]?._session;
-            const inTmux = paneSupportsTmuxSwitch(session) && Boolean(session.tmux_session);
+            const inTmux = paneRunsInTmux(terminals[index]?._session);
             if (event.target.closest('[data-pane-shell-tmux]')) {
                 if (inTmux) {
                     relaunchSessionShell(index, { agent: '' });
@@ -996,7 +1003,10 @@
 
             pane._session = data;
 
-            if (!agent) {
+            /* Judged by the successor the route answered with, not by the row:
+               a plain shell inside tmux is a new tmux window, and tmux redraws
+               its own modes on attach as a new agent does. */
+            if (!agent && !paneRunsInTmux(data)) {
                 resetSuccessorMouseReporting(pane, sessionId);
             }
 

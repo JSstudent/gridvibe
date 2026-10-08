@@ -1162,16 +1162,20 @@ def settle_fresh_tmux_name(session_id: str, expected_session: Any, name: str) ->
 
 
 @contextmanager
-def reserve_tmux_close(session_id: str, *, end_tmux: bool) -> Iterator[None]:
+def reserve_tmux_close(session_id: str, *, tmux_name: str) -> Iterator[None]:
     """Keep a closing pane's tmux identity claimed until its kill finishes.
 
-    Register before removing the pane, under the same claim as launch
-    admission. The reservation outlives the pane record; no shared lock is
-    held while the close performs SSH I/O. Counts also cover overlapping
-    closes, including one that finds the pane already removed.
+    ``tmux_name`` is the session the close was confirmed for; ``""`` ends
+    none and reserves nothing. Only a pane still holding that name is
+    reserved, so a pane switched to another session under the dialog never
+    claims the replacement. Register before removing the pane, under the
+    same claim as launch admission. The reservation outlives the pane
+    record; no shared lock is held while the close performs SSH I/O. Counts
+    also cover overlapping closes, including one that finds the pane already
+    removed.
     """
     key = None
-    if end_tmux:
+    if tmux_name:
         with _tmux_claim_lock:
             session_manager = _manager()
             with session_manager.lock:
@@ -1179,7 +1183,7 @@ def reserve_tmux_close(session_id: str, *, end_tmux: bool) -> Iterator[None]:
                 if (
                     session is not None
                     and session.mode == "ssh"
-                    and getattr(session, "tmux_session", "")
+                    and getattr(session, "tmux_session", "") == tmux_name
                 ):
                     key = session_key(
                         session.host, session.port, session.username, session.tmux_session

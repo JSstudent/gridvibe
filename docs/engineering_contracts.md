@@ -624,8 +624,9 @@ changing any field that survives restart; it owns the complete save/restore flow
   front of the request. It is owed to the pane and not to the slot, so the
   captured target flushes that pane's own queue first and follows it across a
   slot change. It is skipped when the relaunch starts a **new agent**, whose
-  connector has already started and which owns its own mouse mode, and a
-  *refused* relaunch writes none at all — that pane is still running the TUI
+  connector has already started and which owns its own mouse mode, or when the
+  successor still runs **inside tmux**, which redraws its own modes on attach;
+  a *refused* relaunch writes none at all — that pane is still running the TUI
   that armed it. Until this, only the Reset view button undid the state
   GridVibe's own transition had created.
 - **Every terminal/agent→Files switch derives a fresh root from where the pane
@@ -1932,7 +1933,13 @@ pane; whatever runs inside it keeps running because tmux keeps it running.
   `[ -d ]` check, and types the launch line there. The session and its other
   windows are never ended for a relaunch. A failed `new-window` puts the pane
   in ERROR even without a startup command, and the still-current connection
-  returns the request for Retry to open a window at the same directory.
+  returns the request for Retry to open a window at the same directory. A
+  connection that created the session and then failed before its startup
+  sequence ran (an attach that was never acknowledged) typed nothing, and its
+  create settled the name, so Retry would only attach. While it is still the
+  pane's connection and the pane still holds the name, it owes Retry a window
+  at the launch directory for a pane with a launch line
+  (`_owe_created_tmux_launch()`), unless a relaunch's window is already owed.
 - **The reset menu's tmux switch is a relaunch that always ends in a plain
   shell.** The "Plain shell" row and the tmux button beside it move a live SSH
   terminal or agent pane in or out of tmux (`apply_pane_tmux_change()`, `POST
@@ -1949,14 +1956,23 @@ pane; whatever runs inside it keeps running because tmux keeps it running.
 - **Mouse reporting follows the direction of the switch.** Leaving tmux for a
   plain shell clears the mouse reporting the old process left armed, as a
   plain-shell relaunch does (see [Pane transitions](#pane-transitions)); entering
-  tmux leaves terminal modes to tmux.
+  tmux leaves terminal modes to tmux. A plain-shell relaunch that stays in tmux
+  (the checked tmux button, or a tmux agent retired to a shell) is a new tmux
+  window, so it writes no teardown either. The page decides from the record
+  the route answered with, gate included, never from the row pressed.
 - **Close detaches unless the person asks.** The pane close dialog offers
   "Also end the tmux session"; only that sends `DELETE
-  /api/sessions/<id>?end_tmux=1`, which retires the live connection from its
-  reader, runs `kill-session` on its client and then closes the transport,
-  reporting `tmux_ended`. Retiring first keeps the attach stream that the kill
-  ends from closing the client before the kill's exit status arrives. The client re-checks that the pane it asked about is still the
-  one in that slot. Workspace close and quit only detach.
+  /api/sessions/<id>?end_tmux=1&tmux_session=<name>`, naming the session the
+  dialog asked about. The page refuses before sending if that pane left its
+  slot or now holds another session (a switch from another window keeps the
+  pane id). The route refuses an end without a valid name (400) and, under the
+  close transaction, a pane that no longer holds that name (409, nothing
+  closed, `tmux_changed`), and reserves only the named session. It then retires
+  the live connection from its reader, runs `kill-session` on its client only
+  if that connection is attached to the named session, and then closes the
+  transport, reporting `tmux_ended`. Retiring first keeps the attach stream that
+  the kill ends from closing the client before the kill's exit status arrives.
+  Workspace close and quit only detach.
 - **Restore brings back the session, nothing else.** With the gate on, a tmux
   pane's snapshot is `_tmux_pane_snapshot()`: host, port, user, title, name and
   the launch directory in both directory slots, every other field a plain

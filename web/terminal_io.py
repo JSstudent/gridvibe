@@ -3048,12 +3048,15 @@ def _tmux_startup_target(
     return ssh_tmux.session_target(tmux_name), unreachable, ""
 
 
-def _end_tmux_session(session_id: str) -> bool:
-    """End the tmux session the pane's live connection is attached to.
+def _end_tmux_session(session_id: str, tmux_name: str) -> bool:
+    """End ``tmux_name`` if the pane's live connection is attached to it.
 
     Asked only by a close the person chose "Also end the tmux session" on, and
-    run before the transport closes. Follows the live connection, not the
-    setting, so a session still attached can always be ended.
+    run before the transport closes. ``tmux_name`` is the session that choice
+    was made about: a connection attached to any other session is never
+    ended, so a replacement the pane switched to cannot be killed in its
+    place. Follows the live connection, not the setting, so a session still
+    attached can always be ended.
 
     The connection is retired before the kill is sent. Ending the session ends
     the attach stream, and a reader still owning the connection would close
@@ -3063,8 +3066,7 @@ def _end_tmux_session(session_id: str) -> bool:
         connection = ssh_connections.get(session_id)
     if not connection:
         return False
-    tmux_name = str(connection.get("tmux_session") or "")
-    if not tmux_name:
+    if not tmux_name or str(connection.get("tmux_session") or "") != tmux_name:
         return False
     with _connection_gate(connection):
         with connection_lock:
@@ -3935,6 +3937,35 @@ def _prepare_tmux_session(
     )
 
 
+def _owe_created_tmux_launch(
+    session_id: str, connection: Dict[str, Any], session: Any,
+    tmux_name: str, launch_directory: str,
+) -> None:
+    """Owe Retry a window for a launch this failed connection never typed.
+
+    This connection created the pane's tmux session, which settled its name,
+    and then failed before its startup sequence ran. Retry finds the session
+    there and attaches, and an attach types nothing, so without this the
+    pane's agent or startup command would never start. The session is the
+    one this pane just created, so Retry opens a new window in it at the
+    launch directory and types the line there, as a relaunch does.
+
+    Only while the connection is still the pane's and the pane still holds
+    the name: a close, relaunch or switch since then owns what comes next.
+    One intent per pane, taken once by the connection that reaches it; one
+    already owed keeps its own directory.
+    """
+    if not str(getattr(session, "initial_command", "") or "").strip():
+        return
+    with _connection_gate(connection):
+        with connection_lock:
+            if not _ssh_connection_is_live(session_id, connection):
+                return
+            if str(getattr(session, "tmux_session", "") or "") != tmux_name:
+                return
+            ssh_tmux.keep_new_window(session_id, launch_directory)
+
+
 def _connect_ssh_session(session_id: str, session: Any):
     """Establish an SSH connection for a single terminal session."""
     connection = _begin_connection(session_id)
@@ -3958,6 +3989,9 @@ def _connect_ssh_session(session_id: str, session: Any):
     _connection_status(session_id, connection, SessionStatus.CONNECTING)
 
     client = None
+    tmux_state = ""
+    launch_directory = ""
+    startup_begun = False
     # One captured generation for both SSH settings, taken before the slow
     # open rather than around it: `connect()` can sit here for the length of
     # the timeout it was handed, and an App Settings refresh landing inside
@@ -4002,7 +4036,6 @@ def _connect_ssh_session(session_id: str, session: Any):
         # before any resize could arrive, so the first frame it draws has to
         # be drawn at the right width.
         pty_cols, pty_rows = _terminal_size_for(session_id)
-        tmux_state = ""
         if tmux_name:
             launch_directory = str(
                 getattr(session, "launch_directory", "")
@@ -4075,10 +4108,17 @@ def _connect_ssh_session(session_id: str, session: Any):
         # is already open and is never torn down for it.
         _establish_mcp_tunnel(session_id, session, connection, client)
 
+        startup_begun = True
         _run_startup_sequence(connection, session)
         _stream_ssh_output(session_id, connection)
     except (paramiko.SSHException, OSError, socket.error, ssh_tmux.TmuxError) as e:
         logger.error(f"Failed to connect SSH session {session_id}: {e}")
+        if not startup_begun and tmux_state in (
+            ssh_tmux.TMUX_CREATED, ssh_tmux.TMUX_CREATED_HOME
+        ):
+            _owe_created_tmux_launch(
+                session_id, connection, session, tmux_name, launch_directory
+            )
         _connection_status(
             session_id, connection,
             SessionStatus.ERROR,
