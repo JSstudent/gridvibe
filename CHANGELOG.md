@@ -4,6 +4,8 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+## 1.16.0 - 2026-10-13
+
 - **(doc) The README is a shorter feature tour and gives tmux-backed SSH panes their own section.** The README had grown into a near-specification: feature sections walked through fallbacks, degraded cases and ownership rules that already live in the contracts, and the tmux option appeared only as two bullets under Sessions & Workspaces, without the pane menu's tmux switch. Every section is now a short bullet list of what the feature does, the MCP tool table gives way to a summary that links to [the sidecar reference](gridvibe_mcp/README.md), and **SSH Sessions in tmux** covers launching, switching a live pane, restore, relaunch, close and splits. The rules stay in [SSH tmux sessions](docs/engineering_contracts.md#ssh-tmux-sessions); the keyboard shortcut table is unchanged.
 
 - **(fix) Ending a tmux session only ends the session the person confirmed, Retry after a failed tmux attach still starts its agent, and a shell relaunch inside tmux keeps tmux's mouse input.** The close dialog's "Also end the tmux session" was checked only against the pane id, so a pane switched to another tmux session from a second window while the dialog was open had that replacement session ended. The close request now names the confirmed session: the page refuses before sending if the pane holds another one, and the server refuses the whole close (nothing closed) and only ever kills the named session the live connection is attached to.
