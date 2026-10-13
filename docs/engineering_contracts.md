@@ -1579,10 +1579,14 @@ unless the task explicitly changes this contract.
   (`compose_dashboard()`, the one place that decides it): a pane that closes,
   or stops being an agent pane, takes its links out of the next reading, so
   the board, the sidebar wires, the chip and the header counts lose it
-  together and no surface draws a ghost of it. An agent that exits while its
-  pane stays an agent pane keeps its row, and so its `ended` link. Restored
-  history (the next bullet) is the one kind that outlives the process, and this
-  same filter shows it only between agent rows that are open now.
+  together and no surface draws a ghost of it. **Links belong to agent runs,
+  not reusable pane ids.** Closing a transport, retiring an agent at its shell,
+  or promoting its replacement removes the run's links from both stores.
+  `ResultStore.retire_session()` drops the retired requester's assignments and
+  removes the retired worker's links while preserving its reports and end
+  reasons for the original requester to collect. Restarting either agent in
+  the same pane cannot revive the crew. A follow-up to the same running agent
+  retains its links and advances its round as before.
 - **Crew links survive a restart as history, and only as history.** Every
   runtime-state capture (autosave, explicit save, voluntary exit) writes the
   slot's `crew_links` from one read of the live links and the held history,
@@ -1607,8 +1611,10 @@ unless the task explicitly changes this contract.
   keeping only links between two panes that are still live (panes moved to
   another workspace). `build_dashboard_snapshot()` publishes history first and
   live links after, and drops a pair's history once a live link for it exists,
-  so the live round is the newest. Closing a pane drops history naming it,
-  beside `agent_results.forget_session`. The feature is always on, with no
+  so the live round is the newest. Closing or retiring either restored agent
+  drops history naming its pane, including relaunches that keep the pane id.
+  The next capture therefore cannot restore those retired links again.
+  The feature is always on, with no
   setting. A restored reported link's hover says it reported before GridVibe
   restarted and that the report was not kept.
 - **A round counts tasks handed to the same running agent.** A task that

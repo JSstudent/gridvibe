@@ -7,6 +7,9 @@ from unittest.mock import MagicMock, patch
 
 from sessions.manager import SessionStatus
 from web import terminal_io as terminal
+from web.agent_handoffs import HandoffStore
+from web.agent_results import ResultStore
+from web.crew_history import CrewHistory
 
 
 class TerminalTransportTestCase(unittest.TestCase):
@@ -141,6 +144,40 @@ class TerminalTransportTestCase(unittest.TestCase):
         terminal._close_ssh_connection('pane')
         self.assertFalse(terminal._connection_is_current('pane', second))
         self.session_manager.update_session_status.assert_not_called()
+
+    def test_replacing_a_transport_clears_its_crew_but_keeps_an_unannounced_task(self):
+        results = ResultStore()
+        handoffs = HandoffStore(results=results)
+        history = CrewHistory()
+        results.expect("old-task", requester_session_id="old-caller", worker_session_id="pane")
+        results.end("old-task", "agent exited")
+        results.expect("child-task", requester_session_id="pane", worker_session_id="child")
+        incoming = handoffs.create("New task.", source_session_id="new-caller", session_id="pane")
+        self.registry["pane"] = {"kind": "local"}
+
+        with patch.object(terminal, "agent_results", results), \
+                patch.object(terminal, "agent_handoffs", handoffs), \
+                patch.object(terminal, "crew_history", history):
+            replacement = terminal._begin_connection("pane")
+
+        self.assertIs(self.registry["pane"], replacement)
+        self.assertEqual(handoffs.pending_for("pane").handoff_id, incoming)
+        self.assertEqual(results.state_for(incoming), "working")
+        self.assertEqual([link["requester_session_id"] for link in results.links_snapshot()], ["new-caller"])
+        self.assertIsNone(results.state_for("child-task"))
+
+    def test_retired_transport_cannot_clear_a_replacements_crew(self):
+        results = ResultStore()
+        results.expect("new-task", requester_session_id="caller", worker_session_id="pane")
+        old = {"kind": "local", "retired": True}
+        self.registry["pane"] = {"kind": "local"}
+
+        with patch.object(terminal, "agent_results", results):
+            terminal._forget_agent_crew("pane", "agent exited", expected=old)
+            terminal._close_ssh_connection("pane", expected=old)
+
+        self.assertEqual(len(results.links_snapshot()), 1)
+        self.assertEqual(results.state_for("new-task"), "working")
 
     def test_replacement_waits_for_own_publication_without_blocking_other_panes(self):
         entered, proceed, replaced = threading.Event(), threading.Event(), threading.Event()
