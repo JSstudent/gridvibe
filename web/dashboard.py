@@ -332,11 +332,9 @@ def compose_dashboard(
         # agents that are open now. A pane that closes (or stops being an agent
         # pane) takes its links out of the reading, so the board, the sidebar's
         # wires, the chip and the header counts all lose it together and no
-        # surface keeps a ghost of it. An agent that exits while its pane stays
-        # an agent pane keeps its row, and so its ``ended`` link. Links restored
-        # after a restart (``web/crew_history.py``) are the one kind that
-        # outlives the process, and this same filter shows them only between
-        # agent rows that are open now.
+        # surface keeps a ghost of it. Retirement also removes links from their
+        # stores, so reusing a pane id cannot bring an old crew back. Restored
+        # history is published until either of its restored agent runs retires.
         "links": [
             dict(link)
             for link in links or ()

@@ -367,11 +367,17 @@ def _close_ssh_connection(session_id: str, clear_buffer: bool = True, *, expecte
             with connection_lock:
                 if ssh_connections.get(session_id) is not connection:
                     return
-                ssh_connections.pop(session_id, None)
                 connection['retired'] = True
+            # Retire links before releasing the pane to another connector.
+            # The connection gate keeps a replacement from inheriting them.
+            _forget_agent_crew(session_id, "connection closed", expected=connection)
+            with connection_lock:
+                ssh_connections.pop(session_id, None)
                 if clear_buffer:
                     session_output_buffers.pop(session_id, None)
         _shutdown_connection(connection)
+    else:
+        _forget_agent_crew(session_id, "connection closed")
     # The token minted for this pane's tunnel dies with the transport that
     # carried it, and this is the only place that ends it. Withdrawing the
     # remote listener is not enough: `/mcp/<token>` is reachable from any
@@ -388,12 +394,6 @@ def _close_ssh_connection(session_id: str, clear_buffer: bool = True, *, expecte
         # And a task still waiting for this pane's agent goes with the pane:
         # there is no connection left that could ever announce it.
         agent_handoffs.forget_session(session_id)
-        # Reports this pane's agent was waiting for go too -- nobody is left
-        # to collect them -- while a report this pane made stays with the
-        # agent that asked for it.
-        agent_results.forget_session(session_id)
-        # Restored crew history follows the same close rule as live links.
-        crew_history.forget_session(session_id)
         ssh_tmux.forget_session(session_id)
     _evict_pooled_ssh_client(session_id)
 
@@ -1098,6 +1098,7 @@ def _reconcile_one_pane_agent(
         return False
     # Whatever this agent is, it was not handed the task of the one before it.
     _retire_agent_handoff(connection, "agent replaced")
+    _forget_agent_crew(session_id, "agent replaced", expected=connection)
     # Everything the pane announced before this belongs to whatever it was
     # doing, and the agent that is running has not been read as one until now.
     connection["agent_title_floor"] = 0.0
@@ -1309,6 +1310,7 @@ def _promote_pending_agent_relaunch(
     _cancel_conversation_resolver(session_id)
     _forget_agent_conversation(connection)
     _retire_agent_handoff(connection, "agent replaced")
+    _forget_agent_crew(session_id, "agent replaced", expected=connection)
     # The retargeting happened when the reader submitted the line, not now, so
     # a title this agent has already announced is its own and has to survive.
     # This is the one floor raised *before* the titles it must not mask, so a
@@ -3131,6 +3133,14 @@ def _begin_connection(session_id):
                 if ssh_connections.get(session_id) is not old:
                     continue
                 old['retired'] = True
+            # A bound task not yet announced belongs to the incoming agent;
+            # the outgoing run's crew does not survive transport replacement.
+            pending = agent_handoffs.pending_for(session_id)
+            _forget_agent_crew(
+                session_id, "connection closed", expected=old,
+                keep_handoff_id=pending.handoff_id if pending is not None else "",
+            )
+            with connection_lock:
                 ssh_connections[session_id] = connection
                 break
     _shutdown_connection(old)
@@ -3658,6 +3668,7 @@ def _track_current_terminal_agent_input(
         if updated:
             # A task this connection held was its previous agent's.
             _retire_agent_handoff(connection, "agent replaced")
+            _forget_agent_crew(session_id, "agent replaced", expected=connection)
             logger.info(
                 "Detected runtime agent command for session %s: %s",
                 session_id,
@@ -3722,11 +3733,11 @@ def _retire_agent_runtime(
     """The connection-side half of an agent's exit: its watch, name, title and task.
 
     Called with no lock held. ``connection`` is the pane's current connection,
-    or ``None`` when it has none, in which case only the conversation lookup
-    is cancelled.
+    or ``None`` when it has none. Crew links retire in either case.
     """
     _cancel_conversation_resolver(session_id)
     if connection is None:
+        _forget_agent_crew(session_id, handoff_reason)
         return
     _disarm_agent_runtime(connection)
     connection["agent_title_floor"] = time.time()
@@ -3750,6 +3761,22 @@ def _retire_agent_runtime(
     # Nor does its task: an agent started here next, by hand, must not
     # read it, report on it or be handed its follow-ups.
     _retire_agent_handoff(connection, handoff_reason)
+    _forget_agent_crew(session_id, handoff_reason, expected=connection)
+
+
+def _forget_agent_crew(
+    session_id: str, reason: str, *, expected=None, keep_handoff_id: str = "",
+) -> None:
+    """A crew belongs to an agent run, never to a reusable pane id."""
+    if expected is not None:
+        with _connection_gate(expected):
+            if not _connection_is_current(session_id, expected):
+                return
+            agent_results.retire_session(session_id, reason, keep_handoff_id=keep_handoff_id)
+            crew_history.forget_session(session_id)
+    else:
+        agent_results.retire_session(session_id, reason, keep_handoff_id=keep_handoff_id)
+        crew_history.forget_session(session_id)
 
 
 def _resolve_wsl_distribution(session: Any) -> str:
