@@ -786,8 +786,37 @@ class LinksSnapshotTestCase(unittest.TestCase):
 
         self.assertEqual(
             [link["reason"] for link in store.links_snapshot()],
-            ["undeliverable", "other", "pane closed"],
+            ["undeliverable", "other"],
         )
+
+    def test_retiring_a_worker_hides_all_rounds_but_keeps_its_report(self):
+        store = _store_with("worker-a", "worker-b")
+        _report(store, "worker-a", "Original findings.")
+        store.end("h-worker-a", "replaced")
+        store.expect(
+            "h-next", requester_session_id=REQUESTER, worker_session_id="worker-a",
+            continues="h-worker-a",
+        )
+
+        store.retire_session("worker-a", "agent exited")
+
+        self.assertEqual([link["worker_session_id"] for link in store.links_snapshot()], ["worker-b"])
+        rows = store.collect(REQUESTER)["agents"]
+        self.assertEqual(rows[0]["result"], "Original findings.")
+        self.assertEqual((rows[-1]["state"], rows[-1]["reason"]),
+                         (ENDED, "its agent exited before it reported"))
+        self.assertIsNone(store.live_assignment("worker-a"))
+        store.expect("h-fresh", requester_session_id=REQUESTER, worker_session_id="worker-a")
+        self.assertEqual([link["round"] for link in store.links_snapshot()], [1, 1])
+
+    def test_retiring_a_requester_drops_its_old_crew(self):
+        store = _store_with("worker-a")
+
+        store.retire_session(REQUESTER, "agent replaced")
+
+        self.assertEqual(store.links_snapshot(), [])
+        self.assertEqual(store.collect(REQUESTER)["agents"], [])
+        self.assertIsNone(store.live_assignment("worker-a"))
 
     def test_an_uncollected_round_and_its_follow_up_are_both_listed(self):
         store = _store_with("worker-a")

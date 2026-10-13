@@ -36,7 +36,7 @@ from gridvibe_mcp.server import dispatch, tool_specs  # noqa: E402
 from tests.test_agent_result_routes import _ResultRouteCase  # noqa: E402
 from tests.test_mcp_client import StubOpener, client_for  # noqa: E402
 from tests.test_mcp_results import INSIDE_PANE, RefusingOpener, _query  # noqa: E402
-from web import agent_followups, api, mcp_http  # noqa: E402
+from web import agent_followups, api, crew_history, mcp_http  # noqa: E402
 from web import terminal_io as web_terminal_io  # noqa: E402
 from web.agent_handoffs import (  # noqa: E402
     FOLLOWUP_STALE_MESSAGE,
@@ -603,6 +603,8 @@ class AgentLifetimeTestCase(_FollowupRouteCase):
 
     def setUp(self):
         super().setUp()
+        crew_history.reset()
+        self.addCleanup(crew_history.reset)
         broadcast = patch.object(web_terminal_io, "_broadcast_session_status")
         broadcast.start()
         self.addCleanup(broadcast.stop)
@@ -632,6 +634,48 @@ class AgentLifetimeTestCase(_FollowupRouteCase):
         self.assertNotIn("handoff_id", connection)
         self.assertEqual(handoff_store.count(), 0)
         self.assertEqual(self._next(worker).get_json()["message"], NO_FOLLOWUP_MESSAGE)
+        self.assertEqual(self.client.get("/api/dashboard").get_json()["links"], [])
+
+    def test_a_requester_restarted_in_the_same_pane_does_not_inherit_its_crew(self):
+        caller, worker, _connection = self._reported_worker()
+
+        self.assertTrue(web_terminal_io._mark_runtime_agent_exited(caller.session_id, "shell prompt"))
+        api.session_manager.update_session_metadata(
+            caller.session_id, startup_mode="agent", agent_selection="claude"
+        )
+
+        self.assertEqual(self.client.get("/api/dashboard").get_json()["links"], [])
+        self.assertEqual(self._wait(caller.session_id).get_json()["agents"], [])
+        self.assertEqual(self._send(caller.session_id, worker).status_code, 403)
+
+    def test_a_worker_relaunched_from_the_menu_loses_live_and_restored_links(self):
+        caller, worker, _connection = self._reported_worker()
+        from tests.test_crew_history import make_link
+        crew_history.install("default", [make_link(caller.session_id, worker)])
+
+        with patch("web.agents._detect_agent_binary_cached", return_value={"found": True}), \
+                patch.object(api.socketio, "start_background_task"):
+            response = self.client.post(f"/api/sessions/{worker}/shell", json={"agent": "codex"})
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(api.session_manager.get_session(worker).startup_mode, "agent")
+        self.assertEqual(crew_history.snapshot(), [])
+        self.assertEqual(self.client.get("/api/dashboard").get_json()["links"], [])
+        self.assertEqual(self._wait(caller.session_id, include_collected="1").get_json()["agents"][0]["result"], "7")
+
+    def test_a_restored_link_goes_when_its_agent_exits(self):
+        caller = self._agent_pane()
+        worker = self._agent_pane()
+        from tests.test_crew_history import make_link
+        crew_history.install("default", [make_link(caller.session_id, worker.session_id)])
+
+        web_terminal_io._mark_runtime_agent_exited(worker.session_id, "shell prompt")
+        api.session_manager.update_session_metadata(
+            worker.session_id, startup_mode="agent", agent_selection="claude"
+        )
+
+        self.assertEqual(crew_history.snapshot(), [])
+        self.assertEqual(self.client.get("/api/dashboard").get_json()["links"], [])
 
     def test_an_agent_that_exits_before_reporting_reads_ended(self):
         caller = self._agent_pane()
@@ -667,6 +711,7 @@ class AgentLifetimeTestCase(_FollowupRouteCase):
         self.assertEqual(api.session_manager.get_session(worker).agent_selection, "codex")
         self.assertEqual(sent.status_code, 403)
         self.assertNotIn("handoff_id", connection)
+        self.assertEqual(self.client.get("/api/dashboard").get_json()["links"], [])
 
     def test_a_task_still_working_ends_with_the_swap_named(self):
         caller = self._agent_pane()

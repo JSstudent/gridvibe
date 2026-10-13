@@ -37,10 +37,10 @@ The lifecycle of one assignment:
   tools to read it. The reason is kept so the requester is told
   why rather than waiting for a report that cannot come.
 
-A report outlives the worker's pane, because a person may close a pane as soon
-as its agent says it is done. An assignment goes when its requester's pane
-closes -- nobody is left to collect it -- or when the store's ceiling evicts the
-oldest settled one.
+A report outlives the worker's agent run, because a person may close or relaunch
+a pane as soon as its agent says it is done. Its crew link ends with the run.
+An assignment goes when its requester retires -- nobody is left to collect it
+-- or when the store's ceiling evicts the oldest settled one.
 
 **Collected** is the requester's bookmark, not a state: a report returned by
 ``wait_for_results`` is not returned whole again unless it is asked for
@@ -320,6 +320,9 @@ class _Assignment:
     #: Separate from ``state`` because a reported assignment keeps its report
     #: after that -- it just stops taking new ones.
     accepting: bool = True
+    #: A retained report can be collected after its worker retires, but its
+    #: crew link must never describe the next agent running in that pane.
+    linked: bool = True
     #: Whether the worker has fetched this task. Until it has, whatever calls
     #: from the pane is not the agent the task was handed to.
     read: bool = False
@@ -666,11 +669,18 @@ class ResultStore:
     # ---------------- dropping ----------------
 
     def forget_session(self, session_id: str) -> int:
-        """A pane has gone.
+        """A pane has gone; its worker reports remain collectable."""
+        return self.retire_session(session_id, "pane closed")
+
+    def retire_session(self, session_id: str, reason: str, *, keep_handoff_id: str = "") -> int:
+        """An agent run has gone, even when its pane will be reused.
 
         As a requester, its assignments go: nobody is left to collect them.
-        As a worker, a pending assignment ends -- the handoff store has
-        normally ended it already, when the pane's connection closed.
+        As a worker, pending assignments end and reports stay collectable by
+        their original requester. Neither kind stays linked to the pane's
+        next agent. Handoff retirement normally supplies the end reason first.
+        A connector replacing a transport may preserve an unannounced handoff
+        that is still waiting for the incoming connection to deliver it.
         """
         resolved = str(session_id or "")
         if not resolved:
@@ -685,20 +695,22 @@ class ResultStore:
                 del self._records[handoff_id]
             self._wait_ended.pop(resolved, None)
             for record in self._records.values():
-                if record.worker_session_id != resolved:
+                if record.worker_session_id != resolved or record.handoff_id == keep_handoff_id:
                     continue
                 record.accepting = False
+                record.linked = False
                 if record.state == WORKING:
                     record.state = ENDED
-                    record.reason = _ENDED_REASONS["pane closed"]
-                    record.reason_key = "pane closed"
+                    record.reason = _ENDED_REASONS.get(reason, reason)
+                    record.reason_key = _reason_key(reason)
                     record.collected = False
             self._changed.notify_all()
         if doomed:
             logger.info(
-                "Handoff results dropped requester=%s count=%d reason=pane closed",
+                "Handoff results dropped requester=%s count=%d reason=%s",
                 resolved,
                 len(doomed),
+                reason,
             )
         return len(doomed)
 
@@ -733,7 +745,7 @@ class ResultStore:
             }
 
     def links_snapshot(self) -> List[Dict[str, Any]]:
-        """Every assignment as a dashboard link, oldest-handed first.
+        """Assignments still linked to their agent runs, oldest-handed first.
 
         Built from :data:`LINK_FIELDS` only: never the report text, the
         receipt or the handoff id. A requester and a worker can hold two at
@@ -742,7 +754,7 @@ class ResultStore:
         """
         with self._changed:
             records = sorted(self._records.values(), key=lambda record: record.created_mono)
-            return [_link(record) for record in records]
+            return [_link(record) for record in records if record.linked]
 
     def waiting_requesters(self, now: Optional[float] = None) -> FrozenSet[str]:
         """Requesters inside a ``wait_for_results`` call, or just out of one.
