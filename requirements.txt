@@ -18,7 +18,7 @@ cryptography>=50.0.2
 cffi>=2.1.1
 
 # Local Windows terminals (ConPTY; skipped on other platforms)
-pywinpty>=3.0.5; platform_system == "Windows"
+pywinpty>=3.1.0; platform_system == "Windows"
 
 # Voice service client
 websocket-client>=1.9.2
