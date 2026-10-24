@@ -1604,7 +1604,7 @@ class RemoteLaunchLineTestCase(unittest.TestCase):
                 self._pane("opencode"), remote_config_path=self.REMOTE, remote_url=self.URL
             )
 
-        self.assertEqual(command, f'env OPENCODE_CONFIG="{self.REMOTE}" opencode')
+        self.assertEqual(command, f'env OPENCODE_CONFIG="{self.REMOTE}" opencode --standalone')
 
     def test_opencode_with_no_tunnel_gets_no_prefix(self):
         self.assertEqual(

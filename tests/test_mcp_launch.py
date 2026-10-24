@@ -908,7 +908,7 @@ class FlagCompositionTestCase(unittest.TestCase):
 class OpencodePrefixCompositionTestCase(unittest.TestCase):
     """opencode is handed the sidecar by a variable set *ahead of* its binary.
 
-    It takes no config flag; it merges the file named by ``OPENCODE_CONFIG``
+    V2's private server merges the file named by ``OPENCODE_CONFIG``
     over the user's own config for one process. So the assignment is a prefix
     on the launch line, in the form each shell reads, and a path that prefix
     cannot carry -- or a document that is not there -- costs the tools and
@@ -943,13 +943,13 @@ class OpencodePrefixCompositionTestCase(unittest.TestCase):
     def test_cmd_sets_the_variable_then_runs_the_binary(self):
         self.assertEqual(
             self._compose(self._pane()),
-            f'set "OPENCODE_CONFIG={self.config_path}" & opencode',
+            f'set "OPENCODE_CONFIG={self.config_path}" & opencode --standalone',
         )
 
     def test_powershell_sets_the_variable_then_runs_the_binary(self):
         self.assertEqual(
             self._compose(self._pane(use_powershell=True)),
-            f'$env:OPENCODE_CONFIG="{self.config_path}"; opencode',
+            f'$env:OPENCODE_CONFIG="{self.config_path}"; opencode --standalone',
         )
 
     def test_a_wsl_pane_also_names_the_variable_in_wslenv(self):
@@ -957,13 +957,13 @@ class OpencodePrefixCompositionTestCase(unittest.TestCase):
         Linux-side variable crosses to it only when WSLENV names it."""
         self.assertEqual(
             self._compose(self._pane(use_wsl=True)),
-            f'env WSLENV="$WSLENV:OPENCODE_CONFIG" OPENCODE_CONFIG="{self.config_path}" opencode',
+            f'env WSLENV="$WSLENV:OPENCODE_CONFIG" OPENCODE_CONFIG="{self.config_path}" opencode --standalone',
         )
 
     def test_a_posix_host_scopes_the_variable_to_the_one_process(self):
         self.assertEqual(
             self._compose(self._pane(), os_name="posix"),
-            f'env OPENCODE_CONFIG="{self.config_path}" opencode',
+            f'env OPENCODE_CONFIG="{self.config_path}" opencode --standalone',
         )
 
     def test_a_pane_that_did_not_ask_gets_no_prefix(self):
@@ -976,6 +976,22 @@ class OpencodePrefixCompositionTestCase(unittest.TestCase):
     def test_the_suffix_never_carries_the_variable(self):
         """An assignment appended after the binary would be an argument to it."""
         self.assertEqual(web_agents._agent_mcp_command_fragment("opencode"), "")
+
+    def test_private_server_preserves_auto_mode_and_opening_prompt(self):
+        command = self._compose(
+            self._pane(agent_auto_mode=True), os_name="posix", opening_prompt=True
+        )
+        self.assertEqual(
+            command,
+            f'env OPENCODE_CONFIG="{self.config_path}" '
+            f'opencode --prompt "{HANDOFF_OPENING_PROMPT}" --auto --standalone',
+        )
+
+    def test_custom_command_is_not_rewritten(self):
+        command = "opencode --server http://127.0.0.1:4096"
+        self.assertEqual(
+            self._compose(self._pane(initial_command=command)), command
+        )
 
     def test_a_path_no_shell_can_quote_gets_no_prefix(self):
         for character in "$%`":
@@ -1006,9 +1022,9 @@ class OpencodePrefixCompositionTestCase(unittest.TestCase):
 
     def test_the_clear_and_the_update_go_in_front_of_the_prefix(self):
         for shell_kind, overrides, expected in (
-            ("cmd", {}, f'cls & opencode upgrade & set "OPENCODE_CONFIG={self.config_path}" & opencode'),
+            ("cmd", {}, f'cls & opencode upgrade & set "OPENCODE_CONFIG={self.config_path}" & opencode --standalone'),
             ("powershell", {"use_powershell": True},
-             f'Clear-Host; opencode upgrade; $env:OPENCODE_CONFIG="{self.config_path}"; opencode'),
+             f'Clear-Host; opencode upgrade; $env:OPENCODE_CONFIG="{self.config_path}"; opencode --standalone'),
         ):
             with self.subTest(shell=shell_kind):
                 pane = self._pane(**overrides)
@@ -1028,7 +1044,7 @@ class OpencodePrefixCompositionTestCase(unittest.TestCase):
         self.assertEqual(
             command,
             f'env OPENCODE_CONFIG="{self.config_path}" '
-            f'opencode --prompt "{HANDOFF_OPENING_PROMPT}"',
+            f'opencode --prompt "{HANDOFF_OPENING_PROMPT}" --standalone',
         )
         self.assertEqual(without_tools, "opencode")
 

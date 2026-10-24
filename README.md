@@ -90,7 +90,7 @@ Pick an agent per pane from the launcher's **Startup Mode** list. GridVibe check
 | Claude Code | `claude` | Yes | Yes |
 | OpenAI Codex CLI | `codex` | Yes | Yes |
 | GitHub Copilot CLI | `copilot` | Yes | Yes |
-| OpenCode CLI | `opencode` | Yes | Yes |
+| OpenCode CLI (v2) | `opencode` | Yes | Yes |
 | Kilo CLI | `kilo` | Yes | — |
 | Kimi Code CLI | `kimi` | Yes | — |
 | Grok Build (xAI) | `grok` | Yes | — |
