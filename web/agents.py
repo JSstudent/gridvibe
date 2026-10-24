@@ -830,6 +830,11 @@ def _compose_agent_startup_command(
             mcp_fragment_placed = True
         if env_prefix:
             mcp_fragment_placed = True
+            if agent_key == "opencode":
+                # V2 otherwise attaches to a shared service whose environment
+                # predates this pane. Its private server reads OPENCODE_CONFIG
+                # and the pane identity, converting the legacy JSON itself.
+                command += " --standalone"
     if (
         opening_prompt
         and mcp_fragment_placed

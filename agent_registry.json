@@ -191,7 +191,7 @@
         "install_options": [
           {
             "label": "WSL (recommended)",
-            "command": "wsl sh -lc \"npm install -g opencode-ai\"",
+            "command": "wsl sh -lc \"npm install -g @opencode/cli\"",
             "manual_only": true,
             "requires": [
               {
@@ -202,7 +202,7 @@
           },
           {
             "label": "npm fallback",
-            "command": "npm install -g opencode-ai",
+            "command": "npm install -g @opencode/cli",
             "manual_only": true,
             "requires": [
               {
@@ -220,7 +220,7 @@
         "install_options": [
           {
             "label": "npm",
-            "command": "npm install -g opencode-ai",
+            "command": "npm install -g @opencode/cli",
             "requires": [
               {
                 "kind": "command",
@@ -239,7 +239,7 @@
         "install_options": [
           {
             "label": "Manual remote install",
-            "command": "npm install -g opencode-ai",
+            "command": "npm install -g @opencode/cli",
             "manual_only": true
           }
         ]

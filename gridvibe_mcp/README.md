@@ -727,7 +727,7 @@ against the installed CLI's own `--help`, which is what `"verified": true` in
 | `claude` | `--mcp-config "<path>"` | `flag` template | positional, directly after the binary |
 | `copilot` | `--additional-mcp-config "@<path>"` — `@` marks a path rather than inline JSON, and it *augments* `~/.copilot/mcp-config.json` for the session | `flag` template | `-i "<sentence>"`, directly after the binary |
 | `codex` | `-c mcp_servers.gridvibe.…` overrides — it takes no config file at all | `style: inline_toml` | positional, directly after the binary |
-| `opencode` | an `OPENCODE_CONFIG="<path>"` prefix naming the generated `.gridvibe_opencode.json`, which opencode merges over the user's own config | `style: opencode_config` | `--prompt "<sentence>"`, directly after the binary |
+| `opencode` (v2) | `--standalone` with an `OPENCODE_CONFIG="<path>"` prefix naming the generated `.gridvibe_opencode.json`, which opencode merges over the user's own config | `style: opencode_config` | `--prompt "<sentence>"`, directly after the binary |
 
 The opening prompt is an `opening_prompt` block in `agent_registry.json`, held to
 the same `verified` bar; the other four CLIs publish none and cannot be handed a
@@ -755,6 +755,19 @@ thing a torn-apart argument cannot do. Which is also why nothing rendered into
 an override carries a space it does not need: the inline identity table is
 written without one so it keeps the bare form wherever it can.
 
+OpenCode v2 MCP launches use `--standalone`: each pane starts a private server
+that inherits its own config path and identity. The default shared background
+service keeps its original environment, so a new pane's `OPENCODE_CONFIG` never
+reaches it and a global HTTP entry can keep using a revoked pane token. This
+applies to local sidecars and SSH tunnels alike. Verified with v2.1.4; v1
+binaries do not support this launch flag.
+
+The generated document keeps the legacy MCP shape. V2 converts `mcp.gridvibe`
+to `mcp.servers.gridvibe` and the numeric timeout to startup, catalog and
+execution timeouts when loading it; no user config is rewritten. The local
+entry overrides a same-named global HTTP entry, while a higher-precedence
+project entry still wins.
+
 opencode takes no config flag. It reads one more config file, merged over the
 user's global config, from the path in `OPENCODE_CONFIG`. So the sidecar rides
 in as a variable typed **in front of** the binary, and the composer applies it
@@ -762,10 +775,10 @@ last, after the opening prompt is placed. The form depends on the shell:
 
 | Shell | Line |
 | --- | --- |
-| POSIX (SSH, non-Windows) | `env OPENCODE_CONFIG="<p>" opencode …` |
-| WSL pane | `env WSLENV="$WSLENV:OPENCODE_CONFIG" OPENCODE_CONFIG="<p>" opencode …` |
-| PowerShell | `$env:OPENCODE_CONFIG="<p>"; opencode …` |
-| cmd | `set "OPENCODE_CONFIG=<p>" & opencode …` |
+| POSIX (SSH, non-Windows) | `env OPENCODE_CONFIG="<p>" opencode --standalone …` |
+| WSL pane | `env WSLENV="$WSLENV:OPENCODE_CONFIG" OPENCODE_CONFIG="<p>" opencode --standalone …` |
+| PowerShell | `$env:OPENCODE_CONFIG="<p>"; opencode --standalone …` |
+| cmd | `set "OPENCODE_CONFIG=<p>" & opencode --standalone …` |
 
 `env` scopes the variable to one process in every login shell. A WSL pane's
 `opencode` is normally the Windows binary reached through interop, and a
@@ -784,11 +797,11 @@ Known limits of that route:
 - **A project `opencode.json` that defines its own `mcp.gridvibe` wins**,
   because project config ranks above `OPENCODE_CONFIG`.
 - **On PowerShell and cmd the variable outlives opencode** in that pane's shell,
-  so a hand-typed `opencode` there also gets the tools until the pane is
-  relaunched or closed.
-- **`--prompt` auto-submits only in the current TUI.** opencode's reworked TUI
-  v2, not yet its `latest` release, only prefills it. Re-verify the
-  `opening_prompt` block before trusting a newer opencode with a task.
+  so a hand-typed `opencode --standalone` there also gets the tools until the
+  pane is relaunched or closed.
+- **Opening-prompt submission depends on the TUI version.** Some v2 releases
+  only prefill `--prompt`. MCP connectivity does not prove a handed-over task
+  was submitted; re-verify the `opening_prompt` block for the installed TUI.
 
 `grok`, `hermes`, `kilo` and `kimi` publish nothing. Their only
 mechanism is an `<agent> mcp add` subcommand that edits the user's own config

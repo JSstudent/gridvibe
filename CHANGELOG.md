@@ -4,6 +4,8 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **(fix) OpenCode v2 panes connect to GridVibe MCP with their own identity.** MCP launches now use a private OpenCode server through `--standalone`, so the current pane's config and environment are loaded instead of the shared background service's stale token. The existing legacy MCP JSON is converted by OpenCode when loaded. Local and SSH launches follow the same rule; see the [MCP reference](gridvibe_mcp/README.md#which-clis-can-be-handed-the-sidecar).
+
 ## 1.16.0 - 2026-10-13
 
 - **(fix) Crew links clear when their agents exit or relaunch in the same panes.** Ended assignments and restored crew history stayed attached to pane ids, so starting agents again in those panes brought old crews back. Agent retirement now clears those links and the retired requester's assignments; a retired worker's report remains available to the original requester. Follow-ups to the same running agent keep their crew and rounds. The rule lives in [Agent dashboard](docs/engineering_contracts.md#agent-dashboard).
