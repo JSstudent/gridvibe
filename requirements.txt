@@ -7,7 +7,7 @@ Markdown>=3.10.3
 bleach>=6.4.0
 
 # SSH support
-paramiko>=5.0.0
+paramiko>=5.1.0
 
 # Socket.IO transport
 python-socketio>=5.17.0
